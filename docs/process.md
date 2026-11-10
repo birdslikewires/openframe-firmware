@@ -88,8 +88,10 @@ chip holds exactly the previous release, writes block 9 only, then reads the who
 
 ## 7. Flash (only with the owner's OK)
 
-The unit needs the `fh` module: build it there with `make -C fh` against the running kernel
-(openframe-linux images already include it), or point the scripts at a built copy with `FH_KO`.
+The unit needs the `fh` module. OpenFrame kernels built after 2026-11-10 include it; for an older
+kernel build it with `make -C fh` against that kernel, or point the scripts at a built copy with
+`FH_KO`. `fh` only reads unless it's loaded with `writable=1`, and even then refuses to change
+NVRAM or the boot block without `unprotect=1`; the flash script loads it with `writable=1` only.
 
 ```
 scp releases/of1-blw-<new>.bin tools/flash/flash-block9-<new>.sh tools/lockregs.py of@unit:/tmp/
