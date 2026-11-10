@@ -20,6 +20,7 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
 | 26.11.19 | SMBIOS corrections: wake-up type AC Power Restored, one power cord |
 | 26.11.20 | Serial number and UUID from the WLAN card's MAC; BlwLanMac.efi becomes BlwMac.efi |
 | 26.11.21 | SMBIOS Types 16/17: the memory array and device, size and speed found at boot |
+| 26.11.22 | Works around the MMC/SD driver's large-transfer bug: the shell can start a kernel from the internal memory |
 
 ## Releases (2026-11-08)
 
@@ -140,3 +141,26 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
   `DMI: Memory slots populated: 1/1` (was 0/0), `dmidecode -t memory`: 2 GB maximum, 512 MB, Row Of Chips, Onboard, DDR2,
   Synchronous, 533 MT/s; serial/UUID unchanged, BootCount 1625, MAC ok, 0x217, lock registers 01, NVRAM diff 14 bytes =
   MonotonicCounter only.
+- **26.11.22 (OF1)**, `of1-blw-26.11.22.bin` (md5 `3f74a745…`), block 9 only vs 26.11.21. BlwPlatformDxe also wraps the
+  **MMC/SD media driver's BlockIo** (`driver/mmc_fix.inc`). That driver (MmcMediaDevice `DD223EF8…`, stock in every OF1
+  build) splits a transfer into 512 KB chunks but works out each chunk's card address as the caller's LBA plus the
+  previous chunk's length, so from the third chunk on it re-reads (or re-writes) the second chunk's place. The FAT driver
+  reads a file in one call, so a kernel loaded from the internal memory came in corrupted past its first megabyte and
+  hung with no output (GRUB reads cluster by cluster, which is why it worked). The wrappers, matched to the driver by
+  its code (`mmc_sig.inc`), hand it one chunk at a time. A BlockIo protocol notify (CreateEvent + RegisterProtocolNotify,
+  registered only once the ReadyToBoot event exists, so the image is sure to stay loaded) wraps instances as the driver
+  installs them; ReadyToBoot wraps any already there. The app build leaves this to **BlwMmcFix.efi**, the same fix as a
+  shell app for firmware without it. `tools/emu_mmcfix.py` runs the firmware's own driver code (the bug: CMD18 at
+  0x100000, 0x180000, 0x180000…) and the wrapped one; `tools/emu_platform.py`: 52 scenarios (nine new), 26.11.21's
+  driver fails them, nine mutations caught. Before flashing, on the test unit: **MmcTest.efi** showed the repeated
+  chunks (Linux's reads of the same sectors matched only the piecewise ones), and after BlwMmcFix.efi the shell started
+  the internal memory's kernel through its EFI stub and the system came up from it. Flash script
+  `tools/flash/flash-block9-26.11.22.sh` (pre-check: chip blocks 1-15 = 26.11.21 `6e537024…`; after: `61ca1897…`;
+  block 9 `d1991708…`).
+  **Flashed 2026-11-10 ~21:20** from the internal memory's system (fh.ko built earlier for this kernel; lock registers
+  01): fh programmed + verified 0x90000, read-backs `28258f76…`, block 0 unchanged; dump
+  `firmware/efi-dumps/of1-testunit-20261110-26.11.22-postflash.bin`. Clean shutdown, cold boot from the stick: vendor
+  line, DMI 26.11.22, memory slots 1/1, 0x217, MAC ok (no BlwMac write), lock registers 01, NVRAM diff 14 bytes =
+  MonotonicCounter only; MmcTest.efi with no BlwMmcFix.efi: the internal memory's BlockIo already wrapped, one-call
+  reads right. Then with the stick removed and `fs0:vmlinuz … initrd=\initrd.img-…` in the internal memory's boot.nsh:
+  stub boot from the internal memory, 28.3 s plug-on to SSH (GRUB from there: 30.2-30.5 s).
