@@ -53,7 +53,34 @@ CARD3 = bytes.fromhex('4c5e0c112233')          # a replacement card from another
 GEN = bytes.fromhex('02a1b2c3d4e5')            # a LAN MAC of-netplan generated (no card)
 JUNK = bytes.fromhex('b8fcffffffff')
 BS_OK = {0x28: 'GetMemoryMap', 0x2c: 'AllocatePool', 0x30: 'FreePool', 0x6c: 'InstallConfigurationTable',
-         0xac: 'LocateProtocol', 0xb8: 'CalculateCrc32', 0xc4: 'CreateEventEx'}
+         0xac: 'LocateProtocol', 0xb8: 'CalculateCrc32', 0xc4: 'CreateEventEx', 0x34: 'CreateEvent',
+         0x44: 'CloseEvent', 0x58: 'HandleProtocol', 0x60: 'RegisterProtocolNotify', 0xa8: 'LocateHandleBuffer'}
+BLOCKIO = G('964e5b21-6459-11d2-8e39-00a0c969723b')
+BIO_AREA = 0x60000000             # fake BlockIo instances and the MMC driver's functions
+
+
+def mmc_functions():
+    """Code that matches driver/mmc_sig.inc: the MMC driver's ReadBlocks and WriteBlocks with their
+    relocated dwords (which the signature skips) filled with something else."""
+    import os, re
+    funcs, cur = {}, None
+    for line in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'driver', 'mmc_sig.inc')):
+        m = re.match(r'mmc_sig_(\w+):', line)
+        if m:
+            cur = funcs.setdefault(m.group(1), [])
+        elif cur is not None and line.strip().startswith('dw'):
+            off, ln = (int(x, 16) for x in line.strip()[2:].split(','))
+            cur.append([off, ln, b''])
+        elif cur is not None and line.strip().startswith('db'):
+            cur[-1][2] += bytes(int(x, 16) for x in line.strip()[2:].split(','))
+    out = {}
+    for name, runs in funcs.items():
+        code = bytearray(b'\x5a' * max(o + l for o, l, _ in runs))
+        for o, l, d in runs:
+            assert len(d) == l
+            code[o:o + l] = d
+        out[name] = bytes(code)
+    return out
 # The OF1 test unit's memory map as UEFI types (from its e820, 2026-11-09): RAM tops out at 0x1FAF0000,
 # then reserved (graphics stolen memory and a hole) up to 2 GB, then MMIO. 512 MB of DDR2.
 OF1_MAP = [(7, 0x0, 0xA0), (7, 0x100000, (0x1EE5C000 - 0x100000) >> 12), (9, 0x1EE5C000, 2),
@@ -76,7 +103,11 @@ SAVED = ((UC_X86_REG_EBX, 0x11111111), (UC_X86_REG_ESI, 0x22222222), (UC_X86_REG
 
 def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fails=False, nic_present=True,
         nic_mac_readonly=False, signals=1, enumerated_at_entry=False, mtc=0x64d, smbios_present=False,
-        crc_fails=False, memmap=OF1_MAP, desc_size=48, getmap_fails=False, fsb_msr=0x111):
+        crc_fails=False, memmap=OF1_MAP, desc_size=48, getmap_fails=False, fsb_msr=0x111,
+        bio=(), bio_late=(), create_event_fails=False, register_fails=False):
+    """bio: BlockIo instances there before the driver loads, bio_late: ones a driver installs
+    after its entry (the notify fires for each). Each is 'mmc' (the MMC driver's functions) or
+    'other' (another driver's)."""
     store = dict(store or {})
     if mtc is not None:                                         # the firmware's boot counter
         store[('MonotonicCounter', GLOBAL)] = (7, struct.pack('<I', mtc) if isinstance(mtc, int) else mtc)
@@ -89,6 +120,22 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     mu.mem_write(LOAD, pe[:size_img])
     for a in (ST, STUBS, STACK, POOL):
         mu.mem_map(a, 0x10000)
+    mu.mem_map(BIO_AREA, 0x10000)
+    fns = mmc_functions()
+    MMC_RD, MMC_WR, OTHER_FN = BIO_AREA + 0x8000, BIO_AREA + 0x9000, BIO_AREA + 0xa000
+    mu.mem_write(MMC_RD, fns['read'])
+    mu.mem_write(MMC_WR, fns['write'])
+    mu.mem_write(OTHER_FN, b'\x55\x8b\xec\x33\xc0\x5d\xc3')            # some other driver's function
+    bios = []                                                     # (address, kind) of installed BlockIo
+
+    def install_bio(kind):
+        a = BIO_AREA + 0x100 * len(bios)
+        rw = (MMC_RD, MMC_WR) if kind == 'mmc' else (OTHER_FN, OTHER_FN)
+        mu.mem_write(a, struct.pack('<QIIIII', 0x10000, a + 0x40, OTHER_FN, rw[0], rw[1], OTHER_FN))
+        bios.append((a, kind))
+    for k in bio:
+        install_bio(k)
+    mmc_ev = {}
     mu.mem_map(FWH, 0x100000, UC_PROT_READ)
     mu.mem_map(FLASH, 0x100000, UC_PROT_READ)
     mu.mem_write(ST, b'IBI SYST' + struct.pack('<III', 0x20000, 0x48, 0))
@@ -194,6 +241,44 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 if ok:
                     uc.mem_write(a[2], struct.pack('<I', MP))
                 return ret(0 if ok else 0x8000000E)
+            if off == 0x34:                                        # CreateEvent(type, tpl, fn, ctx, &ev)
+                if create_event_fails:
+                    return ret(0x80000009)
+                mmc_ev.update(type=a[0], tpl=a[1], fn=a[2], ctx=a[3], handle=0xE7E70002)
+                uc.mem_write(a[4], struct.pack('<I', 0xE7E70002))
+                return ret(0)
+            if off == 0x60:                                        # RegisterProtocolNotify(guid, ev, &reg)
+                if bytes(uc.mem_read(a[0], 16)) != BLOCKIO or a[1] != mmc_ev.get('handle'):
+                    errors.append('RegisterProtocolNotify for something else')
+                if register_fails:
+                    return ret(0x80000009)
+                if 'handle' in mmc_ev:
+                    mmc_ev['registered'] = True
+                uc.mem_write(a[2], struct.pack('<I', 0xE7E70003))
+                return ret(0)
+            if off == 0x44:                                        # CloseEvent(ev)
+                if a[0] != mmc_ev.get('handle') or mmc_ev.get('registered'):
+                    errors.append('CloseEvent of %#x' % a[0])
+                mmc_ev['closed'] = True
+                return ret(0)
+            if off == 0xa8:                                        # LocateHandleBuffer(ByProtocol, guid, 0, &n, &buf)
+                if a[0] != 2 or bytes(uc.mem_read(a[1], 16)) != BLOCKIO:
+                    errors.append('LocateHandleBuffer other than ByProtocol BlockIo')
+                if not bios:
+                    return ret(0x8000000E)
+                buf = pool['next']; pool['next'] += 4 * len(bios)
+                allocs[buf] = (4, 4 * len(bios))
+                uc.mem_write(buf, b''.join(struct.pack('<I', 0xB10000 + i) for i in range(len(bios))))
+                uc.mem_write(a[3], struct.pack('<I', len(bios)))
+                uc.mem_write(a[4], struct.pack('<I', buf))
+                return ret(0)
+            if off == 0x58:                                        # HandleProtocol(h, guid, &if)
+                i = a[0] - 0xB10000
+                if not 0 <= i < len(bios) or bytes(uc.mem_read(a[1], 16)) != BLOCKIO:
+                    errors.append('HandleProtocol on %#x' % a[0])
+                    return ret(0x80000003)
+                uc.mem_write(a[2], struct.pack('<I', bios[i][0]))
+                return ret(0)
             if off == 0xc4:                                        # CreateEventEx(type, tpl, fn, ctx, group, &ev)
                 ev.update(type=a[0], tpl=a[1], fn=a[2], ctx=a[3], group=bytes(uc.mem_read(a[4], 16)) if a[4] else None)
                 if create_fails:
@@ -328,6 +413,12 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         cpu['rev'] = cpu_rev
         call(cpu['ap'][0], [cpu['ap'][1]], 'AP procedure')
     entry_mac = bytes(nic['mac'])
+    entry_bio = [rd(a + 0x10) for a, _ in bios]
+    for k in bio_late:                                            # a driver installs BlockIo later
+        install_bio(k)
+        if mmc_ev.get('registered') and 'fn' in mmc_ev:
+            call(mmc_ev['fn'], [mmc_ev['handle'], mmc_ev['ctx']], 'BlockIo notify')
+    late_bio = [(rd(a + 0x10), rd(a + 0x14)) for a, _ in bios]
     def smbios_now():
         if 'smbios' not in cpu:
             return None
@@ -362,7 +453,11 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     for buf, (t, size) in allocs.items():
         if t != 6 and buf not in freed:
             errors.append('pool allocation %#x (type %d) never freed' % (buf, t))
-    return dict(status=status, ev=ev, events=events, errors=errors, mac=bytes(nic['mac']), entry_mac=entry_mac,
+    in_image = lambda x: LOAD <= x < LOAD + size_img
+    wrapped = [(kind, in_image(rd(a + 0x10)), in_image(rd(a + 0x14))) for a, kind in bios]
+    return dict(mmc_ev=mmc_ev, wrapped=wrapped, entry_bio=entry_bio, late_bio=late_bio, in_image=in_image,
+                bios=bios, mmc_fns=(MMC_RD, MMC_WR, OTHER_FN),
+                status=status, ev=ev, events=events, errors=errors, mac=bytes(nic['mac']), entry_mac=entry_mac,
                 io=nic['io'], rev=cpu['rev'], smbios=smbios_now(), entry_smbios=entry_smbios,
                 vendor=wstring(vptr), vendor_alloc=allocs.get(vptr), crc_ok=rd(ST + 0x10) == st_crc(),
                 st_unchanged=st_now == st_orig)
@@ -418,6 +513,16 @@ def main():
         ('memory: descriptors too small: size unknown', dxe, dict(store=lm(CARD), desc_size=32, want_mem=(0xFFFF, 533)), 0, True, MAC, True),
         ('memory: GetMemoryMap fails: size unknown', dxe, dict(store=lm(CARD), getmap_fails=True, want_mem=(0xFFFF, 533)), 0, True, MAC, True),
         ('app build replaces the firmware SMBIOS', app, dict(store=lm(CARD), cpu_rev=0x217, enumerated_at_entry=True, smbios_present=True), 0x80000014, False, MAC, True),
+        # Internal memory (mmc_fix.inc). want_wrapped: per BlockIo, (kind, ReadBlocks wrapped, WriteBlocks wrapped).
+        ('MMC BlockIo installed after dispatch: the notify wraps it', dxe, dict(store=lm(CARD), bio_late=('mmc',), want_wrapped=[('mmc', True, True)], want_late=True), 0, True, MAC, True),
+        ('MMC and another driver\'s BlockIo, installed later', dxe, dict(store=lm(CARD), bio_late=('other', 'mmc', 'other'), want_wrapped=[('other', False, False), ('mmc', True, True), ('other', False, False)], want_late=True), 0, True, MAC, True),
+        ('MMC BlockIo there before dispatch: wrapped at ReadyToBoot, not before', dxe, dict(store=lm(CARD), bio=('mmc',), want_wrapped=[('mmc', True, True)]), 0, True, MAC, True),
+        ('two MMC BlockIo, ReadyToBoot twice', dxe, dict(store=lm(CARD), bio=('mmc',), bio_late=('mmc',), signals=2, want_wrapped=[('mmc', True, True), ('mmc', True, True)]), 0, True, MAC, True),
+        ('CreateEvent fails: ReadyToBoot still wraps', dxe, dict(store=lm(CARD), bio_late=('mmc',), create_event_fails=True, want_mmc_ev='none', want_wrapped=[('mmc', True, True)]), 0, True, MAC, True),
+        ('RegisterProtocolNotify fails: event closed, ReadyToBoot still wraps', dxe, dict(store=lm(CARD), bio_late=('mmc',), register_fails=True, want_mmc_ev='closed', want_wrapped=[('mmc', True, True)]), 0, True, MAC, True),
+        ('no ReadyToBoot event (EFI 1.10): no notify either, nothing wrapped', dxe, dict(store=lm(CARD), bio_late=('mmc',), bs_hdr=0xc4, want_count=PLACEHOLDER, want_wrapped=[('mmc', False, False)]), 0, False, JUNK, False),
+        ('CreateEventEx fails: no notify either (the image is freed)', dxe, dict(store=lm(CARD), bio_late=('mmc',), create_fails=True, cpu_rev=0x217, want_count=PLACEHOLDER, want_wrapped=[('mmc', False, False)]), 0x80000014, False, JUNK, False),
+        ('app build: leaves the MMC alone (BlwMmcFix.efi does it)', app, dict(store=lm(CARD), cpu_rev=0x217, enumerated_at_entry=True, bio=('mmc',), want_wrapped=[('mmc', False, False)]), 0x80000014, False, MAC, True),
     ]
     bad = 0
     for name, img, kw, want_status, want_ev, want_mac, want_io in cases:
@@ -426,8 +531,31 @@ def main():
         want_vendor = kw.pop('want_vendor', 'BirdsLikeWires')
         want_mem = kw.pop('want_mem', (512, 533))
         want_t1 = kw.pop('want_t1', FILLED if kw.get('store') == lm(CARD) and (want_ev or img is app) else UNFILLED)
+        want_wrapped = kw.pop('want_wrapped', [])
+        want_late = kw.pop('want_late', False)
+        want_mmc_ev = kw.pop('want_mmc_ev', 'registered' if img is dxe and want_ev else 'none')
         r = run(img, **kw)
         p = list(r['errors'])
+        me = r['mmc_ev']
+        got_mmc_ev = ('closed' if me.get('closed') else 'registered' if me.get('registered') else
+                      'created' if me else 'none')
+        if got_mmc_ev != want_mmc_ev:
+            p.append('BlockIo notify %s, expected %s' % (got_mmc_ev, want_mmc_ev))
+        if me.get('registered') and (me['type'], me['tpl'], me['ctx']) != (0x200, 8, BS):
+            p.append('BlockIo notify event type %#x TPL %d context %#x' % (me['type'], me['tpl'], me['ctx']))
+        if img is app and {'CreateEvent', 'LocateHandleBuffer', 'RegisterProtocolNotify'} & set(r['events']):
+            p.append('app build touched BlockIo or events: %s' % r['events'])
+        if r['wrapped'] != want_wrapped:
+            p.append('BlockIo wrapped %s, expected %s' % (r['wrapped'], want_wrapped))
+        if any(r['in_image'](x) for x in r['entry_bio']):
+            p.append('BlockIo wrapped during the entry')
+        if want_late:                                               # the notify alone, before ReadyToBoot
+            late = [(k, r['in_image'](a), r['in_image'](b)) for (k, _), (a, b) in zip([(k, 0) for k, *_ in want_wrapped], r['late_bio'])]
+            if late != want_wrapped:
+                p.append('after the notify, before ReadyToBoot: %s' % late)
+        for (a, kind), (k, rw, ww) in zip(r['bios'], r['wrapped']):
+            if kind == 'other' and (rw or ww):
+                p.append('another driver\'s BlockIo was wrapped')
         if r['status'] != want_status:
             p.append('entry returned %s, expected %#x' % (r['status'] if r['status'] is None else '%#x' % r['status'], want_status))
         if want_ev:

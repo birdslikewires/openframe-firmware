@@ -24,12 +24,15 @@ boot block are the stock ones.
   - publishes SMBIOS 2.4, which the stock firmware lacks: BIOS, system (with a serial number and
     UUID made from the WLAN card's MAC), chassis (Embedded PC), memory array and device (size and
     speed found at boot), and a boot count;
-  - gives the RTL8111 network chip, which has no address of its own, a stable MAC from NVRAM.
+  - gives the RTL8111 network chip, which has no address of its own, a stable MAC from NVRAM;
+  - from 26.11.22, works around the stock MMC/SD driver, which reads the wrong sectors past the
+    first megabyte of a transfer, so the shell can start a kernel from the internal memory
+    (`driver/mmc_fix.inc`).
 - **BlwMac.efi** (`driver/blwmac.asm`) runs from `boot.nsh` and keeps that MAC in NVRAM, writing
   only when it changes. openframe-linux ships it and feeds it the right MAC.
-- **BlwMmcFix.efi** (`driver/blwmmcfix.asm`) works around the stock MMC/SD driver, which reads the
-  wrong sectors past the first megabyte of a transfer (`driver/mmc_fix.inc`): run from `boot.nsh`
-  before the kernel, it lets the shell start a kernel from the internal memory. **MmcTest.efi** (`driver/mmctest.asm`)
+- **BlwMmcFix.efi** (`driver/blwmmcfix.asm`) is the same MMC workaround as a shell app, for
+  firmware without it: run from `boot.nsh` before the kernel, it lets the shell start a kernel
+  from the internal memory. **MmcTest.efi** (`driver/mmctest.asm`)
   shows whether large reads come back right.
 
 The firmware never writes NVRAM itself, and nothing here adds a variable under a new vendor GUID:

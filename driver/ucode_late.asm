@@ -27,6 +27,13 @@
 ;    of RAM in the UEFI memory map, rounded up to a power of two, and its speed from the FSB
 ;    (MSR_FSB_FREQ): the SCH runs the DRAM at the FSB rate, 400 or 533 MT/s. Anything implausible
 ;    is left as unknown.
+; 6. Internal memory: the firmware's MMC/SD media driver reads (and writes) the wrong sectors past
+;    the first megabyte of any single transfer, so a kernel loaded from the internal memory came
+;    in corrupted and hung (mmc_fix.inc). Its BlockIo instances get wrappers that split
+;    transfers into pieces it gets right: through a BlockIo protocol notify, registered once the
+;    image is sure to stay loaded, as the MMC driver installs them, and again at ReadyToBoot for
+;    any already there. The app build leaves this to BlwMmcFix.efi: an app's image is freed when
+;    it returns.
 ;
 ; Position-independent: data is reached through call/pop, so no relocations are needed.
 ; Assembled with `nasm -f bin`; build_ucode_driver.py wraps it in a PE32 image and an FFS
@@ -133,6 +140,7 @@ entry:
         test    eax, eax
         jnz     .ret
         xor     ebx, ebx                        ; EFI_SUCCESS: the image must stay resident for it
+        call    mmc_register                    ; so only now may anything else point into it
 %endif
 .ret:   mov     eax, ebx
         pop     edi
@@ -448,6 +456,53 @@ rtb_notify:
         push    dword [esp + 8]
         call    fill_count
         call    apply_mac
+        mov     eax, [esp]
+        push    dword [eax + 0x3c]              ; BootServices
+        call    mmc_fix_install                 ; any MMC BlockIo the notify didn't see
+        add     esp, 8
+        ret
+
+; mmc_register: in edi = entry.here, [ebp+12] = SystemTable. CreateEvent(EVT_NOTIFY_SIGNAL,
+; TPL_CALLBACK, mmc_notify, BootServices) and RegisterProtocolNotify(BlockIo) on it, so each
+; BlockIo installed from now on is checked as it appears. If either fails, ReadyToBoot still
+; wraps what exists then. Only call once the image is sure to stay loaded. Keeps ebx, esi, edi.
+mmc_register:
+        push    ebx
+        mov     ebx, [ebp + 12]
+        mov     ebx, [ebx + 0x3c]               ; ebx = BootServices
+        push    0                               ; locals: Event, Registration
+        push    0
+        lea     eax, [esp + 4]
+        push    eax                             ; &Event
+        push    ebx                             ; NotifyContext = BootServices
+        lea     eax, [edi + (mmc_notify - entry.here)]
+        push    eax                             ; NotifyFunction
+        push    8                               ; TPL_CALLBACK
+        push    0x200                           ; EVT_NOTIFY_SIGNAL
+        call    [ebx + 0x34]                    ; BS->CreateEvent
+        add     esp, 20
+        test    eax, eax
+        jnz     .out
+        mov     eax, esp
+        push    eax                             ; &Registration
+        push    dword [esp + 8]                 ; Event
+        lea     eax, [edi + (mmc_bio_guid - entry.here)]
+        push    eax                             ; Protocol
+        call    [ebx + 0x60]                    ; BS->RegisterProtocolNotify
+        add     esp, 12
+        test    eax, eax
+        jz      .out
+        push    dword [esp + 4]                 ; not registered: the event is no use
+        call    [ebx + 0x44]                    ; BS->CloseEvent
+        add     esp, 4
+.out:   add     esp, 8
+        pop     ebx
+        ret
+
+; VOID EFIAPI mmc_notify(EFI_EVENT Event, VOID *Context = BootServices)
+mmc_notify:
+        push    dword [esp + 8]
+        call    mmc_fix_install
         add     esp, 4
         ret
 
@@ -626,6 +681,7 @@ mac_ok: xor     eax, eax
 
 %include "nic_mac0.inc"
 %include "smbios_id.inc"
+%include "mmc_fix.inc"
 
         align   4, db 0
 rtb_guid:                                      ; 7CE88FB3-4BD7-4679-87A8-A8D8DEE50D2B gEfiEventReadyToBootGuid
