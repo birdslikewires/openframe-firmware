@@ -1,8 +1,19 @@
+# fh build output
 *.o
 *.cmd
 *.ko
 *.cm
+*.mod
+*.mod.c
 Module.symvers
 modules.order
 .tmp_versions
+# the tools' Python environment
+venv/
+__pycache__/
+*.pyc
+# chip and NVRAM dumps hold unit-specific data (MACs, NVRAM): keep them out
+*dump*.bin
+# release images are published as GitHub Releases, not kept in git (releases/README.md)
+releases/*.bin
 .DS_Store

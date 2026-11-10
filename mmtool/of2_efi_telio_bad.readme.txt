@@ -1,0 +1,15 @@
+of2_efi_telio_bad.img - e4690aa8e6851d2acec221ff7ca8b5da
+=====================
+
+--------------------
+DO NOT USE THIS EFI!
+--------------------
+
+This particular EFI was distributed for some OpenFrame 2 devices from Telio. Many of these were shipped without the ability to boot from external USB and with no means of entering the EFI command line.
+
+In addition, the original Telio operating system had Telnet and SSH disabled, meaning that the device was pretty thoroughly locked down. Combined with a soldered EFI chip, it makes repurposing many Telio devices a real pain in the bum.
+
+Don't flash this EFI to anything. You'll only ruin it.
+
+Retained for comparison with the good Telio EFI (188c50384cb4ec378cdd3f82812d6276) provided in the main EFI directory. The other one works perfectly with external USB booting and EFI command line enabled.
+

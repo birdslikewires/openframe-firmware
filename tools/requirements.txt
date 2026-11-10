@@ -1,0 +1,5 @@
+# python3 -m venv venv && venv/bin/pip install -r tools/requirements.txt
+# Also needed: nasm (to assemble driver/), and for the logo tools rsvg-convert.
+unicorn==2.1.4          # the emulators (emu_*.py)
+uefi_firmware==1.16     # Tiano compression (build_patched.py, build_ucode_driver.py)
+pillow==13.0.0          # splash images (build_patched.py, logo_bird.py)

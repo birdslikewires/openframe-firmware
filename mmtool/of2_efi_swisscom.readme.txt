@@ -1,0 +1,15 @@
+of2_efi_swisscom.img - eb1ca17b0a3166e020784fc806dfc54f
+====================
+
+--------------------
+DO NOT USE THIS EFI!
+--------------------
+
+While not nasty, like the bad Telio EFI, this one is a bit of a mystery. It's broken.
+
+It allows for external USB booting (command line untested) but ACPI tables are broken and the device won't be able to find certain parts of its hardware, most notably its audio system. It will also fail to reboot or shut down, regardless of your kernel options.
+
+It was installed on a number of Swisscom 'Da Vinci' OpenFrame 2 devices, produced in 2011, which were very nicely packaged alongside matching DECT telephones. I can only assume that it was unfinished and that they were some sort of evaluation units. Their software was v30291 (the 'sunset' release) with no Swisscom branding.
+
+Retained for interest, because you just never know what might be handy one day.
+
