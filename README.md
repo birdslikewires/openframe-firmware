@@ -27,6 +27,10 @@ boot block are the stock ones.
   - gives the RTL8111 network chip, which has no address of its own, a stable MAC from NVRAM.
 - **BlwMac.efi** (`driver/blwmac.asm`) runs from `boot.nsh` and keeps that MAC in NVRAM, writing
   only when it changes. openframe-linux ships it and feeds it the right MAC.
+- **BlwMmcFix.efi** (`driver/blwmmcfix.asm`) works around the stock MMC/SD driver, which reads the
+  wrong sectors past the first megabyte of a transfer (`driver/mmc_fix.inc`): run from `boot.nsh`
+  before the kernel, it lets the shell start a kernel from the internal memory. **MmcTest.efi** (`driver/mmctest.asm`)
+  shows whether large reads come back right.
 
 The firmware never writes NVRAM itself, and nothing here adds a variable under a new vendor GUID:
 AMI's NVRAM code corrupts the store when that happens ([docs/nvram.md](docs/nvram.md)).
@@ -47,7 +51,7 @@ first.
 | Path | What |
 |---|---|
 | `fh/` | The firmware hub kernel module: reads and writes the chip through `/dev/fh` |
-| `driver/` | BlwPlatformDxe (`ucode_late.asm` and includes), BlwMac.efi, the one-off BlwLanMacDel.efi, FvDiag |
+| `driver/` | BlwPlatformDxe (`ucode_late.asm` and includes), BlwMac.efi, BlwMmcFix.efi and MmcTest.efi, the one-off BlwLanMacDel.efi, FvDiag |
 | `tools/` | Image builders, emulators for the driver and apps, NVRAM and firmware-volume decoders, unit scripts |
 | `tools/flash/` | The block-9 flash script for each release |
 | `releases/` | Where release images go when downloaded or built (see its README); their md5s |
