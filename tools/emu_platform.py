@@ -67,7 +67,7 @@ JUNK = bytes.fromhex('b8fcffffffff')
 BS_OK = {0x28: 'GetMemoryMap', 0x2c: 'AllocatePool', 0x30: 'FreePool', 0x6c: 'InstallConfigurationTable',
          0xac: 'LocateProtocol', 0xb8: 'CalculateCrc32', 0xc4: 'CreateEventEx', 0x34: 'CreateEvent',
          0x44: 'CloseEvent', 0x58: 'HandleProtocol', 0x60: 'RegisterProtocolNotify', 0xa8: 'LocateHandleBuffer',
-         0x88: 'Stall'}
+         0x88: 'Stall', 0x64: 'LocateHandle'}
 BLOCKIO = G('964e5b21-6459-11d2-8e39-00a0c969723b')
 NB_STAGE = G('ef9a3971-c1a0-4a93-bd40-5aa165f2dc3a')   # the boot-manager stage NBDXE's clock write waits for
 GMA_MMIO = 0xd0100000             # the graphics device's BAR0 (registers)
@@ -76,6 +76,12 @@ LOADED_IMAGE = G('5b1b31a1-9562-11d2-8e3f-00a0c969723b')
 NBDXE_FILE = G('e4ecd0b2-e277-4f2b-becb-e4d75c9a812e')
 NB_IMG = 0x62000000               # NBDXE's loaded image (its clock-writing function at +0x3ca)
 NB_IMM = 0x402                    # the value in its DPLL_B write
+# The boot-timing development build (-DTIMING) also watches these, and publishes BlwBootTimes.
+TM_GUIDS = {G('9042a9de-23dc-4a38-96fb-7aded080516a'): 'GOP ', G('964e5b22-6459-11d2-8e39-00a0c969723b'): 'SFS ',
+            G('2b2f68d6-0cd2-44cf-8e8b-bba20b1b5b75'): 'USB ', G('387477c2-69c7-11d2-8e39-00a0c969723b'): 'OUT ',
+            G('387477c1-69c7-11d2-8e39-00a0c969723b'): 'IN  ', G('4cf5b200-68b8-4ca5-9eec-b23e3f50029a'): 'PCI ',
+            G('2df1e051-906d-4eff-869d-24e65378fb9e'): 'STG1', G('dbc9fd21-fad8-45b0-9e78-27158867cc93'): 'STG3',
+            G('8ff925f1-8624-4d38-9ed2-f8f5aa94f84a'): 'STG4'}
 BIO_AREA = 0x60000000             # fake BlockIo instances and the MMC driver's functions
 
 
@@ -146,7 +152,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         crc_fails=False, memmap=OF1_MAP, desc_size=48, getmap_fails=False, fsb_msr=0x111,
         bio=(), bio_late=(), create_event_fails=False, register_fails=False,
         gma=True, gma_decode=True, gma_bar=GMA_MMIO, fp=GOP_FP, nb_stage=True, nb_value=NB_DPLL, nb_signals=1,
-        app_dpll=NB_DPLL, nb_img='before', nb_variant='stock', li_fails=False):
+        app_dpll=NB_DPLL, nb_img='before', nb_variant='stock', li_fails=False, timing=False):
     """gma: the Poulsbo graphics device at 00:02.0 (8086:8108), its memory decode and BAR0.
     The GOP has set pipe B's PLL (fp, GOP_DPLL). nb_stage: after the entry, the boot manager's
     stage signal, on which NBDXE writes nb_value into DPLL_B and then the stage notifies run
@@ -187,6 +193,8 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     for k in bio:
         install_bio(k)
     evs = {}                                                      # CreateEvent handle -> event
+    li_queues = {}                                                # registration key -> handles not yet returned
+    tm_var = {}
     images = []                                                   # LoadedImage interfaces
     mu.mem_map(NB_IMG, 0x10000)
     nbd = bytearray(0x3000)
@@ -348,13 +356,29 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 return ret(0)
             if off == 0x60:                                        # RegisterProtocolNotify(guid, ev, &reg)
                 g = bytes(uc.mem_read(a[0], 16))
-                if g not in (BLOCKIO, NB_STAGE, LOADED_IMAGE) or a[1] not in evs or 'guid' in evs[a[1]]:
+                ok = (BLOCKIO, NB_STAGE, LOADED_IMAGE) + (tuple(TM_GUIDS) if timing else ())
+                if g not in ok or a[1] not in evs or 'guid' in evs[a[1]]:
                     errors.append('RegisterProtocolNotify for something else')
                     return ret(0x80000002)
                 if register_fails:
                     return ret(0x80000009)
-                evs[a[1]].update(guid=g, registered=True)
-                uc.mem_write(a[2], struct.pack('<I', 0xE7E70003))
+                key = a[1] + 0x100
+                evs[a[1]].update(guid=g, registered=True, key=key)
+                li_queues[key] = []
+                uc.mem_write(a[2], struct.pack('<I', key))
+                return ret(0)
+            if off == 0x64:                                        # LocateHandle(ByRegisterNotify, 0, key, &size, buf)
+                if a[0] != 1 or a[2] not in li_queues:
+                    errors.append('LocateHandle other than ByRegisterNotify')
+                    return ret(0x80000002)
+                q = li_queues[a[2]]
+                if not q:
+                    return ret(0x8000000E)
+                if rd(a[3]) < 4:
+                    uc.mem_write(a[3], struct.pack('<I', 4))
+                    return ret(0x80000005)
+                uc.mem_write(a[4], struct.pack('<I', q.pop(0)))
+                uc.mem_write(a[3], struct.pack('<I', 4))
                 return ret(0)
             if off == 0x44:                                        # CloseEvent(ev)
                 if a[0] not in evs or evs[a[0]].get('registered'):
@@ -396,6 +420,15 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 return ret(0)
         if RT_STUB <= addr < RT_STUB + 0x100:
             off = addr - RT_STUB
+            if off == 0x38 and timing:                             # SetVariable(name, guid, attr, size, data)
+                name, g = wstring(a[0]), bytes(uc.mem_read(a[1], 16))
+                if name != 'BlwBootTimes' or g != BLW or a[2] & 1 or a[2] != 6:
+                    errors.append('SetVariable(%s, attr %#x) in the timing build' % (name, a[2]))
+                    return ret(0x80000002)
+                tm_var['data'] = bytes(uc.mem_read(a[4], a[3])) if a[3] else b''
+                tm_var['n'] = tm_var.get('n', 0) + 1
+                events.append('SetVariable(BlwBootTimes)')
+                return ret(0)
             if off not in RT_OK:
                 errors.append('unexpected runtime service call: RT+%#x%s' % (off, ' (SetVariable!)' if off == 0x38 else ''))
                 return ret(0x80000003)
@@ -533,7 +566,13 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 call(e['fn'], [e['handle'], e['ctx']], what)
     if nb_img == 'after':                                         # NBDXE loads after this driver
         load_nbdxe()
+        for e in evs.values():
+            if e.get('guid') == LOADED_IMAGE:
+                li_queues[e['key']].append(0xB20000 + len(images) - 1)
         notify(LOADED_IMAGE, 'LoadedImage notify')
+    if timing:                                                    # the watched protocols appear
+        for g in TM_GUIDS:
+            notify(g, 'timing notify')
     cpu['phase'] = 'BDS'
     for k in bio_late:                                            # a driver installs BlockIo later
         install_bio(k)
@@ -592,7 +631,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     final = struct.unpack('<I', mu.mem_read(GMA_MMIO + 0x6018, 4))[0] if gma else None
     nb_now = bytes(mu.mem_read(NB_IMG, 0x3000))
     nb_changed = [i for i in range(0x3000) if nb_now[i] != nb_orig[i]]
-    return dict(nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
+    return dict(tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
                 mmc_ev=mmc_ev, nb_ev=nb_ev, evs=evs, mmio_writes=mmio_writes, dpll=final,
                 pp_final=struct.unpack('<I', mu.mem_read(GMA_MMIO + 0x61204, 4))[0] if gma else None,
                 nb_after_notify=nb_bad.get('after_notify'), wrapped=wrapped, entry_bio=entry_bio, late_bio=late_bio, in_image=in_image,
@@ -604,7 +643,8 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
 
 
 def main():
-    dxe, app = (open(p, 'rb').read() for p in sys.argv[1:3])
+    timing = '--timing' in sys.argv                               # the -DTIMING development build
+    dxe, app = (open(p, 'rb').read() for p in [x for x in sys.argv[1:] if not x.startswith('--')][:2])
     Z = bytes(6)
     lm = lambda d, attr=7: {('BlwMac', BLW): (attr, d)}
     EV = dict(type=0x200, tpl=8, ctx=ST, group=RTB)
@@ -706,8 +746,35 @@ def main():
         # NBDXE (with the 'value' variant) writes its own value; the notify must leave that alone
         if kw.get('nb_variant') == 'value':
             want_pclk = 'value'
-        r = run(img, **kw)
+        r = run(img, timing=timing, **kw)
         p = list(r['errors'])
+        tv = r['tm_var']
+        if timing and img is dxe and want_ev:                      # ReadyToBoot ran: the records published
+            d = tv.get('data', b'')
+            recs = [(d[i:i + 4], struct.unpack_from('<I', d, i + 4)[0]) for i in range(0, len(d) - 7, 8)]
+            tags = [t for t, _ in recs]
+            if not tv.get('n') or len(d) % 8 or not recs:         # once per ReadyToBoot; the last has all
+                p.append('BlwBootTimes written %s times, %d bytes' % (tv.get('n'), len(d)))
+            elif tags[0] != b'ENTR' or tags[-1] != b'RTB ' or b'ENTE' not in tags:
+                p.append('timing records %s' % tags)
+            else:
+                ts = [t for _, t in recs]
+                if ts != sorted(ts):
+                    p.append('timestamps go backwards: %s' % ts)
+                if not (kw.get('register_fails') or kw.get('create_event_fails')):
+                    for g, tag in TM_GUIDS.items():
+                        if tag.encode() not in tags:
+                            p.append('no %r record' % tag)
+                    pre = tags[tags.index(b'PRE ') + 1:tags.index(b'PREE')] if b'PRE ' in tags and b'PREE' in tags else None
+                    want_pre = [b'\xc1\xb0\xd5\xa5', b'\x99\x99\x99\x99'] + \
+                        ([{'guid': b'\x11' * 4, 'nopath': b'LI??', 'node': b'LI??'}.get(kw.get('nb_variant'), NBDXE_FILE[:4])]
+                         if kw.get('nb_img', 'before') == 'before' else [])
+                    if not kw.get('li_fails') and pre != want_pre:
+                        p.append('images before the entry %s, expected %s' % (pre, want_pre))
+                    if kw.get('nb_img') == 'after' and NBDXE_FILE[:4] not in tags:
+                        p.append('NBDXE\'s load not recorded: %s' % tags)
+        elif tv:
+            p.append('BlwBootTimes written without ReadyToBoot')
         # NBDXE patch
         if want_nbp == 'patched':
             if r['nb_imm'] != GOP_DPLL or [i for i in r['nb_changed'] if not NB_IMM <= i < NB_IMM + 4]:
@@ -716,7 +783,7 @@ def main():
                 p.append('NBDXE still wrote %s' % ['%#x' % v for v in r['nb_wrote']])
         elif r['nb_changed']:
             p.append('NBDXE image changed at %s' % r['nb_changed'][:8])
-        if want_nbp == 'patched' and kw.get('nb_img', 'before') == 'before' and \
+        if not timing and want_nbp == 'patched' and kw.get('nb_img', 'before') == 'before' and \
                 any(e.get('guid') == LOADED_IMAGE for e in r['evs'].values()):
             p.append('LoadedImage notify registered although NBDXE was patched at the entry')
         # Panel clock

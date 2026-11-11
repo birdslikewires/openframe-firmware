@@ -172,6 +172,8 @@ def main():
     ap.add_argument('--bios-date', required=True, help='SMBIOS BIOS release date, MM/DD/YYYY')
     ap.add_argument('--smbios-out', help='also write the SMBIOS entry point + table here (address 0)')
     ap.add_argument('--app', help='also write an EFI application build (subsystem 10) here, for running from the shell')
+    ap.add_argument('--define', action='append', default=[], metavar='NAME',
+                    help='assemble with -DNAME as well (e.g. TIMING for the boot-timing development build)')
     a = ap.parse_args()
 
     orig = open(a.base, 'rb').read()
@@ -210,10 +212,11 @@ def main():
             if c[-len(entry):] != entry or (len(c) - len(entry)) % 16:
                 bp.fail('microcode not at the end of the code, 16-byte aligned')
             return c
-        code = assemble()
+        extra = ['-D' + d for d in a.define]
+        code = assemble(*extra)
         # The app build applies the LAN MAC at once and registers no ReadyToBoot event: an
         # application's image is freed when it returns, so an event would call freed memory.
-        app_code = assemble('-DAPP') if a.app else None
+        app_code = assemble('-DAPP', *extra) if a.app else None
     pe = pe32(code)
     if a.pe:
         open(a.pe, 'wb').write(pe)

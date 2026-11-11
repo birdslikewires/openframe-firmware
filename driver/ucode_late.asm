@@ -64,6 +64,10 @@ entry:
         push    ebx
         push    esi
         push    edi
+%ifdef TIMING
+        mov     eax, 'ENTR'                     ; development build: this driver starts
+        call    tm_rec
+%endif
         call    .here
 .here:  pop     edi                             ; edi = runtime address of .here
         call    smbios_install                  ; keeps ebx, esi, edi
@@ -165,6 +169,28 @@ entry:
         lea     ecx, [edi + (nb_patch_notify - entry.here)]
         call    notify_on
 .nbp:
+%ifdef TIMING
+        call    tm_pre                          ; development build: what loaded before us,
+        call    tm_watch_images                 ; and what happens from now on
+%macro TMW 2
+        lea     eax, [edi + (%1 - entry.here)]
+        mov     ecx, %2
+        call    tm_watch
+%endmacro
+        TMW     tm_g_gop, 'GOP '
+        TMW     mmc_bio_guid, 'BLK '
+        TMW     tm_g_sfs, 'SFS '
+        TMW     tm_g_usb, 'USB '
+        TMW     tm_g_out, 'OUT '
+        TMW     tm_g_in, 'IN  '
+        TMW     tm_g_pci, 'PCI '
+        TMW     tm_g_stg1, 'STG1'
+        TMW     pclk_nb_guid, 'STGN'
+        TMW     tm_g_stg3, 'STG3'
+        TMW     tm_g_stg4, 'STG4'
+        mov     eax, 'ENTE'
+        call    tm_rec
+%endif
 %endif
 .ret:   mov     eax, ebx
         pop     edi
@@ -477,6 +503,10 @@ rtb_register:
 
 ; VOID EFIAPI rtb_notify(EFI_EVENT Event, VOID *Context = SystemTable): the ReadyToBoot work
 rtb_notify:
+%ifdef TIMING
+        mov     eax, 'RTB '
+        call    tm_rec
+%endif
         push    dword [esp + 8]
         call    fill_count
         call    apply_mac
@@ -484,6 +514,11 @@ rtb_notify:
         push    dword [eax + 0x3c]              ; BootServices
         call    mmc_fix_install                 ; any MMC BlockIo the notify didn't see
         call    panel_clock                     ; in case the panel-clock notify ran too early
+%ifdef TIMING
+        push    dword [esp + 4]                 ; development build: hand the records over
+        call    tm_publish
+        add     esp, 4
+%endif
         add     esp, 8
         ret
 
@@ -710,6 +745,9 @@ mac_ok: xor     eax, eax
 %include "smbios_id.inc"
 %include "mmc_fix.inc"
 %include "panel_clock.inc"
+%ifdef TIMING
+%include "timing.inc"
+%endif
 
         align   4, db 0
 rtb_guid:                                      ; 7CE88FB3-4BD7-4679-87A8-A8D8DEE50D2B gEfiEventReadyToBootGuid

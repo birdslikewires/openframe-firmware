@@ -127,3 +127,23 @@ history don't share their fate):
 gh release create <new> releases/of1-blw-<new>.bin --title "<new> (OF1)" --notes "<the releases.md entry>"
 ```
 Only then tell anyone it exists.
+
+## Development builds: boot timing
+
+`--define TIMING` builds BlwPlatformDxe with `driver/timing.inc`: it records (with the CPU's
+timestamp counter) its own entry, the images already loaded by then (in order), each driver
+loaded after it, protocols appearing (graphics, BlockIo, file systems, USB, console, PCI), the
+boot manager's stage signals and ReadyToBoot, and leaves them in the volatile variable
+`BlwBootTimes` (BS+RT, no NV bit: nothing reaches the flash). Use a version in the 26.11.9x range
+so it is never mistaken for a release, and never publish it.
+
+```
+venv/bin/python -I tools/build_ucode_driver.py /tmp/base.bin /tmp/of1-blw-26.11.90-timing.bin \
+    --microcode third_party/intel-ucode/06-1c-02 --bios-version 26.11.90 --bios-date MM/DD/YYYY \
+    --check-with-core /tmp/core.pe --define TIMING --pe /tmp/tdxe.efi --app /tmp/tapp.efi
+venv/bin/python -I tools/emu_platform.py /tmp/tdxe.efi /tmp/tapp.efi --timing
+# on the unit, after a cold boot (efivarfs mounted):
+#   cp /sys/firmware/efi/efivars/BlwBootTimes-ec87d643-eba4-4bb5-a1e5-3f3e36b20da9 /tmp/bt
+venv/bin/python -I tools/boot_times.py /tmp/bt /tmp/of1-blw-26.11.90-timing.bin
+```
+A release build without `--define` is unchanged by any of this (byte for byte).
