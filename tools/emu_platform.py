@@ -86,6 +86,39 @@ UHCD_FILE = G('580dd900-385d-11d7-883a-00500473d4eb')
 USBRT_FILE = G('04eaaaa1-29a1-11d7-8838-00500473d4eb')
 USB_AREA = 0x08000000             # UHCD +0, USBRT copies +0x10000 (readable) and +0x20000 (SMRAM closed)
 SMMC_INST, SMMC_TRIG = USB_AREA + 0x30000, 0x30000020
+# The on-screen trace build (-DSCREEN): a 32-bit framebuffer behind a fake Graphics Output protocol.
+GOP_GUID = G('9042a9de-23dc-4a38-96fb-7aded080516a')
+FB, FB_W, FB_H = 0x0a000000, 800, 480
+GOP_INST = USB_AREA + 0x31000                 # +0x0c Mode; Mode at +0x100 (+8 Info, +0x10 base); Info at +0x200
+HEXFONT = {}
+def hexfont():
+    import os, re
+    if not HEXFONT:
+        rows = [int(x, 16) for x in re.findall(r'0x([0-9a-f]{2})', open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'driver', 'hexfont.inc')).read())]
+        for i, ch in enumerate('0123456789ABCDEF'):
+            HEXFONT[i] = rows[i * 8:i * 8 + 8]
+    return HEXFONT
+def read_screen(fb):
+    """The digits on the three trace lines (from a framebuffer's bytes, or a dict of pixels): '.' blank."""
+    px = (lambda x, y: struct.unpack_from('<I', fb, (y * FB_W + x) * 4)[0]) if isinstance(fb, (bytes, bytearray)) else \
+         (lambda x, y: fb.get((x, y), 0))
+    out = []
+    for y in (8, 32, 56):
+        line = ''
+        for x in range(8, 392, 16):
+            rows = [sum(0x80 >> c for c in range(8) if px(x + 2 * c, y + 2 * r)) for r in range(8)]
+            line += next((ch for i, ch in enumerate('0123456789ABCDEF') if hexfont()[i] == rows), '.' if not any(rows) else '?')
+        out.append(line.rstrip('.'))
+    return out
+def render(fb, x, y, value, n):
+    """What st_hex draws: value's low n hex digits at (x, y), 16x16 a digit, into a dict of pixels."""
+    if x + n * 16 > FB_W or y + 16 > FB_H:
+        return
+    for i in range(n):
+        g = hexfont()[(value >> 4 * (n - 1 - i)) & 0xf]
+        for row in range(16):
+            for col in range(16):
+                fb[(x + i * 16 + col, y + row)] = 0xffffff if (g[row // 2] << (col // 2)) & 0x80 else 0
 # The boot-timing development build (-DTIMING) also watches these, and publishes BlwBootTimes.
 TM_GUIDS = {G('9042a9de-23dc-4a38-96fb-7aded080516a'): 'GOP ', G('964e5b22-6459-11d2-8e39-00a0c969723b'): 'SFS ',
             G('2b2f68d6-0cd2-44cf-8e8b-bba20b1b5b75'): 'USB ', G('387477c2-69c7-11d2-8e39-00a0c969723b'): 'OUT ',
@@ -163,7 +196,8 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         bio=(), bio_late=(), create_event_fails=False, register_fails=False,
         gma=True, gma_decode=True, gma_bar=GMA_MMIO, fp=GOP_FP, nb_stage=True, nb_value=NB_DPLL, nb_signals=1,
         app_dpll=NB_DPLL, nb_img='before', nb_variant='stock', li_fails=False, timing=False,
-        mmc_img='after', mmc_variant='stock', profile=False, tm_ticks=70, usbtrace=False, uhcd_variant='stock', usbrt_variant='stock', usbrt_img='after'):
+        mmc_img='after', mmc_variant='stock', profile=False, tm_ticks=70, usbtrace=False, uhcd_variant='stock', usbrt_variant='stock', usbrt_img='after', screen=False, screen_variant='stock',
+        fake_tsc_hi=0):
     """gma: the Poulsbo graphics device at 00:02.0 (8086:8108), its memory decode and BAR0.
     The GOP has set pipe B's PLL (fp, GOP_DPLL). nb_stage: after the entry, the boot manager's
     stage signal, on which NBDXE writes nb_value into DPLL_B and then the stage notifies run
@@ -259,10 +293,32 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         rt[0x5307 + 16] ^= 1
     if usbrt_variant == 'c_changed':
         rt[0x3f9b + 18] ^= 1                                      # its last byte (ret)
+    rt[0x1381:0x13ae] = bytes.fromhex('53566a61e8aafeffff8b7424108ad85980e310eb116a61e897feffff24103ad85974038ad84e85f675eb5e5bc3')
+    # IoRead8: port 0x61 only (anything else halts), and bit 4 toggles on each read
+    ior = bytes.fromhex('837c240461' '7401' 'f4' 'e800000000' '58' '80701010' '8a4010' 'c3')
+    rt[0x1234:0x1234 + len(ior)] = ior
+    rt[0x4811:0x4816] = bytes.fromhex('e817fdffff')                  # call the transfer function (+0x452d)
+    rt[0x4816:0x481a] = bytes.fromhex('83c410c3')                    # (the test's caller pops the four arguments)
+    rt[0x452d] = 0xc3
+    assert len(rt) == 0x9f80, 'fixture slices changed the image size'
     rt_copies = [USB_AREA + 0x10000, USB_AREA + 0x20000]          # the normal copy, the SMM copy
-    mu.mem_write(rt_copies[0], bytes(rt))
-    mu.mem_write(rt_copies[1], b'\xff' * 0x9f80 if usbrt_variant == 'closed' else bytes(rt))
+    for base in rt_copies:
+        rt[0x52ad:0x52b1] = struct.pack('<I', 0x100098f0 if screen_variant == 'unrelocated' else base + 0x98f0)
+        mu.mem_write(base, b'\xff' * 0x9f80 if (usbrt_variant == 'closed' and base == rt_copies[1]) else bytes(rt))
     rt_orig = [bytes(mu.mem_read(a, 0x9f80)) for a in rt_copies]
+    if screen:                                                    # the framebuffer and the GOP's Mode/Info
+        mu.mem_map(FB, (FB_W * FB_H * 4 + 0xfff) & ~0xfff)
+        mu.mem_write(GOP_INST + 0x0c, struct.pack('<I', GOP_INST + 0x100))
+        mu.mem_write(GOP_INST + 0x100, struct.pack('<IIIIQI', 1, 0, GOP_INST + 0x200, 0x24, FB, FB_W * FB_H * 4))
+        mu.mem_write(GOP_INST + 0x200, struct.pack('<IIII', 0, FB_W, FB_H, 1) + b'\0' * 16 + struct.pack('<I', FB_W))
+        fake_tsc = {'t': 0}
+        def rdtsc_hook(uc, addr, size, _):                        # rdtsc inside the copied stubs: a fake TSC
+            if bytes(uc.mem_read(addr, 2)) == b'\x0f\x31':
+                fake_tsc['t'] += 0x1000
+                uc.reg_write(UC_X86_REG_EAX, fake_tsc['t']); uc.reg_write(UC_X86_REG_EDX, fake_tsc_hi)
+                uc.reg_write(UC_X86_REG_EIP, addr + 2)
+        for base in rt_copies:
+            mu.hook_add(UC_HOOK_CODE, rdtsc_hook, begin=base + 0x9920, end=base + 0x9920 + 0x64c)
 
     def load_usbrt():
         for base in rt_copies:
@@ -405,6 +461,9 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 if crc_fails:
                     return ret(0x80000002)
                 uc.mem_write(a[2], struct.pack('<I', zlib.crc32(bytes(uc.mem_read(a[0], a[1])))))
+                return ret(0)
+            if off == 0xac and screen and bytes(uc.mem_read(a[0], 16)) == GOP_GUID:
+                uc.mem_write(a[2], struct.pack('<I', GOP_INST))
                 return ret(0)
             if off == 0xac and usbtrace and bytes(uc.mem_read(a[0], 16)) == SMMC_GUID:
                 return ret(0x8000000E)                             # not installed yet
@@ -704,6 +763,29 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         tm_var['ut_stall_ret2'] = sret2
         tm_var['ut_expect'] = ut_expect
         tm_var['ut_stall_ret'] = sret
+        if screen:
+            nfd = {'k': 0}
+            def fd(base, n):                                       # push n; call FixedDelay; add esp, 4; ret
+                at = code + 0x200 + 0x20 * nfd['k']                # each at its own address (no code rewritten)
+                nfd['k'] += 1
+                mu.mem_write(at, b'\x6a' + bytes([n]) + b'\xb8' + struct.pack('<I', base + 0x1381) + b'\xff\xd0\x83\xc4\x04\xc3')
+                call(at, [], 'FixedDelay')
+                return at + 9
+            def cbw(base, op, length):                             # the four arguments, then jump to the send
+                buf = USB_AREA + 0x38800
+                mu.mem_write(buf, b'USBC' + struct.pack('<II', 7, length) + bytes([0x80, 0, 10, op]) + b'\0' * 15)
+                at = code + 0x300
+                mu.mem_write(at, b'\x6a\x1f\x68' + struct.pack('<I', buf) + b'\x6a\x00\x68' + struct.pack('<I', 0xde) +
+                             b'\xb8' + struct.pack('<I', base + 0x4811) + b'\xff\xe0')
+                call(at, [], 'command send')
+            sc = tm_var['screen'] = {'fd': [], 'cbw': []}
+            live = [b for b in rt_copies if not (usbrt_variant == 'closed' and b == rt_copies[1])]
+            for base, n in [(live[0], 5)] + [(live[-1], 3), (live[-1], 4)]:
+                sc['fd'].append((base, fd(base, n), n))
+            for op, ln in ((0x12, 0x24), (0x25, 8)):
+                cbw(live[-1], op, ln)
+                sc['cbw'].append((live[-1], op, ln))
+            sc['fb_before_rtb'] = bytes(mu.mem_read(FB, FB_W * FB_H * 4))
     if profile:                                                   # timer ticks with fake interrupt frames
         tev = [e for e in evs.values() if e.get('type') == 0x80000200]
         img = bytes(mu.mem_read(LOAD, 0x3000))
@@ -795,6 +877,14 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     final = struct.unpack('<I', mu.mem_read(GMA_MMIO + 0x6018, 4))[0] if gma else None
     nb_now = bytes(mu.mem_read(NB_IMG, 0x3000))
     nb_changed = [i for i in range(0x3000) if nb_now[i] != nb_orig[i]]
+    if usbtrace and screen and 'screen' in tm_var:
+        sc = tm_var['screen']
+        live = [b for b in rt_copies if not (usbrt_variant == 'closed' and b == rt_copies[1])]
+        at = USB_AREA + 0x38000 + 0x400
+        mu.mem_write(at, b'\x6a\x06\xb8' + struct.pack('<I', live[-1] + 0x1381) + b'\xff\xd0\x83\xc4\x04\xc3')
+        call(at, [], 'FixedDelay after ReadyToBoot')
+        sc['fb_end'] = bytes(mu.mem_read(FB, FB_W * FB_H * 4))
+        sc['rt_end'] = [bytes(mu.mem_read(b, 0x9f80)) for b in rt_copies]
     if usbtrace:
         tm_var['bs_stall'] = rd(BS + 0x88)
         hs = rd(BS + 0x0c); crc = rd(BS + 0x10)
@@ -817,7 +907,8 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
 
 
 def main():
-    usbtrace = '--usbtrace' in sys.argv                           # ... and -DUSBTRACE
+    screen = '--screen' in sys.argv                               # ... and -DSCREEN
+    usbtrace = '--usbtrace' in sys.argv or screen                 # ... and -DUSBTRACE
     profile = '--profile' in sys.argv or usbtrace                 # ... with -DPROFILE as well
     timing = '--timing' in sys.argv or profile                    # the -DTIMING development build
     dxe, app = (open(p, 'rb').read() for p in [x for x in sys.argv[1:] if not x.startswith('--')][:2])
@@ -930,6 +1021,8 @@ def main():
         ('the same code under another file GUID: USBRT left alone', dxe, dict(store=lm(CARD), usbrt_variant='guid'), 0, True, MAC, True),
         ('USBRT image smaller than the sites: left alone', dxe, dict(store=lm(CARD), usbrt_variant='small'), 0, True, MAC, True),
         ('USBRT with no FilePath: left alone', dxe, dict(store=lm(CARD), usbrt_variant='nopath'), 0, True, MAC, True),
+        ('screen trace build: USBRT not relocated yet: no hooks, nothing drawn from SMM', dxe, dict(store=lm(CARD), screen_variant='unrelocated'), 0, True, MAC, True),
+        ('screen trace build: TSC past 5 minutes: the SMM hooks draw nothing', dxe, dict(store=lm(CARD), fake_tsc_hi=0x5d), 0, True, MAC, True),
         ('app build: MmcMediaDevice left alone', app, dict(store=lm(CARD), cpu_rev=0x217, enumerated_at_entry=True, mmc_img='before'), 0x80000014, False, MAC, True),
     ]
     bad = 0
@@ -953,7 +1046,7 @@ def main():
         # NBDXE (with the 'value' variant) writes its own value; the notify must leave that alone
         if kw.get('nb_variant') == 'value':
             want_pclk = 'value'
-        r = run(img, timing=timing, profile=profile and img is dxe, usbtrace=usbtrace and img is dxe, **kw)
+        r = run(img, timing=timing, profile=profile and img is dxe, usbtrace=usbtrace and img is dxe, screen=screen and img is dxe, **kw)
         p = list(r['errors'])
         tv = r['tm_var']
         if timing and img is dxe and want_ev:                      # ReadyToBoot ran: the records published
@@ -965,7 +1058,7 @@ def main():
             elif tags[0] != b'ENTR' or tags[-1] != b'RTB ' or b'ENTE' not in tags:
                 p.append('timing records %s' % tags)
             else:
-                ts = [t for _, t in recs]
+                ts = [(t - recs[0][1]) & 0xffffffff for _, t in recs]   # TSC >> 10 wraps (the host's TSC here)
                 if ts != sorted(ts):
                     p.append('timestamps go backwards: %s' % ts)
                 if not (kw.get('register_fails') or kw.get('create_event_fails')):
@@ -1012,6 +1105,57 @@ def main():
                 p.append('C records %s, expected %s' % ([(hex(a), hex(b)) for a, b in C], [(hex(a), hex(b)) for a, b in want_C]))
             if any(en < st_ for st_, en, c, inf, ex in recs if inf >> 24 in (0x53, 0x54)):
                 p.append('a record ends before it starts')
+            if screen:
+                sc = tv.get('screen', {})
+                sv = kw.get('screen_variant', 'stock')
+                uv_ = kw.get('usbrt_variant', 'stock')
+                seen_ = kw.get('usbrt_img', 'after') == 'after' and uv_ not in ('guid', 'nopath', 'small')
+                I = [(en, inf & 0xff) for st_, en, c, inf, ex in recs if inf >> 24 == 0x49]
+                want_I = [(b_, 2 if (sv == 'unrelocated' or (uv_ == 'closed' and k_ == 1)) else 1)
+                          for k_, b_ in enumerate([USB_AREA + 0x10000, USB_AREA + 0x20000])] if seen_ else []
+                if I != want_I:
+                    p.append('I records %s, expected %s' % ([(hex(a), b) for a, b in I], [(hex(a), b) for a, b in want_I]))
+                hooked = [b_ for b_, res in want_I if res == 1]
+                for k_, b_ in enumerate([USB_AREA + 0x10000, USB_AREA + 0x20000]):
+                    m_ = sc['rt_end'][k_]
+                    if b_ in hooked:
+                        t1 = b_ + 0x1386 + struct.unpack_from('<i', m_, 0x1382)[0]
+                        t2 = b_ + 0x4816 + struct.unpack_from('<i', m_, 0x4812)[0]
+                        if m_[0x1381] != 0xe9 or m_[0x1386:0x138a] != b'\x90' * 4 or m_[0x4811] != 0xe8 or \
+                                not (b_ + 0x9920 <= t1 < b_ + 0x9f6c and b_ + 0x9920 <= t2 < b_ + 0x9f6c):
+                            p.append('copy %d hooks %s %s' % (k_, m_[0x1381:0x138a].hex(), m_[0x4811:0x4816].hex()))
+                    elif m_[0x1381:0x138a] != r['rt_orig'][k_][0x1381:0x138a] or m_[0x4811:0x4816] != r['rt_orig'][k_][0x4811:0x4816] \
+                            or m_[0x9920:0x9f6c] != r['rt_orig'][k_][0x9920:0x9f6c]:
+                        p.append('copy %d changed although not hooked' % k_)
+                exp = {}
+                T_ = [(st_, en, inf) for st_, en, c, inf, ex in recs if inf >> 24 == 0x54]
+                if T_:
+                    st_, en, inf = T_[-1]
+                    fs = (inf >> 8) & 0xffff
+                    render(exp, 8, 8, ((fs & 0xff) << 8) | (fs >> 8), 4)
+                    render(exp, 88, 8, st_ >> 10, 5)
+                    render(exp, 184, 8, (en - st_) >> 10, 5)
+                    render(exp, 280, 8, len(T_), 4)
+                smm = kw.get('fake_tsc_hi', 0) < 0x5d
+                fdh = [(b_, ret_, n_) for b_, ret_, n_ in sc.get('fd', []) if b_ in hooked]
+                if fdh and smm:
+                    b_, ret_, n_ = fdh[-1]
+                    render(exp, 8, 32, (ret_ - b_) & 0xfffff, 5)
+                    render(exp, 88, 32, n_, 5)
+                    render(exp, 184, 32, sum(1 for x in fdh if x[0] == b_), 6)
+                cb = [(b_, op, ln) for b_, op, ln in sc.get('cbw', []) if b_ in hooked]
+                if cb and smm:
+                    b_, op, ln = cb[-1]
+                    render(exp, 8, 56, op, 2)
+                    render(exp, 56, 56, ln, 8)
+                    render(exp, 184 + 16, 56, sum(1 for x in cb if x[0] == b_), 6)
+                fbb = sc.get('fb_before_rtb', b'')
+                badpx = [(x, y) for y in range(0, 80) for x in range(0, 400)
+                         if struct.unpack_from('<I', fbb, (y * FB_W + x) * 4)[0] != exp.get((x, y), 0)]
+                if badpx:
+                    p.append('framebuffer differs at %d pixels: drawn %s, expected %s' % (len(badpx), read_screen(fbb), read_screen(exp)))
+                if sc.get('fb_end') != fbb:
+                    p.append('drawn after ReadyToBoot')
         if profile and img is dxe and want_ev and not (kw.get('register_fails') or kw.get('create_event_fails')):
             tev = tv.get('tev') or []
             if len(tev) != 1 or tev[0]['tpl'] != 16:
@@ -1037,7 +1181,7 @@ def main():
                 p.append('samples %s, expected %s' % ([g[1:] for g in got][:3], want[:3]))
             if any(set(k for k in pr if not k.startswith('BlwUsbTr')) - {'BlwProfImg'} - {'BlwProf%02X' % i for i in range((len(want) + 63) // 64)}):
                 p.append('sample variables %s' % sorted(pr))
-            if [g[0] for g in got] != sorted(g[0] for g in got):
+            if got and [(g[0] - got[0][0]) & 0xffffffff for g in got] != sorted((g[0] - got[0][0]) & 0xffffffff for g in got):
                 p.append('sample timestamps not in order')
         # NBDXE patch
         if want_nbp == 'patched':
@@ -1062,6 +1206,9 @@ def main():
             if wbc:
                 want[0x530f:0x5313] = (0x3415).to_bytes(4, 'little')
                 want[0x3fa4] = 50
+            if screen and img is dxe:
+                masked = set(range(0x1381, 0x138a)) | set(range(0x4812, 0x4816)) | set(range(0x9920, 0x9920 + 0x64c))
+                n_ = bytes(o_[i] if i in masked else n_[i] for i in range(len(n_)))
             if n_ != bytes(want):
                 p.append('USBRT copy %d changed at %s, expected %s' % (k, [hex(i) for i in range(len(o_)) if o_[i] != n_[i]][:8],
                                                                      [hex(i) for i in range(len(o_)) if o_[i] != want[i]][:8]))

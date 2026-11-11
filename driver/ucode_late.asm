@@ -200,6 +200,11 @@ entry:
 %ifdef USBTRACE
         call    ut_start
 %endif
+%ifdef SCREEN
+        lea     eax, [edi + (tm_g_gop - entry.here)]    ; the framebuffer, once it is there
+        lea     ecx, [edi + (st_gop_notify - entry.here)]
+        call    notify_on
+%endif
         mov     eax, 'ENTE'
         call    tm_rec
 %endif
@@ -769,6 +774,9 @@ mac_ok: xor     eax, eax
 %include "img_patch.inc"
 %ifdef TIMING
 %include "timing.inc"
+%endif
+%ifdef SCREEN
+%include "screentrace.inc"
 %endif
 
         align   4, db 0

@@ -858,6 +858,16 @@ ut_trig:
         rdtsc
         shrd    eax, edx, 10
         mov     [ebp - 4], eax
+%ifdef SCREEN
+        inc     dword [edi + (st_nreq - .here)] ; on screen: the request, before it runs
+        push    dword [edi + (st_nreq - .here)]
+        push    0
+        push    dword [ebp - 4]
+        push    dword [ebp - 8]
+        push    1
+        call    st_draw_req
+        add     esp, 20
+%endif
         mov     ecx, 5
 .cp:    push    dword [ebp + 4 + ecx * 4]
         loop    .cp
@@ -866,6 +876,17 @@ ut_trig:
         mov     ebx, eax                        ; status
         rdtsc
         shrd    eax, edx, 10
+%ifdef SCREEN
+        push    eax                             ; on screen: and how long it took
+        push    dword [edi + (st_nreq - .here)]
+        push    eax
+        push    dword [ebp - 4]
+        push    dword [ebp - 8]
+        push    0
+        call    st_draw_req
+        add     esp, 20
+        pop     eax
+%endif
         push    0                               ; no merging
         push    ebx                             ; extra: status
         push    dword [ebp - 8]
@@ -1019,6 +1040,23 @@ ut_image:
         push    eax
         call    ut_check
         add     esp, 8
+%ifdef SCREEN
+        push    dword [esi + 0x28]              ; the hooks for the on-screen trace
+        push    dword [esi + 0x20]
+        call    st_install
+        add     esp, 8
+        push    0                               ; an I record: end = base, info = the result
+        push    0
+        or      eax, 'I' << 24
+        push    eax
+        push    0
+        push    dword [esi + 0x20]
+        rdtsc
+        shrd    eax, edx, 10
+        push    eax
+        call    ut_add
+        add     esp, 24
+%endif
 .o:     pop     esi
         pop     edx
         pop     ecx
@@ -1034,6 +1072,9 @@ ut_stop:
         call    .here
 .here:  pop     edi
         mov     byte [edi + (ut_stopped - .here)], 1
+%ifdef SCREEN
+        mov     dword [edi + (st_fb - .here)], 0 ; the SMM stubs stop drawing from now on
+%endif
         mov     ebx, [edi + (ut_bs - .here)]
         test    ebx, ebx
         jz      .t
