@@ -29,6 +29,18 @@
 ;      waits up to 30 s and sees nothing wrong. Now 20 s for all of them. The waits end as soon
 ;      as the device answers; only a device that never answers at all costs more (20 s, not 5,
 ;      per attempt: USBRT's transfers never give up on their own, error counter CErr = 0).
+;   F  READ CAPACITY(10) of a drive over 2 TiB answers FFFFFFFF ("ask READ CAPACITY(16)"); USBRT
+;      never asks, and goes on to READ(10). An ASMedia ASM1053 caddy (174c:55aa) with a 4 TB drive
+;      hangs on READ(10) until the host has sent READ CAPACITY(16): no data, then not even the
+;      next command block (replayed from Linux through usbfs, 2026-11-11; Linux always sends it).
+;      So READ CAPACITY's call into the command dispatcher (RVA 0x4a5b) goes to a stub (f_blob,
+;      put at the end of USBRT's relocation section) that, when the answer is FFFFFFFF, also sends
+;      READ CAPACITY(16), then puts READ CAPACITY(10)'s answer back for USBRT to read as before.
+;   G  The error counter (CErr) in the transfer descriptors of control transfers (setup requests)
+;      is 0, so a device that answers with garbage is retried for the whole timeout (the Joggler's
+;      internal Wi-Fi does that while a powered ASM1053 caddy is attached: 20 s on every boot).
+;      Now 3, as Linux has it: three bad transactions in a row halt the transfer, which USBRT
+;      already handles (a stall), and its enumeration retries with a port reset.
 ; Each is made only where the whole instruction sequence around it is the stock one (none has a
 ; relocated byte), and each value is read back. FixedDelay (RVA 0x1381) counts 15 us refresh
 ; ticks: 0x29a = 10 ms, 0x3415 = 200 ms.
@@ -57,7 +69,7 @@ urt_patch_image:
         repe    cmpsb
         pop     edi
         jne     .no
-        cmp     dword [ebx + 0x28], 0x5803      ; ImageSize: past the last site
+        cmp     dword [ebx + 0x28], URT_IMAGE_SIZE ; ImageSize: USBRT's (F's stub goes in at the end)
         jb      .no
         mov     esi, [ebx + 0x20]               ; ImageBase
         test    esi, esi
@@ -157,7 +169,69 @@ urt_patch_image:
         cmp     ecx, 4
         jb      .e_set
         or      ebx, 8
-.x:     xor     eax, eax
+.x:     lea     eax, [esi + 0x4a01]             ; F: READ CAPACITY(10), its call into the dispatcher
+        lea     ecx, [edi + (urt_sig_f1 - .here)]
+        mov     edx, 8
+        call    .cmp
+        jne     .g
+        lea     eax, [esi + 0x4a50]
+        lea     ecx, [edi + (urt_sig_f2 - .here)]
+        mov     edx, 21
+        call    .cmp
+        jne     .g
+        lea     eax, [esi + 0x418c]             ; ...and the parameter-clearing function the stub calls
+        lea     ecx, [edi + (urt_sig_f3 - .here)]
+        mov     edx, 3
+        call    .cmp
+        jne     .g
+        lea     eax, [esi + 0x4193]
+        lea     ecx, [edi + (urt_sig_f3 - .here) + 3]
+        mov     edx, 15
+        call    .cmp
+        jne     .g
+        push    esi                             ; the stub, then its base, then the call to it (last)
+        push    edi
+        lea     eax, [esi + F_RVA]
+        lea     esi, [edi + (f_blob - .here)]
+        mov     edi, eax
+        mov     ecx, F_LEN
+        cld
+        rep     movsb
+        pop     edi
+        pop     esi
+        mov     [esi + F_RVA + (f_base - f_blob)], esi
+        mov     dword [esi + 0x4a5c], F_RVA + (f_entry - f_blob) - 0x4a60
+        cmp     dword [esi + 0x4a5c], F_RVA + (f_entry - f_blob) - 0x4a60
+        jne     .g
+        or      ebx, 16
+.g:     xor     ecx, ecx                        ; G: all five tokens stock, or none is changed
+.g_chk: imul    edx, ecx, 7
+        lea     eax, [edi + (urt_g_sig - .here) + edx]
+        push    ecx
+        mov     ecx, eax
+        mov     eax, [esp]
+        mov     eax, [edi + (urt_g_rva - .here) + eax * 4]
+        add     eax, esi
+        mov     edx, 7
+        call    .cmp
+        pop     ecx
+        jne     .y
+        inc     ecx
+        cmp     ecx, 5
+        jb      .g_chk
+        xor     ecx, ecx
+.g_set: mov     eax, [edi + (urt_g_rva - .here) + ecx * 4]
+        or      byte [esi + eax + 4], 0x0c      ; the token's CErr field: 3
+        imul    edx, ecx, 7
+        mov     dl, [edi + (urt_g_sig - .here) + edx + 4]
+        or      dl, 0x0c
+        cmp     [esi + eax + 4], dl
+        jne     .y
+        inc     ecx
+        cmp     ecx, 5
+        jb      .g_set
+        or      ebx, 32
+.y:     xor     eax, eax
         test    ebx, ebx
         setnz   al
         jmp     .out
@@ -179,6 +253,72 @@ urt_patch_image:
         ret
 
 URT_TIMEOUT_MS  equ     20000                   ; E: every transfer phase may take this long
+URT_IMAGE_SIZE  equ     0x9f80                  ; USBRT's ImageSize (the .reloc section ends there)
+F_RVA           equ     URT_IMAGE_SIZE - F_SPACE ; F's stub: the end of the .reloc section
+F_SPACE         equ     0xb0
+
+; F's stub, copied to F_RVA in each USBRT copy (position-independent). It replaces READ CAPACITY's
+; call into the command dispatcher: cdecl, the device as its one argument; returns what that call
+; returns, keeps ebx, esi, edi, ebp.
+f_blob:
+f_base:         dd 0                            ; this copy's base (patched)
+f_entry:
+        push    ebp
+        push    ebx
+        push    esi
+        push    edi
+        mov     edi, [esp + 20]                 ; the device
+        call    .h
+.h:     pop     ebp
+        mov     ebx, [ebp + (f_base - .h)]
+        push    edi
+        lea     eax, [ebx + 0x49ae]
+        call    eax                             ; READ CAPACITY(10), as USBRT sends it
+        pop     ecx
+        test    eax, eax
+        jz      .out
+        mov     esi, [ebx + 0x98f0]             ; gUsbData
+        mov     edx, [esi + 0xdcd]              ; the answer
+        cmp     dword [edx], 0xffffffff         ; last block "FFFFFFFF": over 2 TiB
+        jne     .out
+        push    eax                             ; (its result and its 8 bytes, for later)
+        push    dword [edx + 4]
+        push    dword [edx]
+        push    dword [esi + 0xde6]             ; the command buffer (USBRT builds the block in it)
+        lea     eax, [ebx + 0x418c]
+        call    eax                             ; the command parameters cleared, as USBRT does
+        pop     ecx                             ; (that kept ecx and edx)
+        xor     eax, eax
+        mov     [ecx], eax
+        mov     [ecx + 4], eax
+        mov     [ecx + 8], eax
+        mov     [ecx + 12], eax
+        mov     word [ecx], 0x109e              ; READ CAPACITY(16): 9E 10, allocation length 32
+        mov     byte [ecx + 13], 32
+        mov     [esi + 0xde6], ecx
+        mov     byte [esi + 0xdea], 16          ; command length
+        mov     byte [esi + 0xdeb], 0x80        ; data in
+        mov     [esi + 0xdec], edx              ; into the same buffer
+        mov     dword [esi + 0xdf0], 32
+        push    edi
+        lea     eax, [ebx + 0x49ae]
+        call    eax                             ; (what it answers doesn't matter: the bridge has seen it)
+        pop     ecx
+        mov     esi, [ebx + 0x98f0]
+        mov     edx, [esi + 0xdcd]
+        pop     dword [edx]                     ; READ CAPACITY(10)'s answer back, for USBRT to read
+        pop     dword [edx + 4]
+        pop     eax                             ; and its result
+.out:   pop     edi
+        pop     esi
+        pop     ebx
+        pop     ebp
+        ret
+f_end:
+F_LEN           equ     f_end - f_blob
+%if F_LEN > F_SPACE
+%error "F's stub too big"
+%endif
 
 urt_n:          db 0                            ; USBRT copies changed so far
         align   4, db 0
@@ -198,6 +338,17 @@ urt_sig_e12:    db      0x66, 0xc7, 0x80, 0x12, 0x0e, 0x00, 0x00, 0x88, 0x13 ; m
 urt_sig_de4:    db      0x66, 0xc7, 0x80, 0xe4, 0x0d, 0x00, 0x00, 0x10, 0x27 ; mov word [eax+0xde4], 10000
         align   4, db 0
 urt_e_rva:      dd      0x3382, 0x4a0e, 0x4eba, 0x57fa ; the default, then the three overrides
+urt_sig_f1:     db      0xc6, 0x06, 0x25, 0xe8, 0x83, 0xf7, 0xff, 0xff ; mov byte [esi], 0x25 (READ CAPACITY); call (+0x418c)
+urt_sig_f2:     db      0x57, 0xc7, 0x80, 0xf0, 0x0d, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00 ; push edi; mov dword [eax+0xdf0], 8
+                db      0xe8, 0x4e, 0xff, 0xff, 0xff, 0x3b, 0xc3, 0x59, 0x8b, 0x0d ; call (+0x49ae); cmp eax, ebx; pop ecx; mov ecx, ...
+urt_sig_f3:     db      0x57, 0x8b, 0x3d                ; push edi; mov edi, [gUsbData] (relocated dword skipped)
+                db      0x81, 0xc7, 0xe6, 0x0d, 0x00, 0x00, 0x33, 0xc0, 0xab, 0xab, 0xab, 0xab, 0xab, 0x5f, 0xc3 ; ... stosd x5; pop edi; ret
+urt_g_rva:      dd      0x6f95, 0x6fc4, 0x6fcd, 0x6ffa, 0x7003 ; G: setup, data in/out, status in/out
+urt_g_sig:      db      0xc7, 0x43, 0x08, 0x80, 0x82, 0x08, 0x00 ; mov dword [ebx+8], 0x88280 (SETUP, 8 bytes, active)
+                db      0xc7, 0x40, 0x08, 0x80, 0x81, 0x00, 0x80 ; mov dword [eax+8], 0x80008180 (IN)
+                db      0xc7, 0x40, 0x08, 0x80, 0x80, 0x00, 0x80 ; mov dword [eax+8], 0x80008080 (OUT)
+                db      0xc7, 0x40, 0x08, 0x80, 0x81, 0x00, 0x80
+                db      0xc7, 0x40, 0x08, 0x80, 0x80, 0x00, 0x80
 %ifdef STARTUNIT
 %include "usbrt_sig.inc"
 %endif

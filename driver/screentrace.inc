@@ -14,10 +14,9 @@
 ;         (gUsbData+0xe14: 1 bulk stall, 2 bulk timeout, 4 control stall) after it, as 4 digits;
 ;         the device's address; wRequest (bRequest bmRequestType), wValue, wIndex, wLength; what
 ;         the transfer function returned (bytes, 0 = failed); how long it took (TSC >> 20)
-;   y=224 USBRT's error log (gUsbData+0x70: how many, then up to 8 entries from +0x10, the last
-;         ones), and the transfer timeout in force (gUsbData+0xe12, ms)
-;   y=248 the last root-port status check: controller, port, result, how many; then how many
-;         control transfers so far
+;   (y=224 showed USBRT's error log in 26.11.96 and .89; dropped in .88 for F's stub's room)
+;   (y=248 showed the last root-port status check in 26.11.96 and .89; also dropped in .88: the
+;   ring shows each transfer's port. The port-status hooks stay, recording only.)
 ; The control-transfer and port-status lines come from the controllers' function tables: USBRT
 ; fills them when USB starts (long after the hooks go in), from relocated addresses in four
 ; instructions, which then point at the blob instead.
@@ -32,7 +31,7 @@
 
 ST_MAGIC        equ     'BLWF'
 ST_AREA         equ     0x9920                  ; USBRT's .reloc section (0x64c bytes)
-ST_AREA_LEN     equ     0x64c
+ST_AREA_LEN     equ     F_RVA - ST_AREA         ; (usbrt.inc's F stub has the rest of the section)
 ST_IMAGE_SIZE   equ     0x9f80
 
 ; ---- the blob: copied into each USBRT copy; position-independent ----
@@ -344,7 +343,7 @@ st_wrap:
         mov     edx, [edx + 0x98f0]
         test    edx, edx
         ret
-; .draw: the ring (oldest first), the error log line and the port line, if drawing is allowed.
+; .draw: the ring (oldest first), if drawing is allowed.
 ; Clobbers everything but ebp.
 .draw:  lea     ecx, [ebp + (st_fbblk - .h)]
         call    st_gate
@@ -379,61 +378,6 @@ st_wrap:
         inc     edi
         cmp     edi, 4
         jb      .line
-        call    .g                              ; the error log and timeout
-        jz      .r
-        mov     esi, edx
-        movzx   edi, byte [esi + 0x70]
-        push    2
-        push    edi
-        push    224
-        push    8
-        push    ebx
-        call    st_hex
-        add     esp, 20
-        sub     edi, 8                          ; the last 8 (or the first, if fewer)
-        jae     .e0
-        xor     edi, edi
-.e0:    xor     ecx, ecx
-.ent:   push    ecx
-        push    4
-        lea     eax, [edi + ecx]
-        movzx   eax, word [esi + 0x10 + eax * 2]
-        push    eax
-        push    224
-        imul    eax, ecx, 80
-        add     eax, 48
-        push    eax
-        push    ebx
-        call    st_hex
-        add     esp, 20
-        pop     ecx
-        inc     ecx
-        cmp     ecx, 8
-        jb      .ent
-        push    4
-        movzx   eax, word [esi + 0xe12]
-        push    eax
-        push    224
-        push    688
-        push    ebx
-        call    st_hex
-        add     esp, 20
-.r:     xor     ecx, ecx                        ; the port status line
-.rf:    push    ecx
-        movzx   eax, byte [ebp + (st_rfields - .h) + ecx * 4 + 3]
-        push    eax
-        movzx   eax, byte [ebp + (st_rfields - .h) + ecx * 4]
-        push    dword [ebp + (st_rhs - .h) + eax]
-        push    248
-        movzx   eax, word [ebp + (st_rfields - .h) + ecx * 4 + 1]
-        push    eax
-        push    ebx
-        call    st_hex
-        add     esp, 20
-        pop     ecx
-        inc     ecx
-        cmp     ecx, 5
-        jb      .rf
 .dr:    ret
 st_kinds:       db      0x31, 0x11, 0x30, 0x10, 0x32, 0x12, 0x33, 0x13  ; controller | 1 control, 2 bulk, 3 interrupt
 st_fields:                                      ; offset in the entry (words), x, digits
@@ -461,23 +405,6 @@ st_fields:                                      ; offset in the entry (words), x
         db      14
         dw      568
         db      4
-st_rfields:                                     ; offset from st_rhs, x, digits
-        db      0
-        dw      8
-        db      2
-        db      4
-        dw      48
-        db      2
-        db      8
-        dw      88
-        db      4
-        db      12                              ; st_nrhs
-        dw      168
-        db      5
-        db      16                              ; st_nctl
-        dw      264
-        db      5
-
 %include "sthex.inc"
 st_blob_end:
 ST_BLOB_LEN     equ     st_blob_end - st_blob

@@ -14,5 +14,5 @@ MUTATIONS = [
     ('E: wrong site address', F, 'dd      0x3382, 0x4a0e, 0x4eba, 0x57fa', 'dd      0x3382, 0x4a0e, 0x4eba, 0x57fb'),
     ('E: default checked against the override sig', F, '        jz      .e_one\n', '        jnz     .e_one\n'),
     ('E: value written one byte off', F, '        mov     word [esi + eax + 7], URT_TIMEOUT_MS\n', '        mov     word [esi + eax + 6], URT_TIMEOUT_MS\n'),
-    ('E: image-size guard too low', F, '0x28], 0x5803', '0x28], 0x5000'),
+    ('image-size guard too low', F, '0x28], URT_IMAGE_SIZE', '0x28], 0x5000'),
 ]

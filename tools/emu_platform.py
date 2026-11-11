@@ -89,6 +89,11 @@ SMMC_INST, SMMC_TRIG = USB_AREA + 0x30000, 0x30000020
 # The on-screen trace build (-DSCREEN): a 32-bit framebuffer behind a fake Graphics Output protocol.
 GOP_GUID = G('9042a9de-23dc-4a38-96fb-7aded080516a')
 FB, FB_W, FB_H = 0x0a000000, 800, 480
+ST_END = 0x9ed0                               # the screen trace's part of USBRT's .reloc section ends here...
+F_RVA, F_SPACE = 0x9ed0, 0xb0                 # ...and usbrt.inc's F stub has the rest
+RC16_CDB = bytes.fromhex('9e10' + '00' * 8 + '00000020' + '0000')
+G_SITES = ((0x6f95, 'c74308808208' '00'), (0x6fc4, 'c74008808100' '80'), (0x6fcd, 'c74008808000' '80'),
+           (0x6ffa, 'c74008808100' '80'), (0x7003, 'c74008808000' '80'))
 G_FAKE = USB_AREA + 0x33000                   # the screen build's gUsbData (status byte, error log, timeout)
 TABLE_FILLS = ((0x7401, 0x6ee4, 0x25), (0x2765, 0x20a7, 0x25), (0x73ec, 0x639e, 0x19), (0x2750, 0x151b, 0x19),
                (0x7408, 0x70b2, 0x29), (0x276c, 0x26c1, 0x29), (0x740f, 0x72b7, 0x2d), (0x2773, 0x2329, 0x2d))
@@ -318,6 +323,17 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     if usbrt_variant == 'start_changed':
         su[0x2b] ^= 1                                             # (the 0x1b becomes 0x1a)
     rt[0x4e84:0x4ef4] = su
+    # F: READ CAPACITY's command and its call into the dispatcher; the parameter-clearing function
+    # (its relocated dword per copy, below); G: the five control-transfer tokens
+    rt[0x4a01:0x4a09] = bytes.fromhex('c60625e883f7ffff')
+    rt[0x4a50:0x4a65] = bytes.fromhex('57c780f00d0000080000' '00e84effffff3bc3598b0d')
+    rt[0x418c:0x41a2] = bytes.fromhex('578b3d' '00000000' '81c7e60d000033c0ababababab5fc3')
+    for a_, h_ in G_SITES:
+        rt[a_:a_ + 7] = bytes.fromhex(h_)
+    if usbrt_variant == 'f_changed':
+        rt[0x4a50 + 20] ^= 1
+    if usbrt_variant == 'g_changed':
+        rt[0x7003 + 6] ^= 1
     # D: the "BOT reset"'s argument pushes; E: the 5 s default and the 10 s overrides (+0x4eba is in StartUnit)
     rt[0x437e:0x439b] = bytes.fromhex('6a0083ea106a00c1fa0468ff0000006bd241576a2181c1f40100005651')
     rt[0x3382:0x338b] = bytes.fromhex('66c780120e00008813')
@@ -327,7 +343,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         rt[0x437e + 28] ^= 1                                      # the reset's last push (push ecx -> push edx)
     if usbrt_variant == 'e_changed':
         rt[0x57fa + 8] ^= 1                                       # the last override's value
-    for a_ in (0x418c, 0x49ae, 0x2aed):
+    for a_ in (0x49ae, 0x2aed):
         rt[a_] = 0xc3
     rt[0x56d0:0x56d5] = bytes.fromhex('595e5bc9c3')                 # identify's pop ecx; (then the test returns)
     # the controllers' function-table fills (their relocated targets per copy, below) and fakes behind them
@@ -361,6 +377,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         for site, tgt, _ in TABLE_FILLS:
             rt[site + 3:site + 7] = struct.pack('<I', base + tgt + (1 if screen_variant == 'tables_changed' and site == 0x2773 else 0))
         rt[0x98f0:0x98f4] = struct.pack('<I', G_FAKE)                 # gUsbData
+        rt[0x418f:0x4193] = struct.pack('<I', base + 0x98f0)          # (relocated)
         mu.mem_write(base, b'\xff' * 0x9f80 if (usbrt_variant == 'closed' and base == rt_copies[1]) else bytes(rt))
     rt_orig = [bytes(mu.mem_read(a, 0x9f80)) for a in rt_copies]
     mu.mem_write(USB_AREA + 0x7200, struct.pack('<I', USB_AREA + 0x7000))  # the fake gUsbData pointer
@@ -394,7 +411,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 uc.reg_write(UC_X86_REG_EIP, addr + 2)
         def hook_stub_rdtsc():                                    # once the stubs are in: hook just their rdtscs
             for base in rt_copies:
-                area = bytes(mu.mem_read(base + 0x9920, 0x64c))
+                area = bytes(mu.mem_read(base + 0x9920, ST_END - 0x9920))
                 i = area.find(b'\x0f\x31')
                 while i >= 0:
                     mu.hook_add(UC_HOOK_CODE, rdtsc_hook, begin=base + 0x9920 + i, end=base + 0x9920 + i)
@@ -826,6 +843,48 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             call(at, [], 'identify\'s first step (copy %d)' % k_)
             cdb = bytes(mu.mem_read(USB_AREA + 0x3a000, 5))
             ident.append((k_, cdb[0], cdb[4], struct.unpack('<H', mu.mem_read(USB_AREA + 0x7000 + 0xde4, 2))[0]))
+        # READ CAPACITY's call into the dispatcher, run (F): a stand-in dispatcher answers as a caddy
+        # would: FFFFFFFF ('big', a drive over 2 TiB), a normal capacity ('small'), or nothing ('fail')
+        rcap = tm_var['rcap'] = []
+        disp = {'on': False, 'log': [], 'case': None}
+        def disp_hook(uc, addr, size, _):
+            if not disp['on']:
+                return
+            r32 = lambda a: struct.unpack('<I', uc.mem_read(a, 4))[0]
+            cmdp, dea, deb = r32(G_FAKE + 0xde6), uc.mem_read(G_FAKE + 0xdea, 1)[0], uc.mem_read(G_FAKE + 0xdeb, 1)[0]
+            dec, df0 = r32(G_FAKE + 0xdec), r32(G_FAKE + 0xdf0)
+            cdb = bytes(uc.mem_read(cmdp, 16))
+            disp['log'].append((cdb[:dea], deb, dec, df0, cmdp, uc.reg_read(UC_X86_REG_ESP) & 3))
+            uc.mem_write(cmdp, b'USBC' + bytes(range(0x41, 0x41 + 27)))   # (USBRT builds the command block in place)
+            ret = 0
+            if cdb[0] == 0x25 and disp['case'] != 'fail':
+                uc.mem_write(dec, bytes.fromhex('ffffffff00000200' if disp['case'] == 'big' else '003fffff00000200'))
+                ret = 8
+            elif cdb[0] == 0x9e:
+                uc.mem_write(dec, bytes.fromhex('00000001d1c0beaf00000200') + b'\x11' * 20)
+                ret = 32
+            esp = uc.reg_read(UC_X86_REG_ESP)                     # (the dispatcher's own ret)
+            uc.reg_write(UC_X86_REG_EAX, ret)
+            uc.reg_write(UC_X86_REG_EIP, r32(esp))
+            uc.reg_write(UC_X86_REG_ESP, esp + 4)
+        for base in rt_copies:
+            mu.hook_add(UC_HOOK_CODE, disp_hook, begin=base + 0x49ae, end=base + 0x49ae)
+        cmdbuf, databuf = USB_AREA + 0x3b000, USB_AREA + 0x3b100
+        for k_, base in enumerate(rt_copies):
+            if usbrt_variant == 'closed' and k_ == 1:
+                continue
+            target = base + 0x4a60 + struct.unpack('<i', mu.mem_read(base + 0x4a5c, 4))[0]
+            for case in ('big', 'small', 'fail'):
+                mu.mem_write(cmdbuf, b'\x25' + b'\0' * 31)          # as READ CAPACITY sets things up
+                # (a failed command leaves the buffer as it was: here, a stale FFFFFFFF answer)
+                mu.mem_write(databuf, (bytes.fromhex('ffffffff00000200') if case == 'fail' else b'') + b'\0' * 64)
+                mu.mem_write(G_FAKE + 0xde6, struct.pack('<I', cmdbuf) + bytes([12, 0x80]) + struct.pack('<II', databuf, 8))
+                mu.mem_write(G_FAKE + 0xdcd, struct.pack('<I', databuf))
+                disp.update(on=True, log=[], case=case)
+                ret = call(target, [USB_AREA + 0x39000], 'READ CAPACITY (copy %d, %s)' % (k_, case))
+                disp['on'] = False
+                rcap.append((k_, case, target - base, ret, list(disp['log']), bytes(mu.mem_read(databuf, 8)),
+                             bytes(mu.mem_read(G_FAKE + 0xde6, 14))))
     if usbtrace:                                                  # UHCD, SmmControl
         uh = bytearray(0x68e0)
         uh[0x4fcd] = 0xa1 if uhcd_variant == 'stock' else 0x8b      # another UHCD: requests not decoded
@@ -1029,7 +1088,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     mmc_now = bytes(mu.mem_read(MMC_IMG, 0x34c0))
     cea_changed = [(i, mmc_now[i]) for i in range(0x34c0) if mmc_now[i] != mmc_orig[i]]
     rt_now = [bytes(mu.mem_read(a, 0x9f80)) for a in rt_copies]
-    return dict(ident=tm_var.get('ident'), rt_orig=rt_orig, rt_now=rt_now, cea_changed=cea_changed, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
+    return dict(ident=tm_var.get('ident'), rcap=tm_var.get('rcap'), rt_orig=rt_orig, rt_now=rt_now, cea_changed=cea_changed, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
                 mmc_ev=mmc_ev, nb_ev=nb_ev, evs=evs, mmio_writes=mmio_writes, dpll=final,
                 pp_final=struct.unpack('<I', mu.mem_read(GMA_MMIO + 0x61204, 4))[0] if gma else None,
                 nb_after_notify=nb_bad.get('after_notify'), wrapped=wrapped, entry_bio=entry_bio, late_bio=late_bio, in_image=in_image,
@@ -1162,6 +1221,8 @@ def main():
         ('USBRT\'s StartUnit not stock: identify keeps its (10 ms) wait', dxe, dict(store=lm(CARD), usbrt_variant='start_changed'), 0, True, MAC, True),
         ('USBRT\'s reset arguments not stock: the reset left as it is, the rest changed', dxe, dict(store=lm(CARD), usbrt_variant='d_changed'), 0, True, MAC, True),
         ('one of USBRT\'s four timeouts not stock: none of them changed', dxe, dict(store=lm(CARD), usbrt_variant='e_changed'), 0, True, MAC, True),
+        ('READ CAPACITY\'s dispatcher call not stock: no READ CAPACITY(16) stub', dxe, dict(store=lm(CARD), usbrt_variant='f_changed'), 0, True, MAC, True),
+        ('one control-transfer token not stock: CErr left at 0 in all five', dxe, dict(store=lm(CARD), usbrt_variant='g_changed'), 0, True, MAC, True),
         ('screen trace build: USBRT not relocated yet: no hooks, nothing drawn from SMM', dxe, dict(store=lm(CARD), screen_variant='unrelocated'), 0, True, MAC, True),
         ('screen trace build: TSC past 5 minutes: the SMM hooks draw nothing', dxe, dict(store=lm(CARD), fake_tsc_hi=0x5d), 0, True, MAC, True),
         ('screen trace build: no framebuffer yet when GOP appears, one by the first USB request: drawn', dxe, dict(store=lm(CARD), screen_variant='late_mode'), 0, True, MAC, True),
@@ -1282,15 +1343,15 @@ def main():
                         t3 = b_ + 0x4c66 + struct.unpack_from('<i', m_, 0x4c62)[0]
                         for site, tgt, _ in TABLE_FILLS:
                             to = struct.unpack_from('<I', m_, site + 3)[0]
-                            if (b_ in tabled) != (b_ + 0x9920 <= to < b_ + 0x9f6c) or (b_ not in tabled and m_[site:site + 7] != r['rt_orig'][k_][site:site + 7]):
+                            if (b_ in tabled) != (b_ + 0x9920 <= to < b_ + ST_END) or (b_ not in tabled and m_[site:site + 7] != r['rt_orig'][k_][site:site + 7]):
                                 p.append('copy %d: table fill at %#x stores %#x' % (k_, site, to))
                         if m_[0x1381] != 0xe9 or m_[0x1386:0x138a] != b'\x90' * 4 or m_[0x4811] != 0xe8 or \
                                 m_[0x4c61] != 0xe9 or m_[0x4c66:0x4c69] != b'\x90' * 3 or \
-                                not (b_ + 0x9920 <= t1 < b_ + 0x9f6c and b_ + 0x9920 <= t2 < b_ + 0x9f6c and b_ + 0x9920 <= t3 < b_ + 0x9f6c):
+                                not (b_ + 0x9920 <= t1 < b_ + ST_END and b_ + 0x9920 <= t2 < b_ + ST_END and b_ + 0x9920 <= t3 < b_ + ST_END):
                             p.append('copy %d hooks %s %s' % (k_, m_[0x1381:0x138a].hex(), m_[0x4811:0x4816].hex()))
                     elif m_[0x1381:0x138a] != r['rt_orig'][k_][0x1381:0x138a] or m_[0x4811:0x4816] != r['rt_orig'][k_][0x4811:0x4816] \
                             or m_[0x4c61:0x4c69] != r['rt_orig'][k_][0x4c61:0x4c69] \
-                            or m_[0x9920:0x9f6c] != r['rt_orig'][k_][0x9920:0x9f6c] \
+                            or m_[0x9920:ST_END] != r['rt_orig'][k_][0x9920:ST_END] \
                             or any(m_[s_:s_ + 7] != r['rt_orig'][k_][s_:s_ + 7] for s_, _, _ in TABLE_FILLS):
                         p.append('copy %d changed although not hooked' % k_)
                 Gr = [(en, (inf >> 8) & 1, inf & 0xff, c, ex) for st_, en, c, inf, ex in recs if inf >> 24 == 0x47]
@@ -1364,14 +1425,7 @@ def main():
                             render(d, x, y, v, nd)
                 if ct and smm:                                    # lines 6-9: the last 4 transfers; 10: errors; 11: port status
                     draw_ring(exp, ring_at(len(ct), False), (128, 152, 176, 200))
-                    render(exp, 8, 224, 11, 2)
-                    for j_ in range(8):
-                        render(exp, 48 + 80 * j_, 224, 0x100 + 3 + j_, 4)
-                    render(exp, 688, 224, 20000, 4)
-                    rh = [x for x in sc.get('rhs', []) if x[0] in tabled]
-                    last = (0x10 if rh[-1][1] else 0x30, rh[-1][2], rh[-1][3] or 0) if rh else (0, 0, 0)
-                    for v, (x, nd) in zip(last + (len(rh), len(ct)), ((8, 2), (48, 2), (88, 4), (168, 5), (264, 5))):
-                        render(exp, x, 248, v, nd)
+                    # (the error-log and port-status lines, y=224 and 248, are gone from 26.11.88: nothing there)
                     # while the 5th ran: all four ring lines; while the 7th (last) ran: the bottom line
                     for name, n_, ys, row0 in (('saved_ring', 5, (128, 152, 176, 200), 128), ('saved_line', 7, (200,), 200)):
                         mid = {}
@@ -1453,14 +1507,40 @@ def main():
             if urt_ok and readable and uv != 'e_changed':        # E: 20 s everywhere
                 for a_ in (0x3382, 0x4a0e, 0x4eba, 0x57fa):
                     want[a_ + 7:a_ + 9] = (20000).to_bytes(2, 'little')
+            base_ = [USB_AREA + 0x10000, USB_AREA + 0x20000][k]
+            if urt_ok and readable and uv != 'f_changed':        # F: the call to the stub; the stub (run below), its base
+                want[0x4a5c:0x4a60] = struct.pack('<i', F_RVA + 4 - 0x4a60)
+                want[F_RVA:0x9f80] = n_[F_RVA:0x9f80]
+                if struct.unpack_from('<I', n_, F_RVA)[0] != base_:
+                    p.append('USBRT copy %d: F stub base %#x' % (k, struct.unpack_from('<I', n_, F_RVA)[0]))
+            if urt_ok and readable and uv != 'g_changed':        # G: CErr = 3 in the five control tokens
+                for a_, _ in G_SITES:
+                    want[a_ + 4] |= 0x0c
             n_ = bytes(n_[:0x1251]) + bytes([o_[0x1251]]) + bytes(n_[0x1252:])   # (the fake IoRead8's own toggle byte)
             if screen and img is dxe:
                 masked = set(range(0x1381, 0x138a)) | set(range(0x4812, 0x4816)) | set(range(0x4c61, 0x4c69)) | \
-                    set(range(0x9920, 0x9920 + 0x64c)) | set(i for s_, _, _ in TABLE_FILLS for i in range(s_ + 3, s_ + 7))
+                    set(range(0x9920, ST_END)) | set(i for s_, _, _ in TABLE_FILLS for i in range(s_ + 3, s_ + 7))
                 n_ = bytes(o_[i] if i in masked else n_[i] for i in range(len(n_)))
             if n_ != bytes(want):
                 p.append('USBRT copy %d changed at %s, expected %s' % (k, [hex(i) for i in range(len(o_)) if o_[i] != n_[i]][:8],
                                                                      [hex(i) for i in range(len(o_)) if o_[i] != want[i]][:8]))
+        # READ CAPACITY, run (F): READ CAPACITY(16) after an FFFFFFFF answer only, with its exact command,
+        # and READ CAPACITY(10)'s answer and result back for USBRT
+        rc10 = (b'\x25' + b'\0' * 11, 0x80, USB_AREA + 0x3b100, 8, USB_AREA + 0x3b000, 0)
+        rc16 = (RC16_CDB, 0x80, USB_AREA + 0x3b100, 32, USB_AREA + 0x3b000, 0)
+        for k_, case, off, ret_, log, data8, params in r.get('rcap') or []:
+            hooked = urt_ok and not (k_ == 1 and uv == 'closed') and uv != 'f_changed'
+            if off != (F_RVA + 4 if hooked else 0x49ae):
+                p.append('copy %d: READ CAPACITY calls +%#x' % (k_, off))
+            want_log = [rc10] + ([rc16] if hooked and case == 'big' else [])
+            if log != want_log:
+                p.append('copy %d %s: dispatcher saw %s, expected %s' % (k_, case, [(l[0].hex(),) + tuple(l[1:]) for l in log],
+                                                                       [(w[0].hex(),) + tuple(w[1:]) for w in want_log]))
+            if ret_ != (0 if case == 'fail' else 8):
+                p.append('copy %d %s: READ CAPACITY returned %s' % (k_, case, ret_))
+            want8 = {'big': 'ffffffff00000200', 'small': '003fffff00000200', 'fail': 'ffffffff00000200'}[case]
+            if data8.hex() != want8:
+                p.append('copy %d %s: USBRT then reads %s, not %s' % (k_, case, data8.hex(), want8))
         # identify's first step, run: START STOP UNIT (start, 10 s timeout) where StartUnit is called
         for k_, op, start_bit, tmo in r.get('ident', []) or []:
             woke = urt_ok and not (k_ == 1 and uv == 'closed') and uv != 'a_changed' and startunit and uv != 'start_changed'

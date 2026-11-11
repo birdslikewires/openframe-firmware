@@ -1,4 +1,4 @@
-"""Mutations for screentrace.inc's transfer / port-status hook (26.11.89):
+"""Mutations for screentrace.inc's transfer / port-status hook (26.11.89; .88 without the error-log and port lines):
     venv/bin/python -I tools/mutate.py tools/mutations/ctl.py --base BASE --version 26.11.89 \\
         --define TIMING --define PROFILE --define USBTRACE --define SCREEN --mode timing,profile,usbtrace,screen"""
 F = 'driver/screentrace.inc'
@@ -11,9 +11,6 @@ MUTATIONS = [
     ('status byte not updated at the end', F, '        mov     [ebx + 1], cl', '        nop'),
     ('ring of 8, not 4', F, '        and     edx, 3\n        shl     edx, 4', '        and     edx, 7\n        shl     edx, 4'),
     ('ring drawn newest first', F, '        add     esi, edi\n        and     esi, 3', '        sub     esi, edi\n        and     esi, 3'),
-    ('error log: the last 7, not 8', F, '        sub     edi, 8                          ; the last 8', '        sub     edi, 7                          ; the last 8'),
-    ('wrong timeout field', F, '        movzx   eax, word [esi + 0xe12]', '        movzx   eax, word [esi + 0xe10]'),
-    ('port read from the wrong argument', F, '        movzx   eax, byte [esp + 44]\n        mov     [ebp + (st_rhs - .h) + 4], eax', '        movzx   eax, byte [esp + 48]\n        mov     [ebp + (st_rhs - .h) + 4], eax'),
     ('no not-returned marker', F, '        mov     dword [edx + 12], 0xeeee', '        mov     dword [edx + 12], 0xeeef'),
     ('not drawn as it starts', F, '        push    edx                             ; (the entry: arguments now at [esp+44])\n        call    .draw',
      '        push    edx                             ; (the entry: arguments now at [esp+44])\n        nop'),
