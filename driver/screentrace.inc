@@ -9,6 +9,18 @@
 ;   y=56  USBRT mass-storage command (SMM): SCSI opcode, data length, commands so far
 ;   y=80  the last 16 SCSI opcodes, oldest first (from 26.11.99)
 ;   y=104 USBRT's REQUEST SENSE (SMM): the sense code it returned (ASCQ ASC key), how many so far
+;   y=128..200  the last 4 control transfers (setup requests) on either USB controller, oldest
+;         first (from 26.11.96): controller (30 EHCI, 10 UHCI) and USBRT's transfer status byte
+;         (gUsbData+0xe14: 1 bulk stall, 2 bulk timeout, 4 control stall) after it, as 4 digits;
+;         the device's address; wRequest (bRequest bmRequestType), wValue, wIndex, wLength; what
+;         the transfer function returned (bytes, 0 = failed); how long it took (TSC >> 20)
+;   y=224 USBRT's error log (gUsbData+0x70: how many, then up to 8 entries from +0x10, the last
+;         ones), and the transfer timeout in force (gUsbData+0xe12, ms)
+;   y=248 the last root-port status check: controller, port, result, how many; then how many
+;         control transfers so far
+; The control-transfer and port-status lines come from the controllers' function tables: USBRT
+; fills them when USB starts (long after the hooks go in), from relocated addresses in four
+; instructions, which then point at the blob instead.
 ; The SMM lines come from two hooks put into each USBRT copy as it loads (while SMRAM is open):
 ; FixedDelay's first instructions jump to a stub, and the call that sends a command block goes
 ; to a stub first. The stub (st_blob, position-independent) is copied into USBRT's relocation
@@ -31,6 +43,11 @@ st_nfd:         dd 0                            ; FixedDelay calls
 st_ncbw:        dd 0                            ; command blocks sent
 st_nsense:      dd 0                            ; REQUEST SENSEs
 st_ops:         times 16 db 0                   ; the last 16 opcodes (a ring)
+st_orig:        dd 0, 0, 0, 0                   ; the real control transfer (EHCI, UHCI), port status (EHCI, UHCI) (patched)
+st_ring:        times 4 * 8 dd 0                ; the last 4: type | status << 8, address, wRequest, wValue, wIndex, wLength, result, time
+st_rhs:         dd 0, 0, 0                      ; the last port status check: controller, port, result
+st_nrhs:        dd 0                            ; (st_rhs + 12) port status checks so far
+st_nctl:        dd 0                            ; (st_rhs + 16) control transfers so far
 
 ; st_gate: eax = the framebuffer block if drawing is allowed, else 0. In ebp = a .h label inside
 ; the blob: [ebp + st_fbblk - .h] must be addressable; callers pass the offset in ecx. Clobbers
@@ -203,6 +220,215 @@ st_sense_jmp:
         db      0xe9                            ; jmp back into it (+0x4c69) (rel32 patched)
         dd      0
 
+; The controllers' function tables point here: control transfer (HC, dev, wRequest, wIndex,
+; wValue, buffer, length) and root-port status (HC, port, ...), cdecl. Each pushes which one it is.
+st_ctl_e:
+        push    0
+        jmp     st_wrap
+st_ctl_u:
+        push    1
+        jmp     st_wrap
+st_rhs_e:
+        push    2
+        jmp     st_wrap
+st_rhs_u:
+        push    3
+st_wrap:
+        pushad                                  ; [esp+32] which, [esp+36] return, [esp+40] arguments
+        call    .h
+.h:     pop     ebp
+        mov     ecx, [esp + 32]
+        mov     esi, [ebp + (st_orig - .h) + ecx * 4]
+        rdtsc
+        shrd    eax, edx, 10
+        mov     edi, eax                        ; start (TSC >> 10)
+        lea     ebx, [esp + 40 + 24]            ; the 7 arguments again (some unused by port status)
+        mov     ecx, 7
+.cp:    push    dword [ebx]
+        sub     ebx, 4
+        loop    .cp
+        call    esi
+        add     esp, 28
+        mov     [esp + 28], eax                 ; returned to the caller as it is
+        movzx   esi, ax
+        rdtsc
+        shrd    eax, edx, 10
+        sub     eax, edi
+        shr     eax, 10
+        mov     edi, eax                        ; time it took (TSC >> 20)
+        mov     ecx, [esp + 32]
+        mov     eax, 0x30                       ; the controller
+        test    cl, 1
+        jz      .t
+        mov     al, 0x10
+.t:     cmp     ecx, 2
+        jae     .rhs
+        mov     edx, [ebp + (st_rtbase - .h)]   ; status byte from gUsbData, if there is one yet
+        mov     edx, [edx + 0x98f0]
+        test    edx, edx
+        jz      .ns
+        mov     ah, [edx + 0xe14]
+.ns:    mov     edx, [ebp + (st_nctl - .h)]
+        inc     dword [ebp + (st_nctl - .h)]
+        and     edx, 3
+        shl     edx, 5
+        lea     edx, [ebp + (st_ring - .h) + edx]
+        mov     [edx], eax
+        xor     eax, eax
+        mov     ecx, [esp + 44]                 ; the device: its address
+        test    ecx, ecx
+        jz      .na
+        mov     al, [ecx + 6]
+.na:    mov     [edx + 4], eax
+        movzx   eax, word [esp + 48]
+        mov     [edx + 8], eax
+        movzx   eax, word [esp + 56]
+        mov     [edx + 12], eax
+        movzx   eax, word [esp + 52]
+        mov     [edx + 16], eax
+        movzx   eax, word [esp + 64]
+        mov     [edx + 20], eax
+        mov     [edx + 24], esi
+        mov     [edx + 28], edi
+        jmp     .draw
+.rhs:   mov     [ebp + (st_rhs - .h)], eax
+        movzx   eax, byte [esp + 44]
+        mov     [ebp + (st_rhs - .h) + 4], eax
+        mov     [ebp + (st_rhs - .h) + 8], esi
+        inc     dword [ebp + (st_nrhs - .h)]
+.draw:  lea     ecx, [ebp + (st_fbblk - .h)]
+        call    st_gate
+        test    eax, eax
+        jz      .skip
+        mov     ebx, eax
+        xor     edi, edi                        ; the ring, oldest first
+.line:  mov     esi, [ebp + (st_nctl - .h)]
+        add     esi, edi
+        and     esi, 3
+        shl     esi, 5
+        lea     esi, [ebp + (st_ring - .h) + esi]
+        xor     ecx, ecx
+.fld:   push    ecx                             ; (st_hex keeps ebx, esi, edi, not ecx)
+        movzx   eax, byte [ebp + (st_fields - .h) + ecx * 4 + 3]
+        push    eax                             ; digits
+        movzx   eax, byte [ebp + (st_fields - .h) + ecx * 4]
+        push    dword [esi + eax]               ; the field
+        imul    eax, edi, 24
+        add     eax, 128
+        push    eax                             ; y
+        movzx   eax, word [ebp + (st_fields - .h) + ecx * 4 + 1]
+        push    eax                             ; x
+        push    ebx
+        call    st_hex
+        add     esp, 20
+        pop     ecx
+        inc     ecx
+        cmp     ecx, 8
+        jb      .fld
+        inc     edi
+        cmp     edi, 4
+        jb      .line
+        mov     esi, [ebp + (st_rtbase - .h)]   ; the error log and timeout
+        mov     esi, [esi + 0x98f0]
+        test    esi, esi
+        jz      .r
+        movzx   edi, byte [esi + 0x70]
+        push    2
+        push    edi
+        push    224
+        push    8
+        push    ebx
+        call    st_hex
+        add     esp, 20
+        sub     edi, 8                          ; the last 8 (or the first, if fewer)
+        jae     .e0
+        xor     edi, edi
+.e0:    xor     ecx, ecx
+.ent:   push    ecx
+        push    4
+        lea     eax, [edi + ecx]
+        movzx   eax, word [esi + 0x10 + eax * 2]
+        push    eax
+        push    224
+        imul    eax, ecx, 80
+        add     eax, 48
+        push    eax
+        push    ebx
+        call    st_hex
+        add     esp, 20
+        pop     ecx
+        inc     ecx
+        cmp     ecx, 8
+        jb      .ent
+        push    4
+        movzx   eax, word [esi + 0xe12]
+        push    eax
+        push    224
+        push    688
+        push    ebx
+        call    st_hex
+        add     esp, 20
+.r:     xor     ecx, ecx                        ; the port status line
+.rf:    push    ecx
+        movzx   eax, byte [ebp + (st_rfields - .h) + ecx * 4 + 3]
+        push    eax
+        movzx   eax, byte [ebp + (st_rfields - .h) + ecx * 4]
+        push    dword [ebp + (st_rhs - .h) + eax]
+        push    248
+        movzx   eax, word [ebp + (st_rfields - .h) + ecx * 4 + 1]
+        push    eax
+        push    ebx
+        call    st_hex
+        add     esp, 20
+        pop     ecx
+        inc     ecx
+        cmp     ecx, 5
+        jb      .rf
+.skip:  popad
+        add     esp, 4
+        ret
+st_fields:                                      ; offset in the entry, x, digits
+        db      0
+        dw      8
+        db      4
+        db      4
+        dw      88
+        db      2
+        db      8
+        dw      128
+        db      4
+        db      12
+        dw      208
+        db      4
+        db      16
+        dw      288
+        db      4
+        db      20
+        dw      368
+        db      4
+        db      24
+        dw      448
+        db      4
+        db      28
+        dw      528
+        db      5
+st_rfields:                                     ; offset from st_rhs, x, digits
+        db      0
+        dw      8
+        db      2
+        db      4
+        dw      48
+        db      2
+        db      8
+        dw      88
+        db      4
+        db      12                              ; st_nrhs
+        dw      168
+        db      5
+        db      16                              ; st_nctl
+        dw      264
+        db      5
+
 %include "sthex.inc"
 st_blob_end:
 ST_BLOB_LEN     equ     st_blob_end - st_blob
@@ -217,9 +443,15 @@ st_nreq:        dd 0                            ; USB requests (SMIs) so far
 st_gop:         dd 0                            ; the Graphics Output protocol
 st_g_info:      dd 0                            ; what st_refresh saw (a G record's info)
 st_g_last:      dd 0                            ; ...and what it last recorded
+st_tab:         ; the table fills: instruction RVA, the function it stores, its slot, the stub
+        dd      0x7401, 0x6ee4, 0x25, st_ctl_e - st_blob     ; EHCI control transfer
+        dd      0x2765, 0x20a7, 0x25, st_ctl_u - st_blob     ; UHCI control transfer
+        dd      0x73ec, 0x639e, 0x19, st_rhs_e - st_blob     ; EHCI root-port status
+        dd      0x2750, 0x151b, 0x19, st_rhs_u - st_blob     ; UHCI root-port status
 
-; st_install(base, size): puts the two hooks and the blob into a USBRT copy. 1 if done, 0 if not
-; (2 = not relocated yet, 3 = a site not stock, 4 = not this USBRT). cdecl, keeps ebx/esi/edi.
+; st_install(base, size): puts the hooks and the blob into a USBRT copy. 1 if done (2 = not
+; relocated yet, 3 = a site not stock, 4 = not this USBRT: nothing done; 5 = all but the function
+; table hooks, their fill instructions not stock). cdecl, keeps ebx/esi/edi.
 st_install:
         push    ebx
         push    esi
@@ -299,7 +531,43 @@ st_install:
         lea     ecx, [esi + 0x4816]
         sub     eax, ecx
         mov     [esi + 0x4812], eax
+        xor     ecx, ecx                        ; the function tables: all four fills stock, or none changed
+.tc:    mov     edx, ecx
+        shl     edx, 4
+        lea     edx, [edi + (st_tab - .h) + edx]
+        mov     eax, [edx]
+        cmp     word [esi + eax], 0x40c7        ; mov dword [eax + slot], imm32 (relocated)
+        jne     .tno
+        push    ecx
+        mov     cl, [edx + 8]
+        cmp     [esi + eax + 2], cl
+        pop     ecx
+        jne     .tno
+        mov     eax, [esi + eax + 3]
+        sub     eax, esi
+        cmp     eax, [edx + 4]
+        jne     .tno
+        inc     ecx
+        cmp     ecx, 4
+        jb      .tc
+        xor     ecx, ecx
+.ts:    mov     edx, ecx
+        shl     edx, 4
+        lea     edx, [edi + (st_tab - .h) + edx]
+        mov     eax, [edx + 4]                  ; the real function, for the stub
+        add     eax, esi
+        mov     [ebx + (st_orig - st_blob) + ecx * 4], eax
+        mov     eax, [edx + 12]                 ; the table gets the stub instead
+        add     eax, ebx
+        push    eax
+        mov     eax, [edx]
+        pop     dword [esi + eax + 3]
+        inc     ecx
+        cmp     ecx, 4
+        jb      .ts
         mov     eax, 1
+        jmp     .out
+.tno:   mov     eax, 5                          ; the other hooks are in; the tables are not
 .out:   pop     edi
         pop     esi
         pop     ebx

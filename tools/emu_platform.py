@@ -89,6 +89,8 @@ SMMC_INST, SMMC_TRIG = USB_AREA + 0x30000, 0x30000020
 # The on-screen trace build (-DSCREEN): a 32-bit framebuffer behind a fake Graphics Output protocol.
 GOP_GUID = G('9042a9de-23dc-4a38-96fb-7aded080516a')
 FB, FB_W, FB_H = 0x0a000000, 800, 480
+G_FAKE = USB_AREA + 0x33000                   # the screen build's gUsbData (status byte, error log, timeout)
+TABLE_FILLS = ((0x7401, 0x6ee4, 0x25), (0x2765, 0x20a7, 0x25), (0x73ec, 0x639e, 0x19), (0x2750, 0x151b, 0x19))
 GOP_INST = USB_AREA + 0x31000                 # +0x0c Mode; Mode at +0x100 (+8 Info, +0x10 base); Info at +0x200
 HEXFONT = {}
 def hexfont():
@@ -324,12 +326,22 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     for a_ in (0x418c, 0x49ae, 0x2aed):
         rt[a_] = 0xc3
     rt[0x56d0:0x56d5] = bytes.fromhex('595e5bc9c3')                 # identify's pop ecx; (then the test returns)
+    # the controllers' function-table fills (their relocated targets per copy, below) and fakes behind them
+    for site, _, slot in TABLE_FILLS:
+        rt[site:site + 3] = bytes([0xc7, 0x40, slot])
+    rt[0x6ee4:0x6eeb] = bytes.fromhex('0f318b44241cc3')              # EHCI control: rdtsc (time passes); return wLength
+    rt[0x20a7:0x20af] = bytes.fromhex('0f318b44241c40c3')            # UHCI control: ... wLength + 1
+    rt[0x639e:0x63a4] = bytes.fromhex('b809000000c3')                # EHCI port status: 9
+    rt[0x151b:0x1522] = bytes.fromhex('90b807000000c3')              # UHCI port status: 7 (nop first: tables_changed's +1 lands on the mov)
     if screen_variant == 'sense_changed':                         # another REQUEST SENSE: push 2, not push 1
         rt[0x4c63] = 2
     assert len(rt) == 0x9f80, 'fixture slices changed the image size'
     rt_copies = [USB_AREA + 0x10000, USB_AREA + 0x20000]          # the normal copy, the SMM copy
     for base in rt_copies:
         rt[0x52ad:0x52b1] = struct.pack('<I', 0x100098f0 if screen_variant == 'unrelocated' else base + 0x98f0)
+        for site, tgt, _ in TABLE_FILLS:
+            rt[site + 3:site + 7] = struct.pack('<I', base + tgt + (1 if screen_variant == 'tables_changed' and site == 0x2750 else 0))
+        rt[0x98f0:0x98f4] = struct.pack('<I', G_FAKE)                 # gUsbData
         mu.mem_write(base, b'\xff' * 0x9f80 if (usbrt_variant == 'closed' and base == rt_copies[1]) else bytes(rt))
     rt_orig = [bytes(mu.mem_read(a, 0x9f80)) for a in rt_copies]
     mu.mem_write(USB_AREA + 0x7200, struct.pack('<I', USB_AREA + 0x7000))  # the fake gUsbData pointer
@@ -341,6 +353,20 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         mu.mem_write(GOP_INST + 0x200, struct.pack('<IIII', 0, FB_W, FB_H, 2 if screen_variant == 'bitmask' else 1) +
                      b'\0' * 16 + struct.pack('<I', FB_W))
         fake_tsc = {'t': 0}
+        g_ = bytearray(0xe40)
+        g_[0xe14] = 0x04                                          # control stall
+        g_[0x70] = 11                                             # 11 errors logged: 0x100 .. 0x10a
+        for i_ in range(11):
+            struct.pack_into('<H', g_, 0x10 + 2 * i_, 0x100 + i_)
+        struct.pack_into('<H', g_, 0xe12, 20000)
+        mu.mem_write(G_FAKE, bytes(g_))
+        def slow_hook(uc, addr, size, _):                         # the fake control transfers' rdtsc: 0x3000000 ticks pass
+            fake_tsc['t'] += 0x3000000
+            uc.reg_write(UC_X86_REG_EAX, fake_tsc['t'] & 0xffffffff); uc.reg_write(UC_X86_REG_EDX, fake_tsc_hi)
+            uc.reg_write(UC_X86_REG_EIP, addr + 2)
+        for base in rt_copies:
+            for a_ in (0x6ee4, 0x20a7):
+                mu.hook_add(UC_HOOK_CODE, slow_hook, begin=base + a_, end=base + a_)
         def rdtsc_hook(uc, addr, size, _):                        # rdtsc inside the copied stubs: a fake TSC
             if bytes(uc.mem_read(addr, 2)) == b'\x0f\x31':
                 fake_tsc['t'] += 0x1000
@@ -849,6 +875,21 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 at = code + 0x500 + 0x20 * k
                 mu.mem_write(at, b'\x68\xde\x00\x00\x00\xb8' + struct.pack('<I', live[-1] + 0x4c61) + b'\xff\xd0\x83\xc4\x04\xc3')
                 sc['sense'].append((live[-1], call(at, [], 'REQUEST SENSE')))
+            sc['ctl'], sc['rhs'] = [], []                          # through the (maybe patched) function tables
+            ctl_calls = [(0, 0x10, 0x0680, 0, 0x0100, 8), (0, 5, 0x0500, 0, 5, 0), (0, 5, 0x0900, 0, 1, 0),
+                         (1, 3, 0x0680, 0, 0x0200, 0x20), (0, 5, 0xfea1, 0, 0, 1)]
+            for k, (u, addr, wreq, widx, wval, ln) in enumerate(ctl_calls):
+                dev = USB_AREA + 0x35000 + 0x100 * k
+                mu.mem_write(dev + 6, bytes([addr]))
+                at = code + 0xa00 + 0x40 * k                    # (not 0x600+: the identify test runs code there)
+                mu.mem_write(at, b''.join(b'\x68' + struct.pack('<I', v) for v in (ln, USB_AREA + 0x36000, wval, widx, wreq, dev, USB_AREA + 0x37000)) +
+                             b'\xa1' + struct.pack('<I', live[-1] + (0x2765 if u else 0x7401) + 3) + b'\xff\xd0\x83\xc4\x1c\xc3')
+                sc['ctl'].append((live[-1], u, addr, wreq, wval, widx, ln, call(at, [], 'control transfer')))
+            for k, (u, port) in enumerate(((0, 3), (1, 1))):
+                at = code + 0xb80 + 0x40 * k
+                mu.mem_write(at, b'\x6a\x00' * 5 + b'\x6a' + bytes([port]) + b'\x68' + struct.pack('<I', USB_AREA + 0x37000) +
+                             b'\xa1' + struct.pack('<I', live[-1] + (0x2750 if u else 0x73ec) + 3) + b'\xff\xd0\x83\xc4\x1c\xc3')
+                sc['rhs'].append((live[-1], u, port, call(at, [], 'port status')))
             sc['fb_before_rtb'] = bytes(mu.mem_read(FB, FB_W * FB_H * 4))
     if profile:                                                   # timer ticks with fake interrupt frames
         tev = [e for e in evs.values() if e.get('type') == 0x80000200]
@@ -1098,6 +1139,7 @@ def main():
         ('screen trace build: never a framebuffer: nothing drawn anywhere', dxe, dict(store=lm(CARD), screen_variant='no_fb'), 0, True, MAC, True),
         ('screen trace build: a bit-mask pixel format: nothing drawn anywhere', dxe, dict(store=lm(CARD), screen_variant='bitmask'), 0, True, MAC, True),
         ('screen trace build: REQUEST SENSE not stock: no hooks at all', dxe, dict(store=lm(CARD), screen_variant='sense_changed'), 0, True, MAC, True),
+        ('screen trace build: a function-table fill not stock: no table hooks, the rest in', dxe, dict(store=lm(CARD), screen_variant='tables_changed'), 0, True, MAC, True),
         ('app build: MmcMediaDevice left alone', app, dict(store=lm(CARD), cpu_rev=0x217, enumerated_at_entry=True, mmc_img='before'), 0x80000014, False, MAC, True),
     ]
     bad = 0
@@ -1189,24 +1231,37 @@ def main():
                 uv_ = kw.get('usbrt_variant', 'stock')
                 seen_ = kw.get('usbrt_img', 'after') == 'after' and uv_ not in ('guid', 'nopath', 'small')
                 I = [(en, inf & 0xff) for st_, en, c, inf, ex in recs if inf >> 24 == 0x49]
-                want_I = [(b_, 2 if (sv == 'unrelocated' or (uv_ == 'closed' and k_ == 1)) else 3 if sv == 'sense_changed' else 1)
+                want_I = [(b_, 2 if (sv == 'unrelocated' or (uv_ == 'closed' and k_ == 1)) else 3 if sv == 'sense_changed' else
+                           5 if sv == 'tables_changed' else 1)
                           for k_, b_ in enumerate([USB_AREA + 0x10000, USB_AREA + 0x20000])] if seen_ else []
                 if I != want_I:
                     p.append('I records %s, expected %s' % ([(hex(a), b) for a, b in I], [(hex(a), b) for a, b in want_I]))
-                hooked = [b_ for b_, res in want_I if res == 1]
+                hooked = [b_ for b_, res in want_I if res in (1, 5)]
+                tabled = [b_ for b_, res in want_I if res == 1]       # ...and the function tables too
+                for b_, u, addr, wreq, wval, widx, ln, ret_ in sc.get('ctl', []):
+                    if ret_ != ln + u:
+                        p.append('control transfer returned %s, not %#x' % (ret_, ln + u))
+                for b_, u, port, ret_ in sc.get('rhs', []):
+                    if ret_ != (7 if u else 9):
+                        p.append('port status returned %s' % ret_)
                 for k_, b_ in enumerate([USB_AREA + 0x10000, USB_AREA + 0x20000]):
                     m_ = sc['rt_end'][k_]
                     if b_ in hooked:
                         t1 = b_ + 0x1386 + struct.unpack_from('<i', m_, 0x1382)[0]
                         t2 = b_ + 0x4816 + struct.unpack_from('<i', m_, 0x4812)[0]
                         t3 = b_ + 0x4c66 + struct.unpack_from('<i', m_, 0x4c62)[0]
+                        for site, tgt, _ in TABLE_FILLS:
+                            to = struct.unpack_from('<I', m_, site + 3)[0]
+                            if (b_ in tabled) != (b_ + 0x9920 <= to < b_ + 0x9f6c) or (b_ not in tabled and m_[site:site + 7] != r['rt_orig'][k_][site:site + 7]):
+                                p.append('copy %d: table fill at %#x stores %#x' % (k_, site, to))
                         if m_[0x1381] != 0xe9 or m_[0x1386:0x138a] != b'\x90' * 4 or m_[0x4811] != 0xe8 or \
                                 m_[0x4c61] != 0xe9 or m_[0x4c66:0x4c69] != b'\x90' * 3 or \
                                 not (b_ + 0x9920 <= t1 < b_ + 0x9f6c and b_ + 0x9920 <= t2 < b_ + 0x9f6c and b_ + 0x9920 <= t3 < b_ + 0x9f6c):
                             p.append('copy %d hooks %s %s' % (k_, m_[0x1381:0x138a].hex(), m_[0x4811:0x4816].hex()))
                     elif m_[0x1381:0x138a] != r['rt_orig'][k_][0x1381:0x138a] or m_[0x4811:0x4816] != r['rt_orig'][k_][0x4811:0x4816] \
                             or m_[0x4c61:0x4c69] != r['rt_orig'][k_][0x4c61:0x4c69] \
-                            or m_[0x9920:0x9f6c] != r['rt_orig'][k_][0x9920:0x9f6c]:
+                            or m_[0x9920:0x9f6c] != r['rt_orig'][k_][0x9920:0x9f6c] \
+                            or any(m_[s_:s_ + 7] != r['rt_orig'][k_][s_:s_ + 7] for s_, _, _ in TABLE_FILLS):
                         p.append('copy %d changed although not hooked' % k_)
                 Gr = [(en, (inf >> 8) & 1, inf & 0xff, c, ex) for st_, en, c, inf, ex in recs if inf >> 24 == 0x47]
                 good = (FB, 1, 1, FB_W, FB_W << 16 | FB_H)
@@ -1253,13 +1308,29 @@ def main():
                 if sn and smm:                                    # (StartUnit's own REQUEST SENSE counts too)
                     render(exp, 8, 104, sn[-1][1], 6)
                     render(exp, 120, 104, len(sn) + woke_hooked, 6)
+                ct = [x for x in sc.get('ctl', []) if x[0] in tabled]
+                if ct and smm:                                    # lines 6-9: the last 4 control transfers; 10: errors; 11: port status
+                    ring = [(0,) * 8] * 4
+                    for i_, (b_, u, addr, wreq, wval, widx, ln, ret_) in enumerate(ct):
+                        ring[i_ & 3] = ((0x10 if u else 0x30) | 0x04 << 8, addr, wreq, wval, widx, ln, (ret_ or 0) & 0xffff, 0x30)
+                    for li in range(4):
+                        for v, (x, nd) in zip(ring[(len(ct) + li) & 3], ((8, 4), (88, 2), (128, 4), (208, 4), (288, 4), (368, 4), (448, 4), (528, 5))):
+                            render(exp, x, 128 + 24 * li, v, nd)
+                    render(exp, 8, 224, 11, 2)
+                    for j_ in range(8):
+                        render(exp, 48 + 80 * j_, 224, 0x100 + 3 + j_, 4)
+                    render(exp, 688, 224, 20000, 4)
+                    rh = [x for x in sc.get('rhs', []) if x[0] in tabled]
+                    last = (0x10 if rh[-1][1] else 0x30, rh[-1][2], rh[-1][3] or 0) if rh else (0, 0, 0)
+                    for v, (x, nd) in zip(last + (len(rh), len(ct)), ((8, 2), (48, 2), (88, 4), (168, 5), (264, 5))):
+                        render(exp, x, 248, v, nd)
                 fbb = sc.get('fb_before_rtb', b'')
-                want_fb = bytearray(128 * FB_W * 4)
+                want_fb = bytearray(272 * FB_W * 4)
                 for (x, y), v in exp.items():
                     struct.pack_into('<I', want_fb, (y * FB_W + x) * 4, v)
                 badpx = []
                 if fbb[:len(want_fb)] != bytes(want_fb):
-                    badpx = [(x, y) for y in range(0, 128) for x in range(0, 800)
+                    badpx = [(x, y) for y in range(0, 272) for x in range(0, 800)
                              if struct.unpack_from('<I', fbb, (y * FB_W + x) * 4)[0] != exp.get((x, y), 0)]
                 if badpx:
                     p.append('framebuffer differs at %d pixels: drawn %s, expected %s' % (len(badpx), read_screen(fbb), read_screen(exp)))
@@ -1327,7 +1398,7 @@ def main():
             n_ = bytes(n_[:0x1251]) + bytes([o_[0x1251]]) + bytes(n_[0x1252:])   # (the fake IoRead8's own toggle byte)
             if screen and img is dxe:
                 masked = set(range(0x1381, 0x138a)) | set(range(0x4812, 0x4816)) | set(range(0x4c61, 0x4c69)) | \
-                    set(range(0x9920, 0x9920 + 0x64c))
+                    set(range(0x9920, 0x9920 + 0x64c)) | set(i for s_, _, _ in TABLE_FILLS for i in range(s_ + 3, s_ + 7))
                 n_ = bytes(o_[i] if i in masked else n_[i] for i in range(len(n_)))
             if n_ != bytes(want):
                 p.append('USBRT copy %d changed at %s, expected %s' % (k, [hex(i) for i in range(len(o_)) if o_[i] != n_[i]][:8],
