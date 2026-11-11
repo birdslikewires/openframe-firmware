@@ -34,6 +34,10 @@
 ;    image is sure to stay loaded, as the MMC driver installs them, and again at ReadyToBoot for
 ;    any already there. The app build leaves this to BlwMmcFix.efi: an app's image is freed when
 ;    it returns.
+; 7. Panel clock: the stock north-bridge driver overwrites the display driver's 60 Hz panel clock
+;    with a fixed value that runs the OF1's panel at 156 Hz (panel_clock.inc). A notify on the
+;    same protocol, registered after it, puts the display driver's value back straight after;
+;    ReadyToBoot checks again. The app build does it at once.
 ;
 ; Position-independent: data is reached through call/pop, so no relocations are needed.
 ; Assembled with `nasm -f bin`; build_ucode_driver.py wraps it in a PE32 image and an FFS
@@ -134,13 +138,21 @@ entry:
         push    dword [ebp + 12]                ; app build (run from boot.nsh, PCI already up):
         call    fill_count                      ; do the ReadyToBoot work now. An app is unloaded
         call    apply_mac                       ; when it returns, so it must not leave an event.
-        add     esp, 4
+        mov     eax, [esp]
+        push    dword [eax + 0x3c]              ; BootServices
+        call    panel_clock
+        add     esp, 8
 %else
         call    rtb_register                    ; eax = 0 if the ReadyToBoot event was created
         test    eax, eax
         jnz     .ret
         xor     ebx, ebx                        ; EFI_SUCCESS: the image must stay resident for it
-        call    mmc_register                    ; so only now may anything else point into it
+        lea     eax, [edi + (mmc_bio_guid - entry.here)]   ; so only now may anything else
+        lea     ecx, [edi + (mmc_notify - entry.here)]     ; point into it
+        call    notify_on
+        lea     eax, [edi + (pclk_nb_guid - entry.here)]
+        lea     ecx, [edi + (panel_notify - entry.here)]
+        call    notify_on
 %endif
 .ret:   mov     eax, ebx
         pop     edi
@@ -459,15 +471,19 @@ rtb_notify:
         mov     eax, [esp]
         push    dword [eax + 0x3c]              ; BootServices
         call    mmc_fix_install                 ; any MMC BlockIo the notify didn't see
+        call    panel_clock                     ; in case the panel-clock notify ran too early
         add     esp, 8
         ret
 
-; mmc_register: in edi = entry.here, [ebp+12] = SystemTable. CreateEvent(EVT_NOTIFY_SIGNAL,
-; TPL_CALLBACK, mmc_notify, BootServices) and RegisterProtocolNotify(BlockIo) on it, so each
-; BlockIo installed from now on is checked as it appears. If either fails, ReadyToBoot still
-; wraps what exists then. Only call once the image is sure to stay loaded. Keeps ebx, esi, edi.
-mmc_register:
+; notify_on: in edi = entry.here, [ebp+12] = SystemTable, eax = protocol GUID, ecx = notify
+; function. CreateEvent(EVT_NOTIFY_SIGNAL, TPL_CALLBACK, function, BootServices) and
+; RegisterProtocolNotify(GUID) on it, so the function runs each time the protocol is installed
+; from now on. If either fails, nothing is left registered (ReadyToBoot is the fallback for both
+; users). Only call once the image is sure to stay loaded. Keeps ebx, esi, edi.
+notify_on:
         push    ebx
+        push    esi
+        mov     esi, eax                        ; esi = GUID
         mov     ebx, [ebp + 12]
         mov     ebx, [ebx + 0x3c]               ; ebx = BootServices
         push    0                               ; locals: Event, Registration
@@ -475,8 +491,7 @@ mmc_register:
         lea     eax, [esp + 4]
         push    eax                             ; &Event
         push    ebx                             ; NotifyContext = BootServices
-        lea     eax, [edi + (mmc_notify - entry.here)]
-        push    eax                             ; NotifyFunction
+        push    ecx                             ; NotifyFunction
         push    8                               ; TPL_CALLBACK
         push    0x200                           ; EVT_NOTIFY_SIGNAL
         call    [ebx + 0x34]                    ; BS->CreateEvent
@@ -486,8 +501,7 @@ mmc_register:
         mov     eax, esp
         push    eax                             ; &Registration
         push    dword [esp + 8]                 ; Event
-        lea     eax, [edi + (mmc_bio_guid - entry.here)]
-        push    eax                             ; Protocol
+        push    esi                             ; Protocol
         call    [ebx + 0x60]                    ; BS->RegisterProtocolNotify
         add     esp, 12
         test    eax, eax
@@ -496,6 +510,7 @@ mmc_register:
         call    [ebx + 0x44]                    ; BS->CloseEvent
         add     esp, 4
 .out:   add     esp, 8
+        pop     esi
         pop     ebx
         ret
 
@@ -682,6 +697,7 @@ mac_ok: xor     eax, eax
 %include "nic_mac0.inc"
 %include "smbios_id.inc"
 %include "mmc_fix.inc"
+%include "panel_clock.inc"
 
         align   4, db 0
 rtb_guid:                                      ; 7CE88FB3-4BD7-4679-87A8-A8D8DEE50D2B gEfiEventReadyToBootGuid

@@ -20,6 +20,14 @@ Rules, each one an error:
 - NIC MAC0 writes with decode off or Cfg9346 locked, Cfg9346 left unlocked, command registers not
   restored, an unbalanced stack or callee-saved registers not kept.
 
+Panel clock (panel_clock.inc): the Poulsbo graphics at 00:02.0 with its registers at BAR0
+(fake MMIO, every write logged with PP_CONTROL at the time). After the entry, the boot manager's
+stage signal: NBDXE writes its fixed DPLL_B, then the stage notifies run. Checked: the driver's
+notify (TPL_CALLBACK, context BootServices) puts the GOP's value back at once, with the panel
+registers unlocked and PP_CONTROL restored, and writes nothing else; anything but exactly NBDXE's
+value with the GOP's dividers on a Poulsbo GMA with memory decode and a memory BAR0 is left
+untouched; ReadyToBoot puts it back if no notify could be registered; the app build does it at once.
+
 Also checked: FirmwareVendor becomes "BirdsLikeWires" in EfiRuntimeServicesData with a valid system
 table CRC (or nothing changes if CalculateCrc32 fails), the SMBIOS table (Types 0/1/3/11/127,
 chassis 0x22, checksums) and the Type 11 boot count, filled from MonotonicCounter only at ReadyToBoot.
@@ -27,7 +35,7 @@ chassis 0x22, checksums) and the Type 11 boot count, filled from MonotonicCounte
 Usage: emu_platform.py <BlwPlatformDxe.efi> <BlwPlatformApp.efi>
 """
 import struct, sys, uuid, zlib
-from unicorn import (Uc, UcError, UC_ARCH_X86, UC_MODE_32, UC_HOOK_CODE, UC_HOOK_INSN, UC_PROT_READ)
+from unicorn import (Uc, UcError, UC_ARCH_X86, UC_MODE_32, UC_HOOK_CODE, UC_HOOK_INSN, UC_HOOK_MEM_WRITE, UC_PROT_READ)
 from unicorn.x86_const import *
 
 LOAD = 0x10400000                 # not the image base: the code must be position-independent
@@ -54,8 +62,12 @@ GEN = bytes.fromhex('02a1b2c3d4e5')            # a LAN MAC of-netplan generated 
 JUNK = bytes.fromhex('b8fcffffffff')
 BS_OK = {0x28: 'GetMemoryMap', 0x2c: 'AllocatePool', 0x30: 'FreePool', 0x6c: 'InstallConfigurationTable',
          0xac: 'LocateProtocol', 0xb8: 'CalculateCrc32', 0xc4: 'CreateEventEx', 0x34: 'CreateEvent',
-         0x44: 'CloseEvent', 0x58: 'HandleProtocol', 0x60: 'RegisterProtocolNotify', 0xa8: 'LocateHandleBuffer'}
+         0x44: 'CloseEvent', 0x58: 'HandleProtocol', 0x60: 'RegisterProtocolNotify', 0xa8: 'LocateHandleBuffer',
+         0x88: 'Stall'}
 BLOCKIO = G('964e5b21-6459-11d2-8e39-00a0c969723b')
+NB_STAGE = G('ef9a3971-c1a0-4a93-bd40-5aa165f2dc3a')   # the boot-manager stage NBDXE's clock write waits for
+GMA_MMIO = 0xd0100000             # the graphics device's BAR0 (registers)
+GOP_DPLL, NB_DPLL, GOP_FP = 0xd8100003, 0xd8027203, 0x00021005
 BIO_AREA = 0x60000000             # fake BlockIo instances and the MMC driver's functions
 
 
@@ -104,7 +116,13 @@ SAVED = ((UC_X86_REG_EBX, 0x11111111), (UC_X86_REG_ESI, 0x22222222), (UC_X86_REG
 def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fails=False, nic_present=True,
         nic_mac_readonly=False, signals=1, enumerated_at_entry=False, mtc=0x64d, smbios_present=False,
         crc_fails=False, memmap=OF1_MAP, desc_size=48, getmap_fails=False, fsb_msr=0x111,
-        bio=(), bio_late=(), create_event_fails=False, register_fails=False):
+        bio=(), bio_late=(), create_event_fails=False, register_fails=False,
+        gma=True, gma_decode=True, gma_bar=GMA_MMIO, fp=GOP_FP, nb_stage=True, nb_value=NB_DPLL, nb_signals=1,
+        app_dpll=NB_DPLL):
+    """gma: the Poulsbo graphics device at 00:02.0 (8086:8108), its memory decode and BAR0.
+    The GOP has set pipe B's PLL (fp, GOP_DPLL). nb_stage: after the entry, the boot manager's
+    stage signal, on which NBDXE writes nb_value into DPLL_B and then the stage notifies run
+    (nb_signals times). An app build starts with app_dpll in DPLL_B."""
     """bio: BlockIo instances there before the driver loads, bio_late: ones a driver installs
     after its entry (the notify fires for each). Each is 'mmc' (the MMC driver's functions) or
     'other' (another driver's)."""
@@ -135,7 +153,22 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         bios.append((a, kind))
     for k in bio:
         install_bio(k)
-    mmc_ev = {}
+    evs = {}                                                      # CreateEvent handle -> event
+    nb_bad = {'n': 0}
+    mmio = {0x6018: GOP_DPLL, 0x6048: fp, 0x61204: 0x00000001, 0x71008: 0x80000000}
+    mmio_writes = []                                              # (offset, value, PP_CONTROL then)
+    if gma:
+        mu.mem_map(GMA_MMIO, 0x80000)
+        for o, v in mmio.items():
+            mu.mem_write(GMA_MMIO + o, struct.pack('<I', v))
+
+        def mmio_write(uc, access, addr, size, value, _):
+            o = addr - GMA_MMIO
+            pp = struct.unpack('<I', uc.mem_read(GMA_MMIO + 0x61204, 4))[0]
+            mmio_writes.append((o, value & 0xffffffff, pp))
+            if cpu['phase'] == 'entry' and not enumerated_at_entry:
+                errors.append('display register write during the entry')
+        mu.hook_add(UC_HOOK_MEM_WRITE, mmio_write, begin=GMA_MMIO, end=GMA_MMIO + 0x7ffff)
     mu.mem_map(FWH, 0x100000, UC_PROT_READ)
     mu.mem_map(FLASH, 0x100000, UC_PROT_READ)
     mu.mem_write(ST, b'IBI SYST' + struct.pack('<III', 0x20000, 0x48, 0))
@@ -162,7 +195,9 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     pool = {'next': POOL + 4}
     ev = {}
     cpu = dict(rev=cpu_rev, msr8b=cpu_rev << 32, ap=None, phase='entry')
-    cfg = {(0, 0x1c, 0): {0x04: 0x00100000, 0x18: 0x00000000},
+    cfg = {(0, 2, 0): {0x00: 0x81088086 if gma else 0xffffffff, 0x04: 0x00100003 if gma_decode else 0x00100000,
+                       0x10: gma_bar},
+           (0, 0x1c, 0): {0x04: 0x00100000, 0x18: 0x00000000},
            (1, 0, 0): {0x00: 0x816810ec if nic_present else 0x12345678, 0x04: 0x00100000, 0x10: 0}}
     nic = dict(cf8=0, cfg9346=0, mac=bytearray(JUNK), io=0)
 
@@ -241,25 +276,32 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 if ok:
                     uc.mem_write(a[2], struct.pack('<I', MP))
                 return ret(0 if ok else 0x8000000E)
+            if off == 0x88:                                        # Stall(us)
+                if a[0] > 100000:
+                    errors.append('Stall of %d us' % a[0])
+                return ret(0)
             if off == 0x34:                                        # CreateEvent(type, tpl, fn, ctx, &ev)
                 if create_event_fails:
                     return ret(0x80000009)
-                mmc_ev.update(type=a[0], tpl=a[1], fn=a[2], ctx=a[3], handle=0xE7E70002)
-                uc.mem_write(a[4], struct.pack('<I', 0xE7E70002))
+                h = 0xE7E70010 + len(evs)
+                evs[h] = dict(type=a[0], tpl=a[1], fn=a[2], ctx=a[3], handle=h)
+                uc.mem_write(a[4], struct.pack('<I', h))
                 return ret(0)
             if off == 0x60:                                        # RegisterProtocolNotify(guid, ev, &reg)
-                if bytes(uc.mem_read(a[0], 16)) != BLOCKIO or a[1] != mmc_ev.get('handle'):
+                g = bytes(uc.mem_read(a[0], 16))
+                if g not in (BLOCKIO, NB_STAGE) or a[1] not in evs or 'guid' in evs[a[1]]:
                     errors.append('RegisterProtocolNotify for something else')
+                    return ret(0x80000002)
                 if register_fails:
                     return ret(0x80000009)
-                if 'handle' in mmc_ev:
-                    mmc_ev['registered'] = True
+                evs[a[1]].update(guid=g, registered=True)
                 uc.mem_write(a[2], struct.pack('<I', 0xE7E70003))
                 return ret(0)
             if off == 0x44:                                        # CloseEvent(ev)
-                if a[0] != mmc_ev.get('handle') or mmc_ev.get('registered'):
+                if a[0] not in evs or evs[a[0]].get('registered'):
                     errors.append('CloseEvent of %#x' % a[0])
-                mmc_ev['closed'] = True
+                else:
+                    evs[a[0]]['closed'] = True
                 return ret(0)
             if off == 0xa8:                                        # LocateHandleBuffer(ByProtocol, guid, 0, &n, &buf)
                 if a[0] != 2 or bytes(uc.mem_read(a[1], 16)) != BLOCKIO:
@@ -337,13 +379,15 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             return
         uc.reg_write(UC_X86_REG_EIP, addr + 2)
 
-    def io_check():
+    def io_check(count=True):
         if cpu['phase'] == 'entry' and not enumerated_at_entry:
             errors.append('port I/O during the DXE entry (PCI is not enumerated yet)')
-        nic['io'] += 1
+        if count:
+            nic['io'] += 1
+    gma_cfg = lambda a: ((a >> 16) & 0xff, (a >> 11) & 0x1f, (a >> 8) & 7) == (0, 2, 0)
 
     def port_in(uc, port, size, _):
-        io_check()
+        io_check(not (port == 0xCFC and gma_cfg(nic['cf8'])))
         if port == 0xCFC:
             a = nic['cf8']
             key = ((a >> 16) & 0xff, (a >> 11) & 0x1f, (a >> 8) & 7)
@@ -354,7 +398,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         return 0xff
 
     def port_out(uc, port, size, value, _):
-        io_check()
+        io_check(not (port == 0xCF8 and gma_cfg(value)))
         if port == 0xCF8 and size == 4:
             nic['cf8'] = value
             return
@@ -408,16 +452,29 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             errors.append('%s: callee-saved registers not kept' % what)
         return mu.reg_read(UC_X86_REG_EAX)
 
+    img_is_dxe = struct.unpack_from('<H', pe, peo + 0x5c)[0] == 11
+    if gma and not img_is_dxe:
+        mu.mem_write(GMA_MMIO + 0x6018, struct.pack('<I', app_dpll))
     status = call(LOAD + entry, [0xAAAA0000, ST], 'entry')
     if cpu['ap']:
         cpu['rev'] = cpu_rev
         call(cpu['ap'][0], [cpu['ap'][1]], 'AP procedure')
     entry_mac = bytes(nic['mac'])
     entry_bio = [rd(a + 0x10) for a, _ in bios]
+    def notify(guid, what):
+        for e in evs.values():
+            if e.get('registered') and e.get('guid') == guid:
+                call(e['fn'], [e['handle'], e['ctx']], what)
+    cpu['phase'] = 'BDS'
     for k in bio_late:                                            # a driver installs BlockIo later
         install_bio(k)
-        if mmc_ev.get('registered') and 'fn' in mmc_ev:
-            call(mmc_ev['fn'], [mmc_ev['handle'], mmc_ev['ctx']], 'BlockIo notify')
+        notify(BLOCKIO, 'BlockIo notify')
+    enumerate_pci()
+    if gma and nb_stage and img_is_dxe:
+        for _ in range(nb_signals):                               # NBDXE's notify runs first, then ours
+            mu.mem_write(GMA_MMIO + 0x6018, struct.pack('<I', nb_value))
+            notify(NB_STAGE, 'NB-stage notify')
+        nb_bad['after_notify'] = rd(GMA_MMIO + 0x6018)
     late_bio = [(rd(a + 0x10), rd(a + 0x14)) for a, _ in bios]
     def smbios_now():
         if 'smbios' not in cpu:
@@ -455,7 +512,14 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             errors.append('pool allocation %#x (type %d) never freed' % (buf, t))
     in_image = lambda x: LOAD <= x < LOAD + size_img
     wrapped = [(kind, in_image(rd(a + 0x10)), in_image(rd(a + 0x14))) for a, kind in bios]
-    return dict(mmc_ev=mmc_ev, wrapped=wrapped, entry_bio=entry_bio, late_bio=late_bio, in_image=in_image,
+    ordered = sorted(evs.values(), key=lambda e: e['handle'])
+    mmc_ev = (next((e for e in ordered if e.get('guid') == BLOCKIO), None)
+              or next((e for e in ordered if 'guid' not in e), {}))
+    nb_ev = next((e for e in evs.values() if e.get('guid') == NB_STAGE), {})
+    final = struct.unpack('<I', mu.mem_read(GMA_MMIO + 0x6018, 4))[0] if gma else None
+    return dict(mmc_ev=mmc_ev, nb_ev=nb_ev, evs=evs, mmio_writes=mmio_writes, dpll=final,
+                pp_final=struct.unpack('<I', mu.mem_read(GMA_MMIO + 0x61204, 4))[0] if gma else None,
+                nb_after_notify=nb_bad.get('after_notify'), wrapped=wrapped, entry_bio=entry_bio, late_bio=late_bio, in_image=in_image,
                 bios=bios, mmc_fns=(MMC_RD, MMC_WR, OTHER_FN),
                 status=status, ev=ev, events=events, errors=errors, mac=bytes(nic['mac']), entry_mac=entry_mac,
                 io=nic['io'], rev=cpu['rev'], smbios=smbios_now(), entry_smbios=entry_smbios,
@@ -518,11 +582,25 @@ def main():
         ('MMC and another driver\'s BlockIo, installed later', dxe, dict(store=lm(CARD), bio_late=('other', 'mmc', 'other'), want_wrapped=[('other', False, False), ('mmc', True, True), ('other', False, False)], want_late=True), 0, True, MAC, True),
         ('MMC BlockIo there before dispatch: wrapped at ReadyToBoot, not before', dxe, dict(store=lm(CARD), bio=('mmc',), want_wrapped=[('mmc', True, True)]), 0, True, MAC, True),
         ('two MMC BlockIo, ReadyToBoot twice', dxe, dict(store=lm(CARD), bio=('mmc',), bio_late=('mmc',), signals=2, want_wrapped=[('mmc', True, True), ('mmc', True, True)]), 0, True, MAC, True),
-        ('CreateEvent fails: ReadyToBoot still wraps', dxe, dict(store=lm(CARD), bio_late=('mmc',), create_event_fails=True, want_mmc_ev='none', want_wrapped=[('mmc', True, True)]), 0, True, MAC, True),
-        ('RegisterProtocolNotify fails: event closed, ReadyToBoot still wraps', dxe, dict(store=lm(CARD), bio_late=('mmc',), register_fails=True, want_mmc_ev='closed', want_wrapped=[('mmc', True, True)]), 0, True, MAC, True),
+        ('CreateEvent fails: ReadyToBoot still wraps', dxe, dict(store=lm(CARD), bio_late=('mmc',), create_event_fails=True, want_mmc_ev='none', want_wrapped=[('mmc', True, True)], want_pclk='rtb'), 0, True, MAC, True),
+        ('RegisterProtocolNotify fails: event closed, ReadyToBoot still wraps', dxe, dict(store=lm(CARD), bio_late=('mmc',), register_fails=True, want_mmc_ev='closed', want_wrapped=[('mmc', True, True)], want_pclk='rtb'), 0, True, MAC, True),
         ('no ReadyToBoot event (EFI 1.10): no notify either, nothing wrapped', dxe, dict(store=lm(CARD), bio_late=('mmc',), bs_hdr=0xc4, want_count=PLACEHOLDER, want_wrapped=[('mmc', False, False)]), 0, False, JUNK, False),
         ('CreateEventEx fails: no notify either (the image is freed)', dxe, dict(store=lm(CARD), bio_late=('mmc',), create_fails=True, cpu_rev=0x217, want_count=PLACEHOLDER, want_wrapped=[('mmc', False, False)]), 0x80000014, False, JUNK, False),
         ('app build: leaves the MMC alone (BlwMmcFix.efi does it)', app, dict(store=lm(CARD), cpu_rev=0x217, enumerated_at_entry=True, bio=('mmc',), want_wrapped=[('mmc', False, False)]), 0x80000014, False, MAC, True),
+        # Panel clock (panel_clock.inc). want_pclk: 'notify' (put back by the NB-stage notify itself),
+        # 'rtb' (left by the notify, put back at ReadyToBoot), 'app' (put back by the app at once),
+        # 'untouched' (no display register written at all).
+        ('panel clock: NBDXE\'s value put back by the stage notify, again on a second stage signal', dxe, dict(store=lm(CARD), nb_signals=2), 0, True, MAC, True),
+        ('panel clock: NBDXE already right (or absent): nothing written', dxe, dict(store=lm(CARD), nb_value=GOP_DPLL, want_pclk='untouched'), 0, True, MAC, True),
+        ('panel clock: another panel\'s dividers: left alone', dxe, dict(store=lm(CARD), fp=0x00031108, want_pclk='untouched'), 0, True, MAC, True),
+        ('panel clock: 00:02.0 not the Poulsbo graphics: no display access', dxe, dict(store=lm(CARD), gma=False, want_pclk='untouched'), 0, True, MAC, True),
+        ('panel clock: graphics memory decode off: left alone', dxe, dict(store=lm(CARD), gma_decode=False, want_pclk='untouched'), 0, True, MAC, True),
+        ('panel clock: BAR0 unassigned: left alone', dxe, dict(store=lm(CARD), gma_bar=0, want_pclk='untouched'), 0, True, MAC, True),
+        ('panel clock: BAR0 an I/O BAR: left alone', dxe, dict(store=lm(CARD), gma_bar=GMA_MMIO | 1, want_pclk='untouched'), 0, True, MAC, True),
+        ('panel clock: notify not registered: put back at ReadyToBoot', dxe, dict(store=lm(CARD), register_fails=True, want_mmc_ev='closed', want_pclk='rtb'), 0, True, MAC, True),
+        ('panel clock: no stage signal (NBDXE never writes): the GOP\'s clock kept, nothing written', dxe, dict(store=lm(CARD), nb_stage=False, want_pclk='untouched'), 0, True, MAC, True),
+        ('panel clock: app build puts it back at once', app, dict(store=lm(CARD), cpu_rev=0x217, enumerated_at_entry=True, want_pclk='app'), 0x80000014, False, MAC, True),
+        ('panel clock: app build with the right clock already: nothing written', app, dict(store=lm(CARD), cpu_rev=0x217, enumerated_at_entry=True, app_dpll=GOP_DPLL, want_pclk='untouched'), 0x80000014, False, MAC, True),
     ]
     bad = 0
     for name, img, kw, want_status, want_ev, want_mac, want_io in cases:
@@ -534,8 +612,32 @@ def main():
         want_wrapped = kw.pop('want_wrapped', [])
         want_late = kw.pop('want_late', False)
         want_mmc_ev = kw.pop('want_mmc_ev', 'registered' if img is dxe and want_ev else 'none')
+        want_pclk = kw.pop('want_pclk', ('notify' if want_ev else 'untouched') if img is dxe else 'app')
         r = run(img, **kw)
         p = list(r['errors'])
+        # Panel clock
+        w = r['mmio_writes']
+        if want_pclk == 'untouched':
+            if w:
+                p.append('display registers written: %s' % ['%#x=%#x' % (o, v) for o, v, _ in w])
+        else:
+            if r['dpll'] != GOP_DPLL:
+                p.append('DPLL_B %#x at the end, expected the GOP\'s %#x' % (r['dpll'] or 0, GOP_DPLL))
+            if want_pclk == 'notify' and r['nb_after_notify'] != GOP_DPLL:
+                p.append('DPLL_B %#x after the stage notify' % (r['nb_after_notify'] or 0))
+            if want_pclk == 'rtb' and r['nb_after_notify'] != NB_DPLL:
+                p.append('DPLL_B changed by a notify that should not exist')
+            if any(o not in (0x6018, 0x61204) for o, _, _ in w):
+                p.append('other display registers written: %s' % ['%#x' % o for o, _, _ in w])
+            if not any(o == 0x6018 for o, _, _ in w) or any(o == 0x6018 and pp >> 16 != 0xabcd for o, _, pp in w):
+                p.append('DPLL_B written without the panel registers unlocked')
+            if r['pp_final'] != 0x00000001:
+                p.append('PP_CONTROL left at %#x' % r['pp_final'])
+        ne = r['nb_ev']
+        if ne and (ne['type'], ne['tpl'], ne['ctx']) != (0x200, 8, BS):
+            p.append('stage notify event type %#x TPL %d context %#x' % (ne['type'], ne['tpl'], ne['ctx']))
+        if img is dxe and want_ev and want_mmc_ev == 'registered' and not ne.get('registered'):
+            p.append('no notify registered for the boot-manager stage')
         me = r['mmc_ev']
         got_mmc_ev = ('closed' if me.get('closed') else 'registered' if me.get('registered') else
                       'created' if me else 'none')

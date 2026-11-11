@@ -27,7 +27,9 @@ boot block are the stock ones.
   - gives the RTL8111 network chip, which has no address of its own, a stable MAC from NVRAM;
   - from 26.11.22, works around the stock MMC/SD driver, which reads the wrong sectors past the
     first megabyte of a transfer, so the shell can start a kernel from the internal memory
-    (`driver/mmc_fix.inc`).
+    (`driver/mmc_fix.inc`);
+  - from 26.11.23, keeps the panel at 60 Hz: the stock north-bridge driver overwrites the display
+    driver's panel clock with a fixed value that runs it at 156 Hz (`driver/panel_clock.inc`).
 - **BlwMac.efi** (`driver/blwmac.asm`) runs from `boot.nsh` and keeps that MAC in NVRAM, writing
   only when it changes. openframe-linux ships it and feeds it the right MAC.
 - **BlwMmcFix.efi** (`driver/blwmmcfix.asm`) is the same MMC workaround as a shell app, for
