@@ -23,6 +23,7 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
 | 26.11.22 | Works around the MMC/SD driver's large-transfer bug: the shell can start a kernel from the internal memory |
 | 26.11.23 | Keeps the panel at 60 Hz: undoes the stock north-bridge driver's fixed 156 Hz panel clock |
 | 26.11.24 | No screen twitch at boot: the north-bridge driver is changed in memory to write the 60 Hz clock itself |
+| 26.11.25 | Boots 2.8 s faster: the MMC/SD driver no longer probes the internal memory for a CE-ATA disk |
 
 ## Releases (2026-11-08)
 
@@ -214,3 +215,33 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
   firmware refresh 60.00 Hz, DMI 26.11.24, 0x217, lock registers 01, NVRAM diff 14 bytes = MonotonicCounter only;
   **Andy: "Absolutely stable, no twitching!"** Normal cold boot: 25.3 s plug-on to SSH, gma500 found the 60 Hz clock and
   kept it, BlwMac ok (no write), no failed units.
+- **26.11.25 (OF1)**, `of1-blw-26.11.25.bin` (md5 `7ad10462…`), block 9 only vs 26.11.24. **2.8 s off every boot.**
+  Found with a timing build (26.11.90, `--define TIMING`, test unit only: TSC-stamped protocol installs, image loads and
+  boot-manager stages in a volatile variable): from reset, BlwPlatformDxe's entry 1.06 s, every driver loaded by 1.13 s,
+  GOP 1.34 s, console 1.96 s, first USB device 3.49 s, the USB stick's BlockIo 4.66 s, then **the internal MMC's BlockIo
+  only at 8.09 s**, ReadyToBoot 8.17 s, shell ~8.5 s (which disk was which: the shell's handle numbers). The new shell
+  app MmcProbe.efi (`driver/mmcprobe.asm`, `tools/mmcprobe.py`) reconnects each SD controller and times every SdHostIo
+  command and Stall: the two empty controllers took ~11 ms each, the MMC 2993 ms, of which **one CMD60 took 2797 ms** and
+  timed out. MmcMediaDevice's Start asks every MMC card whether it is a CE-ATA disk (ATA over the MMC bus; RVA 0x72b:
+  CMD60 RW_MULTIPLE_REGISTER for 16 registers, signature CE AA, 5000-poll timeout); no MMC answers. Linux identifies the
+  same card in 81 ms. With the check patched to return FALSE in RAM (`MmcProbe -DSKIPCEATA`) the MMC's connect took
+  194 ms, the same commands otherwise, partition reads fine. (The shell's `map -r` hangs after MmcProbe's reconnect, with
+  or without the patch: a plug cycle recovers it.) So BlwPlatformDxe now changes that check's first three bytes to
+  `xor al, al; ret` (`driver/ceata.inc`): only in an EFI_LOADED_IMAGE with MmcMediaDevice's file GUID, big enough, and
+  whose check matches `driver/ceata_sig.inc` exactly (from `tools/ceata_sig.py`, which also checks the CMD60 helper and
+  that Start calls the check only for MMC cards; the function is the same in every BLW release and in stock O2). The
+  loaded-image loop moved from `panel_clock.inc` to `driver/img_patch.inc` and tries both patches on each image: NBDXE
+  loads before this driver (patched at the entry), MmcMediaDevice just after it (1.105 s; patched from the LoadedImage
+  notify, long before the boot manager connects the MMC). The internal IDE port is not affected: this firmware has no
+  IDE/ATA driver. `tools/emu_platform.py`: 84 scenarios (12 new: MMC driver loaded before/after, both after, absent, one
+  byte different, another GUID, too small, no path, already patched, NBDXE changed, notify failing, app build), 10
+  mutations caught; the timing build with it passes `--timing`. Flash script `tools/flash/flash-block9-26.11.25.sh`
+  (pre-check: blocks 1-15 = 26.11.24 `70555f26…`; after: `ce47813a…`; block 9 `ca2fe519…`; the kernel check as before).
+  **Flashed 2026-11-11 ~08:05** on the test unit, from 26.11.90-timing with a one-off copy of that script (lock
+  registers 01): fh programmed + verified 0x90000, read-backs `db5feef0…`, block 0 unchanged; dump
+  `firmware/efi-dumps/of1-testunit-20261111-26.11.25-postflash.bin`. Cold boots by the plug: **shell 5.63/5.62/5.62 s
+  from reset** (26.11.24: 8.46-9.22 s), kernel 7.24-7.25 s, **plug-on to SSH 23.1/23.4/23.1 s** (26.11.24: 25.3-26.8 s);
+  DMI 26.11.25, vendor line, slots 1/1, 0x217, panel 800x480 at 60 Hz, lock registers 01, NVRAM diff 14 bytes =
+  MonotonicCounter only, fsck clean. Then a one-shot `boot.nsh` entry started the internal MMC's own system
+  (`fs0:vmlinuz`, 4.8 MB through the patched driver and the 26.11.22 transfer fix): it booted (6.18.62, root mmcblk2p2,
+  no I/O errors), 24.8 s plug-on to SSH; the next cold boot came back to the stick.

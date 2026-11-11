@@ -31,13 +31,17 @@ boot block are the stock ones.
   - from 26.11.23, keeps the panel at 60 Hz: the stock north-bridge driver overwrites the display
     driver's panel clock with a fixed value that runs it at 156 Hz (`driver/panel_clock.inc`);
     from 26.11.24 that driver is changed in memory to write the right value itself, so the screen
-    doesn't twitch.
+    doesn't twitch;
+  - from 26.11.25, boots 2.8 s faster: the stock MMC/SD driver asked the internal memory whether
+    it was a CE-ATA disk on every boot and waited for an answer no MMC gives; it is changed in
+    memory to skip that question (`driver/ceata.inc`).
 - **BlwMac.efi** (`driver/blwmac.asm`) runs from `boot.nsh` and keeps that MAC in NVRAM, writing
   only when it changes. openframe-linux ships it and feeds it the right MAC.
 - **BlwMmcFix.efi** (`driver/blwmmcfix.asm`) is the same MMC workaround as a shell app, for
   firmware without it: run from `boot.nsh` before the kernel, it lets the shell start a kernel
   from the internal memory. **MmcTest.efi** (`driver/mmctest.asm`)
-  shows whether large reads come back right.
+  shows whether large reads come back right, and **MmcProbe.efi** (`driver/mmcprobe.asm`) times
+  the firmware's SD/MMC initialisation command by command.
 
 The firmware never writes NVRAM itself, and nothing here adds a variable under a new vendor GUID:
 AMI's NVRAM code corrupts the store when that happens ([docs/nvram.md](docs/nvram.md)).
@@ -45,7 +49,7 @@ AMI's NVRAM code corrupts the store when that happens ([docs/nvram.md](docs/nvra
 ## Using a release
 
 Each version's image is a download on this repository's
-[Releases](https://github.com/birdslikewires/openframe-firmware/releases) page (26.11.24 is the
+[Releases](https://github.com/birdslikewires/openframe-firmware/releases) page (26.11.25 is the
 latest); `releases/MD5SUMS` lists their md5s. The images are not kept in git. Releases from
 26.11.16 on differ from the previous one in block 9 only, and the scripts in
 `tools/flash/` write just that block, after checking the chip holds the previous release. Flashing
