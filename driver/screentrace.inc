@@ -135,83 +135,7 @@ st_cbw_jmp:
         db      0xe9                            ; jmp to the transfer function (rel32 patched)
         dd      0
 
-; st_hex(fb, x, y, value, digits): draws value's low digits in hex at (x, y), 16x16 pixels a digit,
-; white on black, if it fits. fb: +0 magic, +4 base, +8 pixels a scan line, +12 width, +16 height
-; (32 bits a pixel). cdecl, keeps ebx, esi, edi. Position-independent.
-st_hex:
-        push    ebp
-        mov     ebp, esp
-        sub     esp, 16                         ; -4 x0, -8 row, -12 glyph, -16 digit
-        push    ebx
-        push    esi
-        push    edi
-        call    .h
-.h:     pop     edi
-        mov     ebx, [ebp + 8]
-        mov     eax, [ebp + 24]
-        shl     eax, 4
-        add     eax, [ebp + 12]
-        cmp     eax, [ebx + 12]
-        ja      .out
-        mov     eax, [ebp + 16]
-        add     eax, 16
-        cmp     eax, [ebx + 16]
-        ja      .out
-        mov     dword [ebp - 16], 0
-.dig:   mov     eax, [ebp - 16]
-        cmp     eax, [ebp + 24]
-        jae     .out
-        mov     ecx, [ebp + 24]
-        sub     ecx, eax
-        dec     ecx
-        shl     ecx, 2
-        mov     edx, [ebp + 20]
-        shr     edx, cl
-        and     edx, 0xf
-        lea     edx, [edi + (hexfont - .h) + edx * 8]
-        mov     [ebp - 12], edx
-        shl     eax, 4
-        add     eax, [ebp + 12]
-        mov     [ebp - 4], eax
-        mov     dword [ebp - 8], 0
-.row:   mov     eax, [ebp - 8]
-        cmp     eax, 16
-        jae     .nd
-        mov     ecx, eax
-        shr     ecx, 1
-        mov     edx, [ebp - 12]
-        movzx   edx, byte [edx + ecx]           ; this row's glyph bits
-        add     eax, [ebp + 16]
-        imul    eax, [ebx + 8]
-        add     eax, [ebp - 4]
-        shl     eax, 2
-        add     eax, [ebx + 4]                  ; the row's first pixel
-        xor     esi, esi
-.col:   cmp     esi, 16
-        jae     .rn
-        mov     ecx, esi
-        shr     ecx, 1
-        push    edx
-        shl     edx, cl
-        test    dl, 0x80
-        pop     edx
-        jz      .bk
-        mov     dword [eax + esi * 4], 0x00ffffff
-        jmp     .cn
-.bk:    mov     dword [eax + esi * 4], 0
-.cn:    inc     esi
-        jmp     .col
-.rn:    inc     dword [ebp - 8]
-        jmp     .row
-.nd:    inc     dword [ebp - 16]
-        jmp     .dig
-.out:   pop     edi
-        pop     esi
-        pop     ebx
-        leave
-        ret
-
-%include "hexfont.inc"
+%include "sthex.inc"
 st_blob_end:
 ST_BLOB_LEN     equ     st_blob_end - st_blob
 %if ST_BLOB_LEN > ST_AREA_LEN
@@ -222,6 +146,9 @@ ST_BLOB_LEN     equ     st_blob_end - st_blob
         align   4, db 0
 st_fb:          times 5 dd 0                    ; magic, base, pixels a line, width, height
 st_nreq:        dd 0                            ; USB requests (SMIs) so far
+st_gop:         dd 0                            ; the Graphics Output protocol
+st_g_info:      dd 0                            ; what st_refresh saw (a G record's info)
+st_g_last:      dd 0                            ; ...and what it last recorded
 
 ; st_install(base, size): puts the two hooks and the blob into a USBRT copy. 1 if done, 0 if not
 ; (2 = not relocated yet, 3 = a site not stock, 4 = not this USBRT). cdecl, keeps ebx/esi/edi.
@@ -291,15 +218,15 @@ st_install:
         pop     ebx
         ret
 
-; VOID EFIAPI st_gop_notify(EFI_EVENT, VOID *BS): the Graphics Output protocol is there: fill the
-; framebuffer block if it's a plain 32-bit framebuffer.
+; VOID EFIAPI st_gop_notify(EFI_EVENT, VOID *BS): the Graphics Output protocol is there: keep it.
+; Its framebuffer details are read again before every draw (st_refresh): when it is installed the
+; display driver may not have set its mode yet (the console sets it later).
 st_gop_notify:
         push    ebx
-        push    esi
         push    edi
         call    .h
 .h:     pop     edi
-        mov     ebx, [esp + 20]                 ; BS
+        mov     ebx, [esp + 16]                 ; BS
         push    0
         mov     eax, esp
         push    eax
@@ -311,33 +238,133 @@ st_gop_notify:
         pop     ecx
         test    eax, eax
         jnz     .o
-        mov     ecx, [ecx + 0x0c]               ; Mode
-        test    ecx, ecx
-        jz      .o
-        mov     edx, [ecx + 8]                  ; Info
-        test    edx, edx
-        jz      .o
-        cmp     dword [edx + 0x0c], 1           ; PixelFormat: RGB or BGR, 8 bits each, 32 a pixel
-        ja      .o
-        cmp     dword [ecx + 0x14], 0           ; FrameBufferBase below 4 GB
-        jne     .o
+        mov     [edi + (st_gop - .h)], ecx
+        call    st_refresh
+.o:     pop     edi
+        pop     ebx
+        ret
+
+; st_refresh: fills the framebuffer block from the Graphics Output protocol's current mode, magic
+; last, if that is a plain 32-bit framebuffer (RGB or BGR, 8 bits each) below 4 GB with a
+; non-zero base and size and a scan line at least as wide as the screen; otherwise, or once the
+; trace has stopped (ReadyToBoot), the magic is cleared. Only memory reads of the protocol's
+; data: fine at any TPL. A G record whenever what it sees changes (info: G | format | valid << 8;
+; end: base; caller: pixels a line; extra: width << 16 | height). Keeps every register but eax.
+st_refresh:
+        push    ebx
+        push    ecx
+        push    edx
+        push    esi
+        push    edi
+        call    .h
+.h:     pop     edi
         lea     esi, [edi + (st_fb - .h)]
-        mov     eax, [ecx + 0x10]
-        mov     [esi + 4], eax
+        xor     ebx, ebx                        ; valid?
+        xor     eax, eax                        ; format
+        xor     ecx, ecx                        ; base
+        xor     edx, edx                        ; info
+        cmp     byte [edi + (ut_stopped - .h)], 0
+        jne     .rec
+        mov     edx, [edi + (st_gop - .h)]
+        test    edx, edx
+        jz      .rec
+        mov     edx, [edx + 0x0c]               ; Mode
+        test    edx, edx
+        jz      .rec
+        cmp     dword [edx + 0x14], 0           ; FrameBufferBase below 4 GB
+        jne     .rec
+        mov     ecx, [edx + 0x10]
+        mov     edx, [edx + 8]                  ; Info
+        test    edx, edx
+        jz      .rec
+        mov     eax, [edx + 0x0c]               ; PixelFormat
+        test    ecx, ecx
+        jz      .rec
+        cmp     eax, 1
+        ja      .rec
+        cmp     dword [edx + 4], 0              ; width
+        je      .rec
+        cmp     dword [edx + 8], 0              ; height
+        je      .rec
+        push    eax
         mov     eax, [edx + 0x20]               ; PixelsPerScanLine
+        cmp     eax, [edx + 4]
+        pop     eax
+        jb      .rec
+        inc     ebx
+.rec:   ; a G record if validity, format, base, line, width or height changed
+        push    eax
+        mov     eax, ebx
+        shl     eax, 8
+        or      eax, [esp]                      ; valid << 8 | format
+        or      eax, 'G' << 24
+        mov     [edi + (st_g_info - .h)], eax
+        pop     eax
+        push    eax
+        test    ebx, ebx
+        jz      .inv
+        cmp     dword [esi], ST_MAGIC           ; same as already in the block?
+        jne     .new
+        cmp     [esi + 4], ecx
+        jne     .new
+        mov     eax, [edx + 0x20]
+        cmp     [esi + 8], eax
+        jne     .new
+        mov     eax, [edx + 4]
+        cmp     [esi + 12], eax
+        jne     .new
+        mov     eax, [edx + 8]
+        cmp     [esi + 16], eax
+        je      .same
+.new:   mov     dword [esi], 0
+        mov     [esi + 4], ecx
+        mov     eax, [edx + 0x20]
         mov     [esi + 8], eax
         mov     eax, [edx + 4]
         mov     [esi + 12], eax
         mov     eax, [edx + 8]
         mov     [esi + 16], eax
-        mov     dword [esi], ST_MAGIC
-.o:     pop     edi
+        mov     dword [esi], ST_MAGIC           ; last
+        jmp     .log
+.inv:   mov     dword [esi], 0                  ; invalid: no drawing; recorded if that is news
+.log:   mov     eax, [edi + (st_g_info - .h)]
+        cmp     eax, [edi + (st_g_last - .h)]
+        jne     .put
+        test    ebx, ebx
+        jz      .same
+.put:   mov     [edi + (st_g_last - .h)], eax
+        rdtsc
+        shrd    eax, edx, 10
+        push    0                               ; no merging
+        test    ebx, ebx
+        jz      .z
+        mov     edx, [esi + 12]
+        shl     edx, 16
+        or      edx, [esi + 16]
+        push    edx                             ; extra: width << 16 | height
+        push    dword [edi + (st_g_info - .h)]
+        push    dword [esi + 8]                 ; caller: pixels a line
+        push    ecx                             ; end: base
+        jmp     .p
+.z:     push    0
+        push    dword [edi + (st_g_info - .h)]
+        push    0
+        push    ecx
+.p:     push    eax
+        call    ut_add
+        add     esp, 24
+.same:  pop     eax
+        mov     eax, ebx
+        pop     edi
         pop     esi
+        pop     edx
+        pop     ecx
         pop     ebx
         ret
 
 ; st_draw_req(before, info, start, end, n): line 1 from ut_trig. cdecl, keeps ebx/esi/edi.
 st_draw_req:
+        call    st_refresh                      ; the framebuffer as it is now
         push    ebx
         call    .h
 .h:     pop     ebx

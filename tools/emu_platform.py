@@ -309,8 +309,10 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     if screen:                                                    # the framebuffer and the GOP's Mode/Info
         mu.mem_map(FB, (FB_W * FB_H * 4 + 0xfff) & ~0xfff)
         mu.mem_write(GOP_INST + 0x0c, struct.pack('<I', GOP_INST + 0x100))
-        mu.mem_write(GOP_INST + 0x100, struct.pack('<IIIIQI', 1, 0, GOP_INST + 0x200, 0x24, FB, FB_W * FB_H * 4))
-        mu.mem_write(GOP_INST + 0x200, struct.pack('<IIII', 0, FB_W, FB_H, 1) + b'\0' * 16 + struct.pack('<I', FB_W))
+        mu.mem_write(GOP_INST + 0x100, struct.pack('<IIIIQI', 1, 0, GOP_INST + 0x200, 0x24,
+                                                   0 if screen_variant in ('late_mode', 'no_fb') else FB, FB_W * FB_H * 4))
+        mu.mem_write(GOP_INST + 0x200, struct.pack('<IIII', 0, FB_W, FB_H, 2 if screen_variant == 'bitmask' else 1) +
+                     b'\0' * 16 + struct.pack('<I', FB_W))
         fake_tsc = {'t': 0}
         def rdtsc_hook(uc, addr, size, _):                        # rdtsc inside the copied stubs: a fake TSC
             if bytes(uc.mem_read(addr, 2)) == b'\x0f\x31':
@@ -753,6 +755,8 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             mu.mem_write(at, st)
             call(at, [], 'Stall')
             return at + 11
+        if screen and screen_variant == 'late_mode':             # the console has set the mode by now
+            mu.mem_write(GOP_INST + 0x110, struct.pack('<Q', FB))
         ut_expect = []
         for smi, fn, sub in ((0x31, 0x27, 0x05), (0x31, 0x2e, 0x00), (0x32, 0x99, 0x99)):
             r_ = trig(smi, fn, sub)
@@ -1023,6 +1027,9 @@ def main():
         ('USBRT with no FilePath: left alone', dxe, dict(store=lm(CARD), usbrt_variant='nopath'), 0, True, MAC, True),
         ('screen trace build: USBRT not relocated yet: no hooks, nothing drawn from SMM', dxe, dict(store=lm(CARD), screen_variant='unrelocated'), 0, True, MAC, True),
         ('screen trace build: TSC past 5 minutes: the SMM hooks draw nothing', dxe, dict(store=lm(CARD), fake_tsc_hi=0x5d), 0, True, MAC, True),
+        ('screen trace build: no framebuffer yet when GOP appears, one by the first USB request: drawn', dxe, dict(store=lm(CARD), screen_variant='late_mode'), 0, True, MAC, True),
+        ('screen trace build: never a framebuffer: nothing drawn anywhere', dxe, dict(store=lm(CARD), screen_variant='no_fb'), 0, True, MAC, True),
+        ('screen trace build: a bit-mask pixel format: nothing drawn anywhere', dxe, dict(store=lm(CARD), screen_variant='bitmask'), 0, True, MAC, True),
         ('app build: MmcMediaDevice left alone', app, dict(store=lm(CARD), cpu_rev=0x217, enumerated_at_entry=True, mmc_img='before'), 0x80000014, False, MAC, True),
     ]
     bad = 0
@@ -1127,8 +1134,15 @@ def main():
                     elif m_[0x1381:0x138a] != r['rt_orig'][k_][0x1381:0x138a] or m_[0x4811:0x4816] != r['rt_orig'][k_][0x4811:0x4816] \
                             or m_[0x9920:0x9f6c] != r['rt_orig'][k_][0x9920:0x9f6c]:
                         p.append('copy %d changed although not hooked' % k_)
+                Gr = [(en, (inf >> 8) & 1, inf & 0xff, c, ex) for st_, en, c, inf, ex in recs if inf >> 24 == 0x47]
+                good = (FB, 1, 1, FB_W, FB_W << 16 | FB_H)
+                bad0 = (0, 0, 1, 0, 0)
+                want_G = {'late_mode': [bad0, good], 'no_fb': [bad0], 'bitmask': [(FB, 0, 2, 0, 0)]}.get(sv, [good])
+                if Gr != want_G:
+                    p.append('G records %s, expected %s' % ([tuple(hex(v) for v in g) for g in Gr], [tuple(hex(v) for v in g) for g in want_G]))
+                drawable = sv not in ('no_fb', 'bitmask')
                 exp = {}
-                T_ = [(st_, en, inf) for st_, en, c, inf, ex in recs if inf >> 24 == 0x54]
+                T_ = [(st_, en, inf) for st_, en, c, inf, ex in recs if inf >> 24 == 0x54] if drawable else []
                 if T_:
                     st_, en, inf = T_[-1]
                     fs = (inf >> 8) & 0xffff
@@ -1136,7 +1150,7 @@ def main():
                     render(exp, 88, 8, st_ >> 10, 5)
                     render(exp, 184, 8, (en - st_) >> 10, 5)
                     render(exp, 280, 8, len(T_), 4)
-                smm = kw.get('fake_tsc_hi', 0) < 0x5d
+                smm = kw.get('fake_tsc_hi', 0) < 0x5d and drawable
                 fdh = [(b_, ret_, n_) for b_, ret_, n_ in sc.get('fd', []) if b_ in hooked]
                 if fdh and smm:
                     b_, ret_, n_ = fdh[-1]

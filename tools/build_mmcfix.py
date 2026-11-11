@@ -26,7 +26,8 @@ def main():
     outdir = sys.argv[1]
     os.makedirs(outdir, exist_ok=True)
     for src, name, subsystem in (('blwmmcfix.asm', 'BlwMmcFix.efi', 10), ('mmctest.asm', 'MmcTest.efi', 10),
-                                   ('mmcprobe.asm', 'MmcProbe.efi', 10)):
+                                   ('mmcprobe.asm', 'MmcProbe.efi', 10),
+                                   ('screentest.asm', 'ScreenTest.efi', 10)):
         code = nasm(src, os.path.join(outdir, name + '.bin'))
         with open(os.path.join(outdir, name), 'wb') as f:
             f.write(pe32(code, subsystem=subsystem))
