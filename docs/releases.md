@@ -21,6 +21,7 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
 | 26.11.20 | Serial number and UUID from the WLAN card's MAC; BlwLanMac.efi becomes BlwMac.efi |
 | 26.11.21 | SMBIOS Types 16/17: the memory array and device, size and speed found at boot |
 | 26.11.22 | Works around the MMC/SD driver's large-transfer bug: the shell can start a kernel from the internal memory |
+| 26.11.23 | Keeps the panel at 60 Hz: undoes the stock north-bridge driver's fixed 156 Hz panel clock |
 
 ## Releases (2026-11-08)
 
@@ -164,3 +165,28 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
   MonotonicCounter only; MmcTest.efi with no BlwMmcFix.efi: the internal memory's BlockIo already wrapped, one-call
   reads right. Then with the stick removed and `fs0:vmlinuz … initrd=\initrd.img-…` in the internal memory's boot.nsh:
   stub boot from the internal memory, 28.3 s plug-on to SSH (GRUB from there: 30.2-30.5 s).
+- **26.11.23 (OF1)**, `of1-blw-26.11.23.bin` (md5 `42150d55…`), block 9 only vs 26.11.22. BlwPlatformDxe also keeps the
+  **panel at 60 Hz** (`driver/panel_clock.inc`). The display driver (Intel's IEGD GOP, its table `OpenFrame-Sharp`:
+  800x480, 33.264 MHz) programs pipe B's PLL correctly, FPB0 `0x00021005` and DPLL_B `0xd8100003` (96 MHz reference,
+  P1 5, P2 14), 60 Hz. Then the stock north-bridge driver NBDXE (`E4ECD0B2…`, RVA 0x3ca), on a notify for the boot
+  manager's stage signal `EF9A3971-C1A0-4A93-BD40-5AA165F2DC3A`, unlocks the panel registers and writes a fixed DPLL_B
+  `0xd8027203`: the spread-spectrum reference (~100 MHz) with P1 2, 86.5 MHz, about 155 Hz. Some panels then show white
+  or blue with blotches (a tired OF1 panel from a stock O2 unit); and Linux's gma500 reads the clock back assuming a
+  66 MHz reference and ran every OF1 panel at 103 Hz (fixed separately by openframe-kernel patch 07, 6.18.63-4). Found
+  by measuring the refresh from the display pipe's frame counter, reading the GOP's PLL code, a shell probe
+  (GOP SetMode(0) gave 60 frames a second; **SetMode to another mode hangs this GOP**), then reading NBDXE. The driver
+  registers its own notify on the same protocol (after NBDXE's, at the same TPL, so it runs straight after) and checks
+  again at ReadyToBoot; the app build does it at once. It acts only on exactly NBDXE's value with the GOP's dividers on
+  a Poulsbo GMA, and writes the PLL with the panel registers unlocked, as the GOP and gma500 do. The notify registration
+  is shared with the MMC fix (`notify_on`). `tools/emu_platform.py`: 63 scenarios (11 new: graphics device, fake display
+  registers, NBDXE's write), 26.11.22's driver passes 5, 15 mutations caught. Before flashing, `panel_clock.inc` run once
+  from the shell on a stock O2 unit put `0xd8100003` back (refresh 59.6 Hz from 156). Flash script
+  `tools/flash/flash-block9-26.11.23.sh` (pre-check: blocks 1-15 = 26.11.22 `61ca1897…`; after: `3c467c65…`; block 9
+  `e2537c42…`) also **refuses a kernel whose gma500 lacks patch 07**: with this firmware an unpatched gma500 reads the
+  96 MHz reference as 48 MHz and drives the panel at 30 Hz.
+  **Flashed 2026-11-11 ~02:35** on the test unit, from the stick (6.18.63-4, fh in the kernel; lock registers 01):
+  before, with gma500 held back (`module_blacklist=gma500_gfx`), the firmware left `0xd8027203`, 152.4 Hz. fh programmed +
+  verified 0x90000, read-backs `2790bf3e…`, block 0 unchanged; dump `firmware/efi-dumps/of1-testunit-20261111-26.11.23-postflash.bin`.
+  Reboot: DMI 26.11.23, vendor line, slots 1/1, 0x217; with gma500 held back the firmware leaves `0xd8100003`, **60.00 Hz**;
+  MAC ok (no BlwMac write), lock registers 01, NVRAM diff 14 bytes = MonotonicCounter only. Normal boot: gma500 logs
+  `pre-programmed mode is 30 Hz (16628 kHz); using 60 Hz (33264 kHz)`, panel at 60 Hz. (Warm reboots; no plug cycle.)

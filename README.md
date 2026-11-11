@@ -43,7 +43,7 @@ AMI's NVRAM code corrupts the store when that happens ([docs/nvram.md](docs/nvra
 ## Using a release
 
 Each version's image is a download on this repository's
-[Releases](https://github.com/birdslikewires/openframe-firmware/releases) page (26.11.22 is the
+[Releases](https://github.com/birdslikewires/openframe-firmware/releases) page (26.11.23 is the
 latest); `releases/MD5SUMS` lists their md5s. The images are not kept in git. Releases from
 26.11.16 on differ from the previous one in block 9 only, and the scripts in
 `tools/flash/` write just that block, after checking the chip holds the previous release. Flashing
