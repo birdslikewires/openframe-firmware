@@ -90,7 +90,9 @@ SMMC_INST, SMMC_TRIG = USB_AREA + 0x30000, 0x30000020
 GOP_GUID = G('9042a9de-23dc-4a38-96fb-7aded080516a')
 FB, FB_W, FB_H = 0x0a000000, 800, 480
 G_FAKE = USB_AREA + 0x33000                   # the screen build's gUsbData (status byte, error log, timeout)
-TABLE_FILLS = ((0x7401, 0x6ee4, 0x25), (0x2765, 0x20a7, 0x25), (0x73ec, 0x639e, 0x19), (0x2750, 0x151b, 0x19))
+TABLE_FILLS = ((0x7401, 0x6ee4, 0x25), (0x2765, 0x20a7, 0x25), (0x73ec, 0x639e, 0x19), (0x2750, 0x151b, 0x19),
+               (0x7408, 0x70b2, 0x29), (0x276c, 0x26c1, 0x29), (0x740f, 0x72b7, 0x2d), (0x2773, 0x2329, 0x2d))
+SAVE_FB = 0x09000000                          # what the screen showed while a fake transfer ran (one ring line)
 GOP_INST = USB_AREA + 0x31000                 # +0x0c Mode; Mode at +0x100 (+8 Info, +0x10 base); Info at +0x200
 HEXFONT = {}
 def hexfont():
@@ -100,12 +102,14 @@ def hexfont():
         for i, ch in enumerate('0123456789ABCDEF'):
             HEXFONT[i] = rows[i * 8:i * 8 + 8]
     return HEXFONT
-def read_screen(fb):
-    """The digits on the three trace lines (from a framebuffer's bytes, or a dict of pixels): '.' blank."""
-    px = (lambda x, y: struct.unpack_from('<I', fb, (y * FB_W + x) * 4)[0]) if isinstance(fb, (bytes, bytearray)) else \
+def read_screen(fb, row0=None):
+    """The digits on the trace lines (from a framebuffer's bytes, or a dict of pixels): '.' blank. With
+    row0, fb holds just the one line drawn at y = row0 (bytes starting at that row)."""
+    base = row0 or 0
+    px = (lambda x, y: struct.unpack_from('<I', fb, ((y - base) * FB_W + x) * 4)[0]) if isinstance(fb, (bytes, bytearray)) else \
          (lambda x, y: fb.get((x, y), 0))
     out = []
-    for y in (8, 32, 56, 80, 104):
+    for y in ((row0,) if row0 is not None else (8, 32, 56, 80, 104, 128, 152, 176, 200, 224, 248)):
         line = ''
         for x in range(8, 776, 16):
             rows = [sum(0x80 >> c for c in range(8) if px(x + 2 * c, y + 2 * r)) for r in range(8)]
@@ -333,6 +337,21 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     rt[0x20a7:0x20af] = bytes.fromhex('0f318b44241c40c3')            # UHCI control: ... wLength + 1
     rt[0x639e:0x63a4] = bytes.fromhex('b809000000c3')                # EHCI port status: 9
     rt[0x151b:0x1522] = bytes.fromhex('90b807000000c3')              # UHCI port status: 7 (nop first: tables_changed's +1 lands on the mov)
+    # EHCI bulk: rdtsc; status byte := 2 (a bulk timeout); return its length (argument 5). UHCI bulk:
+    # status byte := 4; length + 1
+    for a_, f_ in ((0x70b2, b'\x0f\x31\xc6\x05' + struct.pack('<I', G_FAKE + 0xe14) + b'\x02\x8b\x44\x24\x14\xc3'),
+                   (0x26c1, b'\x0f\x31\xc6\x05' + struct.pack('<I', G_FAKE + 0xe14) + b'\x04\x8b\x44\x24\x14\x40\xc3')):
+        rt[a_:a_ + len(f_)] = f_
+    # EHCI interrupt: first copies the four ring lines (y=128..215) to SAVE_FB + 0x10000, as they are
+    # while it runs; returns 0x33
+    fake_int_e = (b'\x56\x57\x51' + b'\xbe' + struct.pack('<I', FB + 128 * 800 * 4) + b'\xbf' + struct.pack('<I', SAVE_FB + 0x10000) +
+                  b'\xb9' + struct.pack('<I', 88 * 800) + b'\xfc\xf3\xa5\x59\x5f\x5e\xb8\x33\x00\x00\x00\xc3')
+    rt[0x72b7:0x72b7 + len(fake_int_e)] = fake_int_e
+    # UHCI interrupt: first copies the screen's bottom ring line (y=200..215) to SAVE_FB, as it is
+    # while this transfer runs; returns 0x11 (a nop first: tables_changed's +1 lands on the push)
+    fake_int_u = (b'\x90\x56\x57\x51' + b'\xbe' + struct.pack('<I', FB + 200 * 800 * 4) + b'\xbf' + struct.pack('<I', SAVE_FB) +
+                              b'\xb9' + struct.pack('<I', 16 * 800) + b'\xfc\xf3\xa5\x59\x5f\x5e\xb8\x11\x00\x00\x00\xc3')
+    rt[0x2329:0x2329 + len(fake_int_u)] = fake_int_u
     if screen_variant == 'sense_changed':                         # another REQUEST SENSE: push 2, not push 1
         rt[0x4c63] = 2
     assert len(rt) == 0x9f80, 'fixture slices changed the image size'
@@ -340,7 +359,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     for base in rt_copies:
         rt[0x52ad:0x52b1] = struct.pack('<I', 0x100098f0 if screen_variant == 'unrelocated' else base + 0x98f0)
         for site, tgt, _ in TABLE_FILLS:
-            rt[site + 3:site + 7] = struct.pack('<I', base + tgt + (1 if screen_variant == 'tables_changed' and site == 0x2750 else 0))
+            rt[site + 3:site + 7] = struct.pack('<I', base + tgt + (1 if screen_variant == 'tables_changed' and site == 0x2773 else 0))
         rt[0x98f0:0x98f4] = struct.pack('<I', G_FAKE)                 # gUsbData
         mu.mem_write(base, b'\xff' * 0x9f80 if (usbrt_variant == 'closed' and base == rt_copies[1]) else bytes(rt))
     rt_orig = [bytes(mu.mem_read(a, 0x9f80)) for a in rt_copies]
@@ -365,8 +384,9 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             uc.reg_write(UC_X86_REG_EAX, fake_tsc['t'] & 0xffffffff); uc.reg_write(UC_X86_REG_EDX, fake_tsc_hi)
             uc.reg_write(UC_X86_REG_EIP, addr + 2)
         for base in rt_copies:
-            for a_ in (0x6ee4, 0x20a7):
+            for a_ in (0x6ee4, 0x20a7, 0x70b2, 0x26c1):
                 mu.hook_add(UC_HOOK_CODE, slow_hook, begin=base + a_, end=base + a_)
+        mu.mem_map(SAVE_FB, 0x60000)
         def rdtsc_hook(uc, addr, size, _):                        # rdtsc inside the copied stubs: a fake TSC
             if bytes(uc.mem_read(addr, 2)) == b'\x0f\x31':
                 fake_tsc['t'] += 0x1000
@@ -747,9 +767,12 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         for r, v in SAVED:
             mu.reg_write(r, v)
         try:
-            mu.emu_start(fn, RET_MAGIC, count=1_000_000)
+            mu.emu_start(fn, RET_MAGIC, count=5_000_000)
         except UcError as e:
             errors.append('%s: emulation stopped: %s at eip %#x' % (what, e, mu.reg_read(UC_X86_REG_EIP)))
+            return None
+        if mu.reg_read(UC_X86_REG_EIP) != RET_MAGIC:              # (the count ran out: not a stack fault)
+            errors.append('%s: still running after 5,000,000 instructions, at eip %#x' % (what, mu.reg_read(UC_X86_REG_EIP)))
             return None
         if mu.reg_read(UC_X86_REG_ESP) != sp + 4:
             errors.append('%s: stack unbalanced' % what)
@@ -876,20 +899,26 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 mu.mem_write(at, b'\x68\xde\x00\x00\x00\xb8' + struct.pack('<I', live[-1] + 0x4c61) + b'\xff\xd0\x83\xc4\x04\xc3')
                 sc['sense'].append((live[-1], call(at, [], 'REQUEST SENSE')))
             sc['ctl'], sc['rhs'] = [], []                          # through the (maybe patched) function tables
-            ctl_calls = [(0, 0x10, 0x0680, 0, 0x0100, 8), (0, 5, 0x0500, 0, 5, 0), (0, 5, 0x0900, 0, 1, 0),
-                         (1, 3, 0x0680, 0, 0x0200, 0x20), (0, 5, 0xfea1, 0, 0, 1)]
-            for k, (u, addr, wreq, widx, wval, ln) in enumerate(ctl_calls):
+            # (kind: 0 control, 2 bulk, 3 interrupt; UHCI?; address; port; arguments 3, 4, 5, 7)
+            # every kind is on the screen at one of the two snapshots (the 5th's start, the 7th's start)
+            xfers = [(0, 0, 0x10, 4, 0x0680, 0, 0x0100, 8), (0, 1, 3, 2, 0x0680, 0, 0x0200, 0x20), (2, 0, 5, 4, 0x80, 0x1234, 0x200, 0),
+                     (2, 1, 3, 2, 0x00, 0x5678, 0x1f, 0), (3, 0, 6, 5, 0x81, 0x4321, 8, 0), (0, 0, 5, 4, 0x0500, 0, 5, 0),
+                     (3, 1, 7, 1, 0x82, 0x8765, 4, 0)]
+            for k, (kind, u, addr, port, a3, a4, a5, a7) in enumerate(xfers):
                 dev = USB_AREA + 0x35000 + 0x100 * k
-                mu.mem_write(dev + 6, bytes([addr]))
+                mu.mem_write(dev + 6, bytes([addr, 0, 0, port]))
+                site = {0: (0x7401, 0x2765), 2: (0x7408, 0x276c), 3: (0x740f, 0x2773)}[kind][u]
                 at = code + 0xa00 + 0x40 * k                    # (not 0x600+: the identify test runs code there)
-                mu.mem_write(at, b''.join(b'\x68' + struct.pack('<I', v) for v in (ln, USB_AREA + 0x36000, wval, widx, wreq, dev, USB_AREA + 0x37000)) +
-                             b'\xa1' + struct.pack('<I', live[-1] + (0x2765 if u else 0x7401) + 3) + b'\xff\xd0\x83\xc4\x1c\xc3')
-                sc['ctl'].append((live[-1], u, addr, wreq, wval, widx, ln, call(at, [], 'control transfer')))
+                mu.mem_write(at, b''.join(b'\x68' + struct.pack('<I', v) for v in (a7, USB_AREA + 0x36000, a5, a4, a3, dev, USB_AREA + 0x37000)) +
+                             b'\xa1' + struct.pack('<I', live[-1] + site + 3) + b'\xff\xd0\x83\xc4\x1c\xc3')
+                sc['ctl'].append((live[-1], kind, u, addr, port, a3, a4, a5, a7, call(at, [], 'transfer')))
             for k, (u, port) in enumerate(((0, 3), (1, 1))):
-                at = code + 0xb80 + 0x40 * k
+                at = code + 0xc00 + 0x40 * k
                 mu.mem_write(at, b'\x6a\x00' * 5 + b'\x6a' + bytes([port]) + b'\x68' + struct.pack('<I', USB_AREA + 0x37000) +
                              b'\xa1' + struct.pack('<I', live[-1] + (0x2750 if u else 0x73ec) + 3) + b'\xff\xd0\x83\xc4\x1c\xc3')
                 sc['rhs'].append((live[-1], u, port, call(at, [], 'port status')))
+            sc['saved_line'] = bytes(mu.mem_read(SAVE_FB, 16 * 800 * 4))
+            sc['saved_ring'] = bytes(mu.mem_read(SAVE_FB + 0x10000, 88 * 800 * 4))
             sc['fb_before_rtb'] = bytes(mu.mem_read(FB, FB_W * FB_H * 4))
     if profile:                                                   # timer ticks with fake interrupt frames
         tev = [e for e in evs.values() if e.get('type') == 0x80000200]
@@ -1238,9 +1267,10 @@ def main():
                     p.append('I records %s, expected %s' % ([(hex(a), b) for a, b in I], [(hex(a), b) for a, b in want_I]))
                 hooked = [b_ for b_, res in want_I if res in (1, 5)]
                 tabled = [b_ for b_, res in want_I if res == 1]       # ...and the function tables too
-                for b_, u, addr, wreq, wval, widx, ln, ret_ in sc.get('ctl', []):
-                    if ret_ != ln + u:
-                        p.append('control transfer returned %s, not %#x' % (ret_, ln + u))
+                for b_, kind, u, addr, port, a3, a4, a5, a7, ret_ in sc.get('ctl', []):
+                    want_ret = {0: a7 + u, 2: a5 + u, 3: 0x11 if u else 0x33}[kind]
+                    if ret_ != want_ret:
+                        p.append('transfer (kind %d) returned %s, not %#x' % (kind, ret_, want_ret))
                 for b_, u, port, ret_ in sc.get('rhs', []):
                     if ret_ != (7 if u else 9):
                         p.append('port status returned %s' % ret_)
@@ -1309,13 +1339,31 @@ def main():
                     render(exp, 8, 104, sn[-1][1], 6)
                     render(exp, 120, 104, len(sn) + woke_hooked, 6)
                 ct = [x for x in sc.get('ctl', []) if x[0] in tabled]
-                if ct and smm:                                    # lines 6-9: the last 4 control transfers; 10: errors; 11: port status
+                FIELDS = ((8, 4), (88, 4), (168, 4), (248, 4), (328, 4), (408, 4), (488, 4), (568, 4))
+                # the status byte as each transfer starts and ends (the bulk fakes set it: EHCI 2, UHCI 4)
+                st_at = []
+                e14 = 0x04
+                for x in sc.get('ctl', []):
+                    s0 = e14
+                    if x[1] == 2:
+                        e14 = 4 if x[2] else 2
+                    st_at.append((s0, e14))
+                def ring_entry(i_, done=True):
+                    b_, kind, u, addr, port, a3, a4, a5, a7, ret_ = sc['ctl'][i_]
+                    t = (0x10 if u else 0x30) | {0: 1, 2: 2, 3: 3}[kind] | st_at[i_][1 if done else 0] << 8
+                    return (t, port << 8 | addr, a3, a5, a4, a7, ((ret_ or 0) & 0xffff) if done else 0xeeee,
+                            (0x30 if kind in (0, 2) else 0) if done else 0)
+                def ring_at(n_, inprog):                          # the 4 lines after n_ transfers started (the last maybe running)
                     ring = [(0,) * 8] * 4
-                    for i_, (b_, u, addr, wreq, wval, widx, ln, ret_) in enumerate(ct):
-                        ring[i_ & 3] = ((0x10 if u else 0x30) | 0x04 << 8, addr, wreq, wval, widx, ln, (ret_ or 0) & 0xffff, 0x30)
-                    for li in range(4):
-                        for v, (x, nd) in zip(ring[(len(ct) + li) & 3], ((8, 4), (88, 2), (128, 4), (208, 4), (288, 4), (368, 4), (448, 4), (528, 5))):
-                            render(exp, x, 128 + 24 * li, v, nd)
+                    for i_ in range(n_):
+                        ring[i_ & 3] = ring_entry(i_, done=not (inprog and i_ == n_ - 1))
+                    return [ring[(n_ + li) & 3] for li in range(4)]
+                def draw_ring(d, lines, ys):
+                    for vals, y in zip(lines, ys):
+                        for v, (x, nd) in zip(vals, FIELDS):
+                            render(d, x, y, v, nd)
+                if ct and smm:                                    # lines 6-9: the last 4 transfers; 10: errors; 11: port status
+                    draw_ring(exp, ring_at(len(ct), False), (128, 152, 176, 200))
                     render(exp, 8, 224, 11, 2)
                     for j_ in range(8):
                         render(exp, 48 + 80 * j_, 224, 0x100 + 3 + j_, 4)
@@ -1324,6 +1372,16 @@ def main():
                     last = (0x10 if rh[-1][1] else 0x30, rh[-1][2], rh[-1][3] or 0) if rh else (0, 0, 0)
                     for v, (x, nd) in zip(last + (len(rh), len(ct)), ((8, 2), (48, 2), (88, 4), (168, 5), (264, 5))):
                         render(exp, x, 248, v, nd)
+                    # while the 5th ran: all four ring lines; while the 7th (last) ran: the bottom line
+                    for name, n_, ys, row0 in (('saved_ring', 5, (128, 152, 176, 200), 128), ('saved_line', 7, (200,), 200)):
+                        mid = {}
+                        draw_ring(mid, ring_at(n_, True)[-len(ys):], ys)
+                        sv_ = sc.get(name, b'')
+                        bad_mid = [(x, y) for y in range(ys[0], ys[-1] + 16) for x in range(0, 800)
+                                   if struct.unpack_from('<I', sv_, ((y - row0) * 800 + x) * 4)[0] != mid.get((x, y), 0)]
+                        if bad_mid:
+                            p.append('while transfer %d ran the screen showed %s, expected %s' % (n_, [read_screen(sv_, y) for y in ys] if False else
+                                     [read_screen(sv_[(y - row0) * 800 * 4:], y) for y in ys], [read_screen(mid, y) for y in ys]))
                 fbb = sc.get('fb_before_rtb', b'')
                 want_fb = bytearray(272 * FB_W * 4)
                 for (x, y), v in exp.items():

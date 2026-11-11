@@ -1,21 +1,28 @@
-"""Mutations for screentrace.inc's control-transfer / port-status hook (26.11.96):
-    venv/bin/python -I tools/mutate.py tools/mutations/ctl.py --base BASE --version 26.11.96 \\
+"""Mutations for screentrace.inc's transfer / port-status hook (26.11.89):
+    venv/bin/python -I tools/mutate.py tools/mutations/ctl.py --base BASE --version 26.11.89 \\
         --define TIMING --define PROFILE --define USBTRACE --define SCREEN --mode timing,profile,usbtrace,screen"""
 F = 'driver/screentrace.inc'
 MUTATIONS = [
-    ('6 arguments passed on, not 7', F, '        mov     ecx, 7\n.cp:', '        mov     ecx, 6\n.cp:'),
-    ('result not returned to the caller', F, '        mov     [esp + 28], eax                 ; returned', '        nop                                     ; returned'),
-    ('wValue and wIndex swapped', F, '        movzx   eax, word [esp + 56]\n        mov     [edx + 12], eax', '        movzx   eax, word [esp + 52]\n        mov     [edx + 12], eax'),
+    ('6 arguments passed on, not 7', F, '        push    7\n        pop     ecx', '        push    6\n        pop     ecx'),
+    ('result not returned to the caller', F, '        mov     [esp + 8 + 28], eax', '        nop'),
+    ('wValue and wIndex swapped', F, '        mov     ax, [esp + 56]\n        mov     [edx + 6], ax', '        mov     ax, [esp + 52]\n        mov     [edx + 6], ax'),
     ('time in the wrong unit', F, '        sub     eax, edi\n        shr     eax, 10', '        sub     eax, edi\n        shr     eax, 9'),
-    ('status byte not read', F, '        mov     ah, [edx + 0xe14]', '        mov     ah, [edx + 0xe15]'),
-    ('ring of 8, not 4', F, '        inc     dword [ebp + (st_nctl - .h)]\n        and     edx, 3', '        inc     dword [ebp + (st_nctl - .h)]\n        and     edx, 7'),
+    ('status byte at the start not read', F, '        mov     ah, [edx + 0xe14]', '        mov     ah, [edx + 0xe15]'),
+    ('status byte not updated at the end', F, '        mov     [ebx + 1], cl', '        nop'),
+    ('ring of 8, not 4', F, '        and     edx, 3\n        shl     edx, 4', '        and     edx, 7\n        shl     edx, 4'),
     ('ring drawn newest first', F, '        add     esi, edi\n        and     esi, 3', '        sub     esi, edi\n        and     esi, 3'),
     ('error log: the last 7, not 8', F, '        sub     edi, 8                          ; the last 8', '        sub     edi, 7                          ; the last 8'),
     ('wrong timeout field', F, '        movzx   eax, word [esi + 0xe12]', '        movzx   eax, word [esi + 0xe10]'),
     ('port read from the wrong argument', F, '        movzx   eax, byte [esp + 44]\n        mov     [ebp + (st_rhs - .h) + 4], eax', '        movzx   eax, byte [esp + 48]\n        mov     [ebp + (st_rhs - .h) + 4], eax'),
+    ('no not-returned marker', F, '        mov     dword [edx + 12], 0xeeee', '        mov     dword [edx + 12], 0xeeef'),
+    ('not drawn as it starts', F, '        push    edx                             ; (the entry: arguments now at [esp+44])\n        call    .draw',
+     '        push    edx                             ; (the entry: arguments now at [esp+44])\n        nop'),
+    ('device port not recorded', F, '        mov     ah, [ecx + 9]', '        mov     ah, [ecx + 8]'),
+    ('bulk shown as control', F, 'st_kinds:       db      0x31, 0x11, 0x30, 0x10, 0x32', 'st_kinds:       db      0x31, 0x11, 0x30, 0x10, 0x31'),
     ('install: fill target not checked', F, '        cmp     eax, [edx + 4]\n        jne     .tno', '        cmp     eax, [edx + 4]\n        nop\n        nop'),
     ('install: stub address written one byte early', F, '        pop     dword [esi + eax + 3]', '        pop     dword [esi + eax + 2]'),
     ('install: EHCI and UHCI control swapped', F, '        dd      0x7401, 0x6ee4, 0x25, st_ctl_e - st_blob', '        dd      0x7401, 0x6ee4, 0x25, st_ctl_u - st_blob'),
-    ('install: only 3 tables checked', F, '        cmp     ecx, 4\n        jb      .tc', '        cmp     ecx, 3\n        jb      .tc'),
-    ('UHCI controller drawn as EHCI', F, '        mov     al, 0x10\n.t:', '        mov     al, 0x30\n.t:'),
+    ('install: only 7 tables checked', F, '        cmp     ecx, 8\n        jb      .tc', '        cmp     ecx, 7\n        jb      .tc'),
+    ('install: interrupt hooks swapped', F, '        dd      0x740f, 0x72b7, 0x2d, st_int_e - st_blob', '        dd      0x740f, 0x72b7, 0x2d, st_int_u - st_blob'),
+    ('EHCI control shown as UHCI control', F, 'st_kinds:       db      0x31, 0x11', 'st_kinds:       db      0x11, 0x11'),
 ]

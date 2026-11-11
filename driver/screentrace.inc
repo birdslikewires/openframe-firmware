@@ -43,11 +43,12 @@ st_nfd:         dd 0                            ; FixedDelay calls
 st_ncbw:        dd 0                            ; command blocks sent
 st_nsense:      dd 0                            ; REQUEST SENSEs
 st_ops:         times 16 db 0                   ; the last 16 opcodes (a ring)
-st_orig:        dd 0, 0, 0, 0                   ; the real control transfer (EHCI, UHCI), port status (EHCI, UHCI) (patched)
-st_ring:        times 4 * 8 dd 0                ; the last 4: type | status << 8, address, wRequest, wValue, wIndex, wLength, result, time
+st_orig:        times 8 dd 0                    ; the real functions, in st_tab's order (patched)
+st_ring:        times 4 * 8 dw 0                ; the last 4 transfers (words): kind | status << 8, port << 8 | address, arguments 3, 5, 4, 7, result, time
+st_fdlast:      dd 0                            ; the FixedDelay caller last drawn
 st_rhs:         dd 0, 0, 0                      ; the last port status check: controller, port, result
 st_nrhs:        dd 0                            ; (st_rhs + 12) port status checks so far
-st_nctl:        dd 0                            ; (st_rhs + 16) control transfers so far
+st_nctl:        dd 0                            ; (st_rhs + 16) transfers so far
 
 ; st_gate: eax = the framebuffer block if drawing is allowed, else 0. In ebp = a .h label inside
 ; the blob: [ebp + st_fbblk - .h] must be addressable; callers pass the offset in ecx. Clobbers
@@ -73,12 +74,16 @@ st_fd_entry:
         call    .h
 .h:     pop     ebp
         inc     dword [ebp + (st_nfd - .h)]
-        lea     ecx, [ebp + (st_fbblk - .h)]
+        mov     eax, [esp + 36]                 ; drawn for a new caller or every 256th call (drawing
+        cmp     eax, [ebp + (st_fdlast - .h)]   ;  each one makes a polling loop ~20x slower)
+        je      .same
+.new:   lea     ecx, [ebp + (st_fbblk - .h)]
         call    st_gate
         test    eax, eax
         jz      .skip
         mov     ebx, eax
         mov     eax, [esp + 36]                 ; the caller
+        mov     [ebp + (st_fdlast - .h)], eax
         sub     eax, [ebp + (st_rtbase - .h)]
         push    5
         push    eax
@@ -102,6 +107,9 @@ st_fd_entry:
         push    ebx
         call    st_hex
         add     esp, 20
+        jmp     .skip
+.same:  test    byte [ebp + (st_nfd - .h)], 0xff
+        jz      .new
 .skip:  popfd
         popad
         push    ebx                             ; FixedDelay's own first instructions
@@ -220,8 +228,10 @@ st_sense_jmp:
         db      0xe9                            ; jmp back into it (+0x4c69) (rel32 patched)
         dd      0
 
-; The controllers' function tables point here: control transfer (HC, dev, wRequest, wIndex,
-; wValue, buffer, length) and root-port status (HC, port, ...), cdecl. Each pushes which one it is.
+; The controllers' function tables point here: control transfer (HC, dev, wRequest, wIndex, wValue,
+; buffer, length), root-port status (HC, port), bulk (HC, dev, direction, buffer, length) and
+; interrupt transfers, cdecl. Each pushes which one it is (bit 0: UHCI; bits 1-2: control, port
+; status, bulk, interrupt).
 st_ctl_e:
         push    0
         jmp     st_wrap
@@ -233,86 +243,127 @@ st_rhs_e:
         jmp     st_wrap
 st_rhs_u:
         push    3
+        jmp     st_wrap
+st_blk_e:
+        push    4
+        jmp     st_wrap
+st_blk_u:
+        push    5
+        jmp     st_wrap
+st_int_e:
+        push    6
+        jmp     st_wrap
+st_int_u:
+        push    7
 st_wrap:
         pushad                                  ; [esp+32] which, [esp+36] return, [esp+40] arguments
         call    .h
 .h:     pop     ebp
         mov     ecx, [esp + 32]
-        mov     esi, [ebp + (st_orig - .h) + ecx * 4]
-        rdtsc
-        shrd    eax, edx, 10
-        mov     edi, eax                        ; start (TSC >> 10)
-        lea     ebx, [esp + 40 + 24]            ; the 7 arguments again (some unused by port status)
-        mov     ecx, 7
-.cp:    push    dword [ebx]
-        sub     ebx, 4
-        loop    .cp
-        call    esi
-        add     esp, 28
-        mov     [esp + 28], eax                 ; returned to the caller as it is
-        movzx   esi, ax
-        rdtsc
-        shrd    eax, edx, 10
-        sub     eax, edi
-        shr     eax, 10
-        mov     edi, eax                        ; time it took (TSC >> 20)
-        mov     ecx, [esp + 32]
-        mov     eax, 0x30                       ; the controller
-        test    cl, 1
-        jz      .t
-        mov     al, 0x10
-.t:     cmp     ecx, 2
-        jae     .rhs
-        mov     edx, [ebp + (st_rtbase - .h)]   ; status byte from gUsbData, if there is one yet
-        mov     edx, [edx + 0x98f0]
-        test    edx, edx
+        movzx   eax, byte [ebp + (st_kinds - .h) + ecx]
+        mov     edx, ecx
+        and     edx, 6
+        cmp     edx, 2
+        je      .port
+        ; a transfer: recorded (and drawn) as it starts, result EEEE, then again when it returns
+        call    .g                              ; gUsbData, if there is one yet: its status byte
         jz      .ns
         mov     ah, [edx + 0xe14]
 .ns:    mov     edx, [ebp + (st_nctl - .h)]
         inc     dword [ebp + (st_nctl - .h)]
         and     edx, 3
-        shl     edx, 5
+        shl     edx, 4
         lea     edx, [ebp + (st_ring - .h) + edx]
-        mov     [edx], eax
+        mov     [edx], ax
         xor     eax, eax
-        mov     ecx, [esp + 44]                 ; the device: its address
+        mov     ecx, [esp + 44]                 ; the device: port << 8 | address
         test    ecx, ecx
         jz      .na
         mov     al, [ecx + 6]
-.na:    mov     [edx + 4], eax
-        movzx   eax, word [esp + 48]
-        mov     [edx + 8], eax
-        movzx   eax, word [esp + 56]
-        mov     [edx + 12], eax
-        movzx   eax, word [esp + 52]
-        mov     [edx + 16], eax
-        movzx   eax, word [esp + 64]
-        mov     [edx + 20], eax
-        mov     [edx + 24], esi
-        mov     [edx + 28], edi
-        jmp     .draw
-.rhs:   mov     [ebp + (st_rhs - .h)], eax
+        mov     ah, [ecx + 9]
+.na:    mov     [edx + 2], ax
+        mov     ax, [esp + 48]                  ; arguments 3, 5, 4, 7 (control: wRequest, wValue,
+        mov     [edx + 4], ax                   ;  wIndex, wLength; bulk: direction, length, buffer, -)
+        mov     ax, [esp + 56]
+        mov     [edx + 6], ax
+        mov     ax, [esp + 52]
+        mov     [edx + 8], ax
+        mov     ax, [esp + 64]
+        mov     [edx + 10], ax
+        mov     dword [edx + 12], 0xeeee        ; not returned yet; time 0
+        push    edx                             ; (the entry: arguments now at [esp+44])
+        call    .draw
+        rdtsc
+        shrd    eax, edx, 10
+        mov     edi, eax                        ; start (TSC >> 10)
+        call    .orig
+        mov     esi, eax
+        rdtsc
+        shrd    eax, edx, 10
+        sub     eax, edi
+        shr     eax, 10                         ; time it took (TSC >> 20)
+        pop     ebx                             ; the entry
+        mov     [ebx + 12], si
+        mov     [ebx + 14], ax
+        call    .g
+        jz      .end
+        mov     cl, [edx + 0xe14]               ; the status byte after it
+        mov     [ebx + 1], cl
+.end:   call    .draw
+        jmp     .out
+.port:  push    eax                             ; root-port status: shown when it returns
+        call    .orig
+        movzx   esi, ax
+        pop     eax
+        mov     [ebp + (st_rhs - .h)], eax
         movzx   eax, byte [esp + 44]
         mov     [ebp + (st_rhs - .h) + 4], eax
         mov     [ebp + (st_rhs - .h) + 8], esi
         inc     dword [ebp + (st_nrhs - .h)]
+        call    .draw
+.out:   popad
+        add     esp, 4
+        ret
+; .orig: calls the real function with the 7 arguments again (not all used by every function) and
+; puts what it returns in the caller's eax (pushad's copy). Called with one dword pushed since
+; pushad: which is at [esp+40], the arguments at [esp+48]. Keeps ebp, edi.
+.orig:  mov     ecx, [esp + 40]
+        mov     esi, [ebp + (st_orig - .h) + ecx * 4]
+        lea     ebx, [esp + 48 + 24]
+        push    7
+        pop     ecx
+.cp:    push    dword [ebx]
+        sub     ebx, 4
+        loop    .cp
+        call    esi
+        add     esp, 28
+        mov     [esp + 8 + 28], eax
+        ret
+; .g: edx = gUsbData (0 if not set up yet; ZF then set).
+.g:     mov     edx, [ebp + (st_rtbase - .h)]
+        mov     edx, [edx + 0x98f0]
+        test    edx, edx
+        ret
+; .draw: the ring (oldest first), the error log line and the port line, if drawing is allowed.
+; Clobbers everything but ebp.
 .draw:  lea     ecx, [ebp + (st_fbblk - .h)]
         call    st_gate
         test    eax, eax
-        jz      .skip
+        jz      .dr
         mov     ebx, eax
-        xor     edi, edi                        ; the ring, oldest first
+        xor     edi, edi
 .line:  mov     esi, [ebp + (st_nctl - .h)]
         add     esi, edi
         and     esi, 3
-        shl     esi, 5
+        shl     esi, 4
         lea     esi, [ebp + (st_ring - .h) + esi]
         xor     ecx, ecx
 .fld:   push    ecx                             ; (st_hex keeps ebx, esi, edi, not ecx)
         movzx   eax, byte [ebp + (st_fields - .h) + ecx * 4 + 3]
         push    eax                             ; digits
         movzx   eax, byte [ebp + (st_fields - .h) + ecx * 4]
-        push    dword [esi + eax]               ; the field
+        movzx   eax, word [esi + eax]
+        push    eax                             ; the field
         imul    eax, edi, 24
         add     eax, 128
         push    eax                             ; y
@@ -328,10 +379,9 @@ st_wrap:
         inc     edi
         cmp     edi, 4
         jb      .line
-        mov     esi, [ebp + (st_rtbase - .h)]   ; the error log and timeout
-        mov     esi, [esi + 0x98f0]
-        test    esi, esi
+        call    .g                              ; the error log and timeout
         jz      .r
+        mov     esi, edx
         movzx   edi, byte [esi + 0x70]
         push    2
         push    edi
@@ -384,34 +434,33 @@ st_wrap:
         inc     ecx
         cmp     ecx, 5
         jb      .rf
-.skip:  popad
-        add     esp, 4
-        ret
-st_fields:                                      ; offset in the entry, x, digits
+.dr:    ret
+st_kinds:       db      0x31, 0x11, 0x30, 0x10, 0x32, 0x12, 0x33, 0x13  ; controller | 1 control, 2 bulk, 3 interrupt
+st_fields:                                      ; offset in the entry (words), x, digits
         db      0
         dw      8
         db      4
-        db      4
-        dw      88
         db      2
+        dw      88
+        db      4
+        db      4
+        dw      168
+        db      4
+        db      6
+        dw      248
+        db      4
         db      8
-        dw      128
+        dw      328
+        db      4
+        db      10
+        dw      408
         db      4
         db      12
-        dw      208
+        dw      488
         db      4
-        db      16
-        dw      288
+        db      14
+        dw      568
         db      4
-        db      20
-        dw      368
-        db      4
-        db      24
-        dw      448
-        db      4
-        db      28
-        dw      528
-        db      5
 st_rfields:                                     ; offset from st_rhs, x, digits
         db      0
         dw      8
@@ -448,10 +497,14 @@ st_tab:         ; the table fills: instruction RVA, the function it stores, its 
         dd      0x2765, 0x20a7, 0x25, st_ctl_u - st_blob     ; UHCI control transfer
         dd      0x73ec, 0x639e, 0x19, st_rhs_e - st_blob     ; EHCI root-port status
         dd      0x2750, 0x151b, 0x19, st_rhs_u - st_blob     ; UHCI root-port status
+        dd      0x7408, 0x70b2, 0x29, st_blk_e - st_blob     ; EHCI bulk transfer
+        dd      0x276c, 0x26c1, 0x29, st_blk_u - st_blob     ; UHCI bulk transfer
+        dd      0x740f, 0x72b7, 0x2d, st_int_e - st_blob     ; EHCI interrupt transfer
+        dd      0x2773, 0x2329, 0x2d, st_int_u - st_blob     ; UHCI interrupt transfer
 
 ; st_install(base, size): puts the hooks and the blob into a USBRT copy. 1 if done (2 = not
 ; relocated yet, 3 = a site not stock, 4 = not this USBRT: nothing done; 5 = all but the function
-; table hooks, their fill instructions not stock). cdecl, keeps ebx/esi/edi.
+; table hooks, their eight fill instructions not all stock). cdecl, keeps ebx/esi/edi.
 st_install:
         push    ebx
         push    esi
@@ -531,7 +584,7 @@ st_install:
         lea     ecx, [esi + 0x4816]
         sub     eax, ecx
         mov     [esi + 0x4812], eax
-        xor     ecx, ecx                        ; the function tables: all four fills stock, or none changed
+        xor     ecx, ecx                        ; the function tables: all eight fills stock, or none changed
 .tc:    mov     edx, ecx
         shl     edx, 4
         lea     edx, [edi + (st_tab - .h) + edx]
@@ -548,7 +601,7 @@ st_install:
         cmp     eax, [edx + 4]
         jne     .tno
         inc     ecx
-        cmp     ecx, 4
+        cmp     ecx, 8
         jb      .tc
         xor     ecx, ecx
 .ts:    mov     edx, ecx
@@ -563,7 +616,7 @@ st_install:
         mov     eax, [edx]
         pop     dword [esi + eax + 3]
         inc     ecx
-        cmp     ecx, 4
+        cmp     ecx, 8
         jb      .ts
         mov     eax, 1
         jmp     .out
