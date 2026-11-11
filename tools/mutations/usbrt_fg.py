@@ -23,4 +23,5 @@ MUTATIONS = [
     ('G: only four changed', F, '        cmp     ecx, 5\n        jb      .g_set', '        cmp     ecx, 4\n        jb      .g_set'),
     ('G: CErr 2, not 3', F, '        or      byte [esi + eax + 4], 0x0c      ; the token', '        or      byte [esi + eax + 4], 0x08      ; the token'),
     ('G: wrong site', F, 'urt_g_rva:      dd      0x6f95, 0x6fc4, 0x6fcd, 0x6ffa, 0x7003', 'urt_g_rva:      dd      0x6f95, 0x6fc4, 0x6fcd, 0x6ffa, 0x7004'),
+    ('F: count not kept', F, '        inc     dword [ebp + (f_count - .h)]\n', '        nop\n'),
 ]

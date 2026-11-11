@@ -262,6 +262,7 @@ F_SPACE         equ     0xb0
 ; returns, keeps ebx, esi, edi, ebp.
 f_blob:
 f_base:         dd 0                            ; this copy's base (patched)
+f_count:        dd 0                            ; READ CAPACITY(16)s sent (the screen trace shows it)
 f_entry:
         push    ebp
         push    ebx
@@ -304,6 +305,7 @@ f_entry:
         lea     eax, [ebx + 0x49ae]
         call    eax                             ; (what it answers doesn't matter: the bridge has seen it)
         pop     ecx
+        inc     dword [ebp + (f_count - .h)]
         mov     esi, [ebx + 0x98f0]
         mov     edx, [esi + 0xdcd]
         pop     dword [edx]                     ; READ CAPACITY(10)'s answer back, for USBRT to read

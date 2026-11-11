@@ -6,7 +6,8 @@
 ;   y=8   USB request (DXE, ut_trig): function/subfunction, start, time it took (both TSC >> 20,
 ;         0.79 ms units; the time stays 00000 while a request hasn't returned), how many so far
 ;   y=32  USBRT FixedDelay (SMM): caller (RVA in USBRT), its argument (15 us ticks), calls so far
-;   y=56  USBRT mass-storage command (SMM): SCSI opcode, data length, commands so far
+;   y=56  USBRT mass-storage command (SMM): SCSI opcode, data length, commands so far; then (from
+;         26.11.87) how many READ CAPACITY(16)s usbrt.inc's F stub has sent
 ;   y=80  the last 16 SCSI opcodes, oldest first (from 26.11.99)
 ;   y=104 USBRT's REQUEST SENSE (SMM): the sense code it returned (ASCQ ASC key), how many so far
 ;   y=128..200  the last 4 control transfers (setup requests) on either USB controller, oldest
@@ -176,6 +177,14 @@ st_cbw_entry:
         push    dword [ebp + (st_ncbw - .h)]
         push    56
         push    200
+        push    ebx
+        call    st_hex
+        add     esp, 20
+        push    4                               ; READ CAPACITY(16)s sent by usbrt.inc's F stub (0 if it isn't in)
+        mov     eax, [ebp + (st_rtbase - .h)]
+        push    dword [eax + F_RVA + (f_count - f_blob)]
+        push    56
+        push    320
         push    ebx
         call    st_hex
         add     esp, 20

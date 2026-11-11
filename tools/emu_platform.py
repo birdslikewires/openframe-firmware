@@ -1386,6 +1386,10 @@ def main():
                     render(exp, 56, 56, ln, 8)
                     mine = [x for x in cb if x[0] == b_]
                     render(exp, 184 + 16, 56, len(mine), 6)
+                    # READ CAPACITY(16)s F's stub sent on this copy (the READ CAPACITY test: 'big' answers
+                    # that went through the stub; whether it should be in is checked with the USBRT bytes)
+                    render(exp, 320, 56, sum(1 for k_, case, off, *_ in (r.get('rcap') or []) if case == 'big' and off == F_RVA + 8
+                                             and [USB_AREA + 0x10000, USB_AREA + 0x20000][k_] == b_), 4)
                     ring = [0] * 16
                     for i_, x in enumerate(mine):
                         ring[i_ & 15] = x[1]
@@ -1427,10 +1431,10 @@ def main():
                     draw_ring(exp, ring_at(len(ct), False), (128, 152, 176, 200))
                     # (the error-log and port-status lines, y=224 and 248, are gone from 26.11.88: nothing there)
                     # while the 5th ran: all four ring lines; while the 7th (last) ran: the bottom line
-                    for name, n_, ys, row0 in (('saved_ring', 5, (128, 152, 176, 200), 128), ('saved_line', 7, (200,), 200)):
+                    for snap, n_, ys, row0 in (('saved_ring', 5, (128, 152, 176, 200), 128), ('saved_line', 7, (200,), 200)):
                         mid = {}
                         draw_ring(mid, ring_at(n_, True)[-len(ys):], ys)
-                        sv_ = sc.get(name, b'')
+                        sv_ = sc.get(snap, b'')
                         bad_mid = [(x, y) for y in range(ys[0], ys[-1] + 16) for x in range(0, 800)
                                    if struct.unpack_from('<I', sv_, ((y - row0) * 800 + x) * 4)[0] != mid.get((x, y), 0)]
                         if bad_mid:
@@ -1509,7 +1513,7 @@ def main():
                     want[a_ + 7:a_ + 9] = (20000).to_bytes(2, 'little')
             base_ = [USB_AREA + 0x10000, USB_AREA + 0x20000][k]
             if urt_ok and readable and uv != 'f_changed':        # F: the call to the stub; the stub (run below), its base
-                want[0x4a5c:0x4a60] = struct.pack('<i', F_RVA + 4 - 0x4a60)
+                want[0x4a5c:0x4a60] = struct.pack('<i', F_RVA + 8 - 0x4a60)
                 want[F_RVA:0x9f80] = n_[F_RVA:0x9f80]
                 if struct.unpack_from('<I', n_, F_RVA)[0] != base_:
                     p.append('USBRT copy %d: F stub base %#x' % (k, struct.unpack_from('<I', n_, F_RVA)[0]))
@@ -1530,7 +1534,7 @@ def main():
         rc16 = (RC16_CDB, 0x80, USB_AREA + 0x3b100, 32, USB_AREA + 0x3b000, 0)
         for k_, case, off, ret_, log, data8, params in r.get('rcap') or []:
             hooked = urt_ok and not (k_ == 1 and uv == 'closed') and uv != 'f_changed'
-            if off != (F_RVA + 4 if hooked else 0x49ae):
+            if off != (F_RVA + 8 if hooked else 0x49ae):
                 p.append('copy %d: READ CAPACITY calls +%#x' % (k_, off))
             want_log = [rc10] + ([rc16] if hooked and case == 'big' else [])
             if log != want_log:
