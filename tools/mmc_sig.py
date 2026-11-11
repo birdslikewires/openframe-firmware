@@ -18,11 +18,12 @@ import pefile
 MMC_GUID = 'dd223ef8-6d1b-490a-a53e-ba86faaeb778'
 
 
-def find_pe(obj):
+def find_pe(obj, guid=MMC_GUID):
+    """The PE32 section of the FFS file with this GUID (lower case) in a parsed firmware image."""
     stack = [obj]
     while stack:
         o = stack.pop()
-        if type(o).__name__ == 'FirmwareFile' and o.guid_label == MMC_GUID:
+        if type(o).__name__ == 'FirmwareFile' and o.guid_label == guid:
             pes = []
             todo = [o]
             while todo:
@@ -30,10 +31,10 @@ def find_pe(obj):
                 if type(x).__name__ == 'FirmwareFileSystemSection' and x.type == 0x10:
                     pes.append(x.data)
                 todo.extend(getattr(x, 'objects', []) or [])
-            assert len(pes) == 1, 'expected one PE32 section in MmcMediaDevice'
+            assert len(pes) == 1, 'expected one PE32 section in %s' % guid
             return pes[0]
         stack.extend(getattr(o, 'objects', []) or [])
-    raise SystemExit('MmcMediaDevice (%s) not found' % MMC_GUID)
+    raise SystemExit('FFS file %s not found' % guid)
 
 
 def main():

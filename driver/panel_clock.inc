@@ -16,6 +16,14 @@
 ; upper half 0xABCD), then puts PP_CONTROL back as it was. Changing the PLL under a running pipe
 ; was glitch-free on hardware (flipped 156/103/60 Hz many times).
 ;
+; From 26.11.24 NBDXE is also changed in memory to write the GOP's value itself (nb_patch): putting
+; the clock back after NBDXE had changed it showed as a twitch of the screen, as the panel
+; re-locked; writing the value already there shows nothing (both tried live on an OF1). The
+; driver patches NBDXE's loaded image before its notify can run: at the driver's entry if NBDXE
+; is loaded by then, else as it loads (a LoadedImage protocol notify). Only the exact stock
+; function is changed (nbdxe_sig.inc, the value included), and only its 4-byte value. The
+; notify and ReadyToBoot fix above stay, for anything that writes the old value anyway.
+;
 ; Linux: gma500 takes its panel mode from what the firmware left. With this value (96 MHz
 ; reference) an unpatched gma500 assumes 48 MHz and drives 30 Hz; openframe-kernel's patch 07
 ; (6.18.63-4 on) makes it 60 Hz whatever it reads.
@@ -82,3 +90,137 @@ pclk_nb_guid:                                   ; EF9A3971-C1A0-4A93-BD40-5AA165
         dd      0xef9a3971                      ; NBDXE's clock write waits for
         dw      0xc1a0, 0x4a93
         db      0xbd, 0x40, 0x5a, 0xa1, 0x65, 0xf2, 0xdc, 0x3a
+
+; UINT32 nb_patch(EFI_BOOT_SERVICES *BS): if NBDXE is loaded (EFI_LOADED_IMAGE), its file path is
+; NBDXE's FV file, it is big enough and its clock-writing function is exactly the stock one, change
+; the value that function writes to the GOP's. 1 if it is done (now or before), else 0. cdecl.
+; Keeps ebx, esi, edi.
+nb_patch:
+        push    ebp
+        mov     ebp, esp
+        sub     esp, 16                         ; -4 count, -8 buffer, -12 LoadedImage, -16 index
+        push    ebx
+        push    esi
+        push    edi
+        call    .here
+.here:  pop     edi
+        mov     eax, 1
+        cmp     byte [edi + (nbp_done - .here)], 0
+        jne     .out
+        xor     eax, eax
+        mov     [ebp - 4], eax
+        mov     [ebp - 8], eax
+        mov     [ebp - 16], eax
+        mov     ebx, [ebp + 8]                  ; BS
+        lea     eax, [ebp - 8]                  ; LocateHandleBuffer(ByProtocol, &LoadedImage, ...)
+        push    eax
+        lea     eax, [ebp - 4]
+        push    eax
+        push    0
+        lea     eax, [edi + (nbp_li_guid - .here)]
+        push    eax
+        push    2
+        call    [ebx + 0xa8]
+        add     esp, 20
+        test    eax, eax
+        jnz     .none
+.loop:  mov     eax, [ebp - 16]
+        cmp     eax, [ebp - 4]
+        jae     .free
+        mov     edx, [ebp - 8]
+        mov     edx, [edx + eax * 4]
+        lea     eax, [ebp - 12]                 ; HandleProtocol(handle, &LoadedImage, &li)
+        push    eax
+        lea     eax, [edi + (nbp_li_guid - .here)]
+        push    eax
+        push    edx
+        call    [ebx + 0x58]
+        add     esp, 12
+        test    eax, eax
+        jnz     .next
+        push    dword [ebp - 12]
+        call    nb_patch_image
+        add     esp, 4
+        test    eax, eax
+        jz      .next
+        mov     byte [edi + (nbp_done - .here)], 1
+        jmp     .free
+.next:  inc     dword [ebp - 16]
+        jmp     .loop
+.free:  push    dword [ebp - 8]
+        call    [ebx + 0x30]                    ; FreePool
+        add     esp, 4
+.none:  movzx   eax, byte [edi + (nbp_done - .here)]
+.out:   pop     edi
+        pop     esi
+        pop     ebx
+        leave
+        ret
+
+; UINT32 nb_patch_image(EFI_LOADED_IMAGE_PROTOCOL *Li): 1 if this is the stock NBDXE and its value
+; is now the GOP's. EFI_LOADED_IMAGE_PROTOCOL (IA32): +0x10 FilePath, +0x20 ImageBase,
+; +0x28 ImageSize (UINT64; only its low half matters on IA32). Keeps ebx, esi, edi.
+nb_patch_image:
+        push    ebx
+        push    esi
+        push    edi
+        call    .here
+.here:  pop     edi
+        mov     ebx, [esp + 16]                 ; Li
+        mov     esi, [ebx + 0x10]               ; FilePath: one MEDIA_FW_VOL_FILEPATH node
+        test    esi, esi
+        jz      .no
+        cmp     dword [esi], 0x00140604         ; type 4, subtype 6, length 20
+        jne     .no
+        add     esi, 4                          ; its file GUID
+        push    edi
+        lea     edi, [edi + (nbp_nbdxe_guid - .here)]
+        mov     ecx, 16
+        cld
+        repe    cmpsb
+        pop     edi
+        jne     .no
+        cmp     dword [ebx + 0x28], NBD_END_RVA ; ImageSize (low half: IA32)
+        jb      .no
+        mov     esi, [ebx + 0x20]               ; ImageBase
+        test    esi, esi
+        jz      .no
+        lea     eax, [edi + (nbd_sig - .here)]
+        push    eax
+        lea     eax, [esi + NBD_FN_RVA]
+        push    eax
+        call    mmc_sig_match
+        add     esp, 8
+        test    eax, eax
+        jz      .no
+        mov     dword [esi + NBD_IMM_RVA], PCLK_DPLL
+        cmp     dword [esi + NBD_IMM_RVA], PCLK_DPLL
+        jne     .no
+        mov     eax, 1
+        jmp     .out
+.no:    xor     eax, eax
+.out:   pop     edi
+        pop     esi
+        pop     ebx
+        ret
+
+; VOID EFIAPI nb_patch_notify(EFI_EVENT Event, VOID *Context = BootServices): an image has loaded
+nb_patch_notify:
+        push    dword [esp + 8]
+        call    nb_patch
+        add     esp, 4
+        ret
+
+nbp_done:       db 0                            ; set once NBDXE is patched
+        align   4, db 0
+nbp_li_guid:                                    ; 5B1B31A1-9562-11D2-8E3F-00A0C969723B LoadedImage
+        dd      0x5b1b31a1
+        dw      0x9562, 0x11d2
+        db      0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b
+nbp_nbdxe_guid:                                 ; E4ECD0B2-E277-4F2B-BECB-E4D75C9A812E NBDXE
+        dd      0xe4ecd0b2
+        dw      0xe277, 0x4f2b
+        db      0xbe, 0xcb, 0xe4, 0xd7, 0x5c, 0x9a, 0x81, 0x2e
+
+%include "nbdxe_sig.inc"
+

@@ -27,6 +27,10 @@ notify (TPL_CALLBACK, context BootServices) puts the GOP's value back at once, w
 registers unlocked and PP_CONTROL restored, and writes nothing else; anything but exactly NBDXE's
 value with the GOP's dividers on a Poulsbo GMA with memory decode and a memory BAR0 is left
 untouched; ReadyToBoot puts it back if no notify could be registered; the app build does it at once.
+NBDXE's loaded image (EFI_LOADED_IMAGE handles: NBDXE's, this driver's, another): the driver
+changes the value in its stock clock-writing function to the GOP's, at the entry or as it loads,
+so the clock never changes; nothing else in it, and nothing at all for any other code, GUID,
+size or path.
 
 Also checked: FirmwareVendor becomes "BirdsLikeWires" in EfiRuntimeServicesData with a valid system
 table CRC (or nothing changes if CalculateCrc32 fails), the SMBIOS table (Types 0/1/3/11/127,
@@ -68,7 +72,31 @@ BLOCKIO = G('964e5b21-6459-11d2-8e39-00a0c969723b')
 NB_STAGE = G('ef9a3971-c1a0-4a93-bd40-5aa165f2dc3a')   # the boot-manager stage NBDXE's clock write waits for
 GMA_MMIO = 0xd0100000             # the graphics device's BAR0 (registers)
 GOP_DPLL, NB_DPLL, GOP_FP = 0xd8100003, 0xd8027203, 0x00021005
+LOADED_IMAGE = G('5b1b31a1-9562-11d2-8e3f-00a0c969723b')
+NBDXE_FILE = G('e4ecd0b2-e277-4f2b-becb-e4d75c9a812e')
+NB_IMG = 0x62000000               # NBDXE's loaded image (its clock-writing function at +0x3ca)
+NB_IMM = 0x402                    # the value in its DPLL_B write
 BIO_AREA = 0x60000000             # fake BlockIo instances and the MMC driver's functions
+
+
+def sig_code(name, label):
+    """Code matching signature `label` in driver/<name>, its masked dwords filled with something else."""
+    import os, re
+    runs, cur = [], False
+    for line in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'driver', name)):
+        if re.match(label + r':', line):
+            cur = True
+        elif cur and line.strip().startswith('dw'):
+            off, ln = (int(x, 16) for x in line.strip()[2:].split(','))
+            if ln == 0:
+                break
+            runs.append([off, ln, b''])
+        elif cur and line.strip().startswith('db'):
+            runs[-1][2] += bytes(int(x, 16) for x in line.strip()[2:].split(','))
+    code = bytearray(b'\x5a' * max(o + l for o, l, _ in runs))
+    for o, l, d in runs:
+        code[o:o + l] = d
+    return bytes(code)
 
 
 def mmc_functions():
@@ -118,11 +146,16 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         crc_fails=False, memmap=OF1_MAP, desc_size=48, getmap_fails=False, fsb_msr=0x111,
         bio=(), bio_late=(), create_event_fails=False, register_fails=False,
         gma=True, gma_decode=True, gma_bar=GMA_MMIO, fp=GOP_FP, nb_stage=True, nb_value=NB_DPLL, nb_signals=1,
-        app_dpll=NB_DPLL):
+        app_dpll=NB_DPLL, nb_img='before', nb_variant='stock', li_fails=False):
     """gma: the Poulsbo graphics device at 00:02.0 (8086:8108), its memory decode and BAR0.
     The GOP has set pipe B's PLL (fp, GOP_DPLL). nb_stage: after the entry, the boot manager's
     stage signal, on which NBDXE writes nb_value into DPLL_B and then the stage notifies run
-    (nb_signals times). An app build starts with app_dpll in DPLL_B."""
+    (nb_signals times). An app build starts with app_dpll in DPLL_B.
+    nb_img: NBDXE's loaded image there 'before' the entry, loaded 'after' it (the LoadedImage
+    notifies run), or 'none'. With an image, NBDXE writes the value its code now holds.
+    nb_variant: 'stock', or what differs: 'value' (another fixed value), 'code' (one other byte),
+    'guid' (another file), 'small' (ImageSize too small), 'nopath' (no FilePath), 'node' (another
+    device-path node type)."""
     """bio: BlockIo instances there before the driver loads, bio_late: ones a driver installs
     after its entry (the notify fires for each). Each is 'mmc' (the MMC driver's functions) or
     'other' (another driver's)."""
@@ -154,6 +187,32 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     for k in bio:
         install_bio(k)
     evs = {}                                                      # CreateEvent handle -> event
+    images = []                                                   # LoadedImage interfaces
+    mu.mem_map(NB_IMG, 0x10000)
+    nbd = bytearray(0x3000)
+    nbd[0x3ca:0x3ca + 0x40] = sig_code('nbdxe_sig.inc', 'nbd_sig')
+    if nb_variant == 'value':
+        nbd[NB_IMM:NB_IMM + 4] = struct.pack('<I', 0xd8027303)
+    if nb_variant == 'code':
+        nbd[0x3ca + 0x14] ^= 1
+    mu.mem_write(NB_IMG, bytes(nbd))
+    nb_orig = bytes(nbd)
+
+    def make_image(n, file_guid, base, size, node=b'\x04\x06\x14\x00'):
+        li = NB_IMG + 0x8000 + 0x100 * n
+        path = li + 0x80
+        mu.mem_write(path, node + file_guid + b'\x7f\xff\x04\x00')
+        mu.mem_write(li, struct.pack('<IIIIII', 0x1000, 0, 0, 0, 0 if nb_variant == 'nopath' and file_guid == NBDXE_FILE else path, 0))
+        mu.mem_write(li + 0x20, struct.pack('<IIQ', base, 0, size))
+        images.append(li)
+    def load_nbdxe():
+        make_image(len(images), G('11111111-2222-3333-4444-555555555555') if nb_variant == 'guid' else NBDXE_FILE,
+                   NB_IMG, 0x200 if nb_variant == 'small' else 0x3000,
+                   b'\x04\x07\x14\x00' if nb_variant == 'node' else b'\x04\x06\x14\x00')
+    make_image(0, G('a5d5b0c1-7d2f-4c3e-9b1a-26b1e0f17217'), LOAD, 0x3000)   # this driver
+    make_image(1, G('99999999-8888-7777-6666-555555555555'), NB_IMG, 0x3000)  # some other image, same memory
+    if nb_img == 'before':
+        load_nbdxe()
     nb_bad = {'n': 0}
     mmio = {0x6018: GOP_DPLL, 0x6048: fp, 0x61204: 0x00000001, 0x71008: 0x80000000}
     mmio_writes = []                                              # (offset, value, PP_CONTROL then)
@@ -289,7 +348,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 return ret(0)
             if off == 0x60:                                        # RegisterProtocolNotify(guid, ev, &reg)
                 g = bytes(uc.mem_read(a[0], 16))
-                if g not in (BLOCKIO, NB_STAGE) or a[1] not in evs or 'guid' in evs[a[1]]:
+                if g not in (BLOCKIO, NB_STAGE, LOADED_IMAGE) or a[1] not in evs or 'guid' in evs[a[1]]:
                     errors.append('RegisterProtocolNotify for something else')
                     return ret(0x80000002)
                 if register_fails:
@@ -304,23 +363,30 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                     evs[a[0]]['closed'] = True
                 return ret(0)
             if off == 0xa8:                                        # LocateHandleBuffer(ByProtocol, guid, 0, &n, &buf)
-                if a[0] != 2 or bytes(uc.mem_read(a[1], 16)) != BLOCKIO:
-                    errors.append('LocateHandleBuffer other than ByProtocol BlockIo')
-                if not bios:
+                g = bytes(uc.mem_read(a[1], 16))
+                if a[0] != 2 or g not in (BLOCKIO, LOADED_IMAGE):
+                    errors.append('LocateHandleBuffer other than ByProtocol BlockIo/LoadedImage')
+                    return ret(0x80000002)
+                hs = ([0xB10000 + i for i in range(len(bios))] if g == BLOCKIO
+                      else [] if li_fails else [0xB20000 + i for i in range(len(images))])
+                if not hs:
                     return ret(0x8000000E)
-                buf = pool['next']; pool['next'] += 4 * len(bios)
-                allocs[buf] = (4, 4 * len(bios))
-                uc.mem_write(buf, b''.join(struct.pack('<I', 0xB10000 + i) for i in range(len(bios))))
-                uc.mem_write(a[3], struct.pack('<I', len(bios)))
+                buf = pool['next']; pool['next'] += 4 * len(hs)
+                allocs[buf] = (4, 4 * len(hs))
+                uc.mem_write(buf, b''.join(struct.pack('<I', h) for h in hs))
+                uc.mem_write(a[3], struct.pack('<I', len(hs)))
                 uc.mem_write(a[4], struct.pack('<I', buf))
                 return ret(0)
             if off == 0x58:                                        # HandleProtocol(h, guid, &if)
-                i = a[0] - 0xB10000
-                if not 0 <= i < len(bios) or bytes(uc.mem_read(a[1], 16)) != BLOCKIO:
-                    errors.append('HandleProtocol on %#x' % a[0])
-                    return ret(0x80000003)
-                uc.mem_write(a[2], struct.pack('<I', bios[i][0]))
-                return ret(0)
+                g = bytes(uc.mem_read(a[1], 16))
+                if g == BLOCKIO and 0 <= a[0] - 0xB10000 < len(bios):
+                    uc.mem_write(a[2], struct.pack('<I', bios[a[0] - 0xB10000][0]))
+                    return ret(0)
+                if g == LOADED_IMAGE and 0 <= a[0] - 0xB20000 < len(images):
+                    uc.mem_write(a[2], struct.pack('<I', images[a[0] - 0xB20000]))
+                    return ret(0)
+                errors.append('HandleProtocol on %#x' % a[0])
+                return ret(0x80000003)
             if off == 0xc4:                                        # CreateEventEx(type, tpl, fn, ctx, group, &ev)
                 ev.update(type=a[0], tpl=a[1], fn=a[2], ctx=a[3], group=bytes(uc.mem_read(a[4], 16)) if a[4] else None)
                 if create_fails:
@@ -465,16 +531,23 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         for e in evs.values():
             if e.get('registered') and e.get('guid') == guid:
                 call(e['fn'], [e['handle'], e['ctx']], what)
+    if nb_img == 'after':                                         # NBDXE loads after this driver
+        load_nbdxe()
+        notify(LOADED_IMAGE, 'LoadedImage notify')
     cpu['phase'] = 'BDS'
     for k in bio_late:                                            # a driver installs BlockIo later
         install_bio(k)
         notify(BLOCKIO, 'BlockIo notify')
     enumerate_pci()
     if gma and nb_stage and img_is_dxe:
+        nb_wrote = []
         for _ in range(nb_signals):                               # NBDXE's notify runs first, then ours
-            mu.mem_write(GMA_MMIO + 0x6018, struct.pack('<I', nb_value))
+            v = rd(NB_IMG + NB_IMM) if nb_img != 'none' else nb_value
+            nb_wrote.append(v)
+            mu.mem_write(GMA_MMIO + 0x6018, struct.pack('<I', v))
             notify(NB_STAGE, 'NB-stage notify')
         nb_bad['after_notify'] = rd(GMA_MMIO + 0x6018)
+        nb_bad['wrote'] = nb_wrote
     late_bio = [(rd(a + 0x10), rd(a + 0x14)) for a, _ in bios]
     def smbios_now():
         if 'smbios' not in cpu:
@@ -517,7 +590,10 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
               or next((e for e in ordered if 'guid' not in e), {}))
     nb_ev = next((e for e in evs.values() if e.get('guid') == NB_STAGE), {})
     final = struct.unpack('<I', mu.mem_read(GMA_MMIO + 0x6018, 4))[0] if gma else None
-    return dict(mmc_ev=mmc_ev, nb_ev=nb_ev, evs=evs, mmio_writes=mmio_writes, dpll=final,
+    nb_now = bytes(mu.mem_read(NB_IMG, 0x3000))
+    nb_changed = [i for i in range(0x3000) if nb_now[i] != nb_orig[i]]
+    return dict(nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
+                mmc_ev=mmc_ev, nb_ev=nb_ev, evs=evs, mmio_writes=mmio_writes, dpll=final,
                 pp_final=struct.unpack('<I', mu.mem_read(GMA_MMIO + 0x61204, 4))[0] if gma else None,
                 nb_after_notify=nb_bad.get('after_notify'), wrapped=wrapped, entry_bio=entry_bio, late_bio=late_bio, in_image=in_image,
                 bios=bios, mmc_fns=(MMC_RD, MMC_WR, OTHER_FN),
@@ -582,25 +658,36 @@ def main():
         ('MMC and another driver\'s BlockIo, installed later', dxe, dict(store=lm(CARD), bio_late=('other', 'mmc', 'other'), want_wrapped=[('other', False, False), ('mmc', True, True), ('other', False, False)], want_late=True), 0, True, MAC, True),
         ('MMC BlockIo there before dispatch: wrapped at ReadyToBoot, not before', dxe, dict(store=lm(CARD), bio=('mmc',), want_wrapped=[('mmc', True, True)]), 0, True, MAC, True),
         ('two MMC BlockIo, ReadyToBoot twice', dxe, dict(store=lm(CARD), bio=('mmc',), bio_late=('mmc',), signals=2, want_wrapped=[('mmc', True, True), ('mmc', True, True)]), 0, True, MAC, True),
-        ('CreateEvent fails: ReadyToBoot still wraps', dxe, dict(store=lm(CARD), bio_late=('mmc',), create_event_fails=True, want_mmc_ev='none', want_wrapped=[('mmc', True, True)], want_pclk='rtb'), 0, True, MAC, True),
-        ('RegisterProtocolNotify fails: event closed, ReadyToBoot still wraps', dxe, dict(store=lm(CARD), bio_late=('mmc',), register_fails=True, want_mmc_ev='closed', want_wrapped=[('mmc', True, True)], want_pclk='rtb'), 0, True, MAC, True),
+        ('CreateEvent fails: ReadyToBoot still wraps', dxe, dict(nb_img='none', store=lm(CARD), bio_late=('mmc',), create_event_fails=True, want_mmc_ev='none', want_wrapped=[('mmc', True, True)], want_pclk='rtb'), 0, True, MAC, True),
+        ('RegisterProtocolNotify fails: event closed, ReadyToBoot still wraps', dxe, dict(nb_img='none', store=lm(CARD), bio_late=('mmc',), register_fails=True, want_mmc_ev='closed', want_wrapped=[('mmc', True, True)], want_pclk='rtb'), 0, True, MAC, True),
         ('no ReadyToBoot event (EFI 1.10): no notify either, nothing wrapped', dxe, dict(store=lm(CARD), bio_late=('mmc',), bs_hdr=0xc4, want_count=PLACEHOLDER, want_wrapped=[('mmc', False, False)]), 0, False, JUNK, False),
         ('CreateEventEx fails: no notify either (the image is freed)', dxe, dict(store=lm(CARD), bio_late=('mmc',), create_fails=True, cpu_rev=0x217, want_count=PLACEHOLDER, want_wrapped=[('mmc', False, False)]), 0x80000014, False, JUNK, False),
         ('app build: leaves the MMC alone (BlwMmcFix.efi does it)', app, dict(store=lm(CARD), cpu_rev=0x217, enumerated_at_entry=True, bio=('mmc',), want_wrapped=[('mmc', False, False)]), 0x80000014, False, MAC, True),
         # Panel clock (panel_clock.inc). want_pclk: 'notify' (put back by the NB-stage notify itself),
         # 'rtb' (left by the notify, put back at ReadyToBoot), 'app' (put back by the app at once),
         # 'untouched' (no display register written at all).
-        ('panel clock: NBDXE\'s value put back by the stage notify, again on a second stage signal', dxe, dict(store=lm(CARD), nb_signals=2), 0, True, MAC, True),
+        ('panel clock: NBDXE\'s value put back by the stage notify, again on a second stage signal', dxe, dict(nb_img='none', store=lm(CARD), nb_signals=2), 0, True, MAC, True),
         ('panel clock: NBDXE already right (or absent): nothing written', dxe, dict(store=lm(CARD), nb_value=GOP_DPLL, want_pclk='untouched'), 0, True, MAC, True),
-        ('panel clock: another panel\'s dividers: left alone', dxe, dict(store=lm(CARD), fp=0x00031108, want_pclk='untouched'), 0, True, MAC, True),
-        ('panel clock: 00:02.0 not the Poulsbo graphics: no display access', dxe, dict(store=lm(CARD), gma=False, want_pclk='untouched'), 0, True, MAC, True),
-        ('panel clock: graphics memory decode off: left alone', dxe, dict(store=lm(CARD), gma_decode=False, want_pclk='untouched'), 0, True, MAC, True),
-        ('panel clock: BAR0 unassigned: left alone', dxe, dict(store=lm(CARD), gma_bar=0, want_pclk='untouched'), 0, True, MAC, True),
-        ('panel clock: BAR0 an I/O BAR: left alone', dxe, dict(store=lm(CARD), gma_bar=GMA_MMIO | 1, want_pclk='untouched'), 0, True, MAC, True),
-        ('panel clock: notify not registered: put back at ReadyToBoot', dxe, dict(store=lm(CARD), register_fails=True, want_mmc_ev='closed', want_pclk='rtb'), 0, True, MAC, True),
+        ('panel clock: another panel\'s dividers: left alone', dxe, dict(nb_img='none', store=lm(CARD), fp=0x00031108, want_pclk='untouched'), 0, True, MAC, True),
+        ('panel clock: 00:02.0 not the Poulsbo graphics: no display access', dxe, dict(nb_img='none', store=lm(CARD), gma=False, want_pclk='untouched'), 0, True, MAC, True),
+        ('panel clock: graphics memory decode off: left alone', dxe, dict(nb_img='none', store=lm(CARD), gma_decode=False, want_pclk='untouched'), 0, True, MAC, True),
+        ('panel clock: BAR0 unassigned: left alone', dxe, dict(nb_img='none', store=lm(CARD), gma_bar=0, want_pclk='untouched'), 0, True, MAC, True),
+        ('panel clock: BAR0 an I/O BAR: left alone', dxe, dict(nb_img='none', store=lm(CARD), gma_bar=GMA_MMIO | 1, want_pclk='untouched'), 0, True, MAC, True),
+        ('panel clock: notify not registered: put back at ReadyToBoot', dxe, dict(nb_img='none', store=lm(CARD), register_fails=True, want_mmc_ev='closed', want_pclk='rtb'), 0, True, MAC, True),
         ('panel clock: no stage signal (NBDXE never writes): the GOP\'s clock kept, nothing written', dxe, dict(store=lm(CARD), nb_stage=False, want_pclk='untouched'), 0, True, MAC, True),
         ('panel clock: app build puts it back at once', app, dict(store=lm(CARD), cpu_rev=0x217, enumerated_at_entry=True, want_pclk='app'), 0x80000014, False, MAC, True),
         ('panel clock: app build with the right clock already: nothing written', app, dict(store=lm(CARD), cpu_rev=0x217, enumerated_at_entry=True, app_dpll=GOP_DPLL, want_pclk='untouched'), 0x80000014, False, MAC, True),
+        # NBDXE patched in memory (nb_patch). want_nbp: 'patched' (its value now the GOP's, nothing
+        # else changed in it, and the clock never changes) or 'unpatched' (its image untouched).
+        ('NBDXE loaded before the driver: patched at the entry, the clock never changes', dxe, dict(store=lm(CARD), nb_signals=2), 0, True, MAC, True),
+        ('NBDXE loaded after the driver: patched as it loads', dxe, dict(store=lm(CARD), nb_img='after'), 0, True, MAC, True),
+        ('NBDXE with another fixed value: left alone, the notify puts the clock back', dxe, dict(store=lm(CARD), nb_variant='value', want_nbp='unpatched', want_pclk='notify', nb_value=0xd8027303), 0, True, MAC, True),
+        ('NBDXE with one code byte different: left alone, the notify puts the clock back', dxe, dict(store=lm(CARD), nb_variant='code', want_nbp='unpatched', want_pclk='notify'), 0, True, MAC, True),
+        ('the same code under another file GUID: left alone', dxe, dict(store=lm(CARD), nb_variant='guid', want_nbp='unpatched', want_pclk='notify'), 0, True, MAC, True),
+        ('NBDXE image smaller than the function: left alone', dxe, dict(store=lm(CARD), nb_variant='small', want_nbp='unpatched', want_pclk='notify'), 0, True, MAC, True),
+        ('NBDXE with no FilePath: left alone', dxe, dict(store=lm(CARD), nb_variant='nopath', want_nbp='unpatched', want_pclk='notify'), 0, True, MAC, True),
+        ('NBDXE path node not an FV file: left alone', dxe, dict(store=lm(CARD), nb_variant='node', want_nbp='unpatched', want_pclk='notify'), 0, True, MAC, True),
+        ('LocateHandleBuffer(LoadedImage) fails: the notify puts the clock back', dxe, dict(store=lm(CARD), li_fails=True, want_nbp='unpatched', want_pclk='notify'), 0, True, MAC, True),
     ]
     bad = 0
     for name, img, kw, want_status, want_ev, want_mac, want_io in cases:
@@ -612,12 +699,32 @@ def main():
         want_wrapped = kw.pop('want_wrapped', [])
         want_late = kw.pop('want_late', False)
         want_mmc_ev = kw.pop('want_mmc_ev', 'registered' if img is dxe and want_ev else 'none')
-        want_pclk = kw.pop('want_pclk', ('notify' if want_ev else 'untouched') if img is dxe else 'app')
+        nb_patchable = kw.get('nb_img', 'before') != 'none' and kw.get('nb_variant', 'stock') == 'stock' and not kw.get('li_fails')
+        want_nbp = kw.pop('want_nbp', 'patched' if img is dxe and want_ev and nb_patchable else 'unpatched')
+        want_pclk = kw.pop('want_pclk', ('untouched' if want_nbp == 'patched' else 'notify' if want_ev else 'untouched')
+                           if img is dxe else 'app')
+        # NBDXE (with the 'value' variant) writes its own value; the notify must leave that alone
+        if kw.get('nb_variant') == 'value':
+            want_pclk = 'value'
         r = run(img, **kw)
         p = list(r['errors'])
+        # NBDXE patch
+        if want_nbp == 'patched':
+            if r['nb_imm'] != GOP_DPLL or [i for i in r['nb_changed'] if not NB_IMM <= i < NB_IMM + 4]:
+                p.append('NBDXE value %#x, bytes changed %s' % (r['nb_imm'], r['nb_changed'][:8]))
+            if any(v != GOP_DPLL for v in r['nb_wrote']):
+                p.append('NBDXE still wrote %s' % ['%#x' % v for v in r['nb_wrote']])
+        elif r['nb_changed']:
+            p.append('NBDXE image changed at %s' % r['nb_changed'][:8])
+        if want_nbp == 'patched' and kw.get('nb_img', 'before') == 'before' and \
+                any(e.get('guid') == LOADED_IMAGE for e in r['evs'].values()):
+            p.append('LoadedImage notify registered although NBDXE was patched at the entry')
         # Panel clock
         w = r['mmio_writes']
-        if want_pclk == 'untouched':
+        if want_pclk == 'value':                                  # another fixed value: not ours to change
+            if w:
+                p.append('display registers written: %s' % ['%#x=%#x' % (o, v) for o, v, _ in w])
+        elif want_pclk == 'untouched':
             if w:
                 p.append('display registers written: %s' % ['%#x=%#x' % (o, v) for o, v, _ in w])
         else:

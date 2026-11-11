@@ -37,7 +37,9 @@
 ; 7. Panel clock: the stock north-bridge driver overwrites the display driver's 60 Hz panel clock
 ;    with a fixed value that runs the OF1's panel at 156 Hz (panel_clock.inc). A notify on the
 ;    same protocol, registered after it, puts the display driver's value back straight after;
-;    ReadyToBoot checks again. The app build does it at once.
+;    ReadyToBoot checks again. The app build does it at once. From 26.11.24 NBDXE's loaded image
+;    is also changed to write the display driver's value itself, so the clock never changes and
+;    the screen doesn't twitch (nb_patch).
 ;
 ; Position-independent: data is reached through call/pop, so no relocations are needed.
 ; Assembled with `nasm -f bin`; build_ucode_driver.py wraps it in a PE32 image and an FFS
@@ -153,6 +155,16 @@ entry:
         lea     eax, [edi + (pclk_nb_guid - entry.here)]
         lea     ecx, [edi + (panel_notify - entry.here)]
         call    notify_on
+        mov     eax, [ebp + 12]                 ; NBDXE writes the GOP's clock itself: patch it now
+        push    dword [eax + 0x3c]              ; if it is loaded, or as it loads
+        call    nb_patch
+        add     esp, 4
+        test    eax, eax
+        jnz     .nbp
+        lea     eax, [edi + (nbp_li_guid - entry.here)]
+        lea     ecx, [edi + (nb_patch_notify - entry.here)]
+        call    notify_on
+.nbp:
 %endif
 .ret:   mov     eax, ebx
         pop     edi
