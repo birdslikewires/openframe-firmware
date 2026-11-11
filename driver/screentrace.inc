@@ -7,6 +7,8 @@
 ;         0.79 ms units; the time stays 00000 while a request hasn't returned), how many so far
 ;   y=32  USBRT FixedDelay (SMM): caller (RVA in USBRT), its argument (15 us ticks), calls so far
 ;   y=56  USBRT mass-storage command (SMM): SCSI opcode, data length, commands so far
+;   y=80  the last 16 SCSI opcodes, oldest first (from 26.11.99)
+;   y=104 USBRT's REQUEST SENSE (SMM): the sense code it returned (ASCQ ASC key), how many so far
 ; The SMM lines come from two hooks put into each USBRT copy as it loads (while SMRAM is open):
 ; FixedDelay's first instructions jump to a stub, and the call that sends a command block goes
 ; to a stub first. The stub (st_blob, position-independent) is copied into USBRT's relocation
@@ -27,6 +29,8 @@ st_fbblk:       dd 0                            ; -> st_fb (patched)
 st_rtbase:      dd 0                            ; this USBRT copy's base (patched)
 st_nfd:         dd 0                            ; FixedDelay calls
 st_ncbw:        dd 0                            ; command blocks sent
+st_nsense:      dd 0                            ; REQUEST SENSEs
+st_ops:         times 16 db 0                   ; the last 16 opcodes (a ring)
 
 ; st_gate: eax = the framebuffer block if drawing is allowed, else 0. In ebp = a .h label inside
 ; the blob: [ebp + st_fbblk - .h] must be addressable; callers pass the offset in ecx. Clobbers
@@ -107,6 +111,28 @@ st_cbw_entry:
         jz      .skip
         mov     ebx, eax
         mov     esi, [esp + 48]                 ; the command block (CBW)
+        mov     ecx, [ebp + (st_ncbw - .h)]     ; the ring: opcode n-1 at (n-1) mod 16
+        dec     ecx
+        and     ecx, 15
+        mov     al, [esi + 15]
+        mov     [ebp + (st_ops - .h) + ecx], al
+        xor     edi, edi                        ; line 4: oldest first
+.ops:   mov     ecx, [ebp + (st_ncbw - .h)]
+        add     ecx, edi
+        and     ecx, 15
+        movzx   eax, byte [ebp + (st_ops - .h) + ecx]
+        push    2
+        push    eax
+        push    80
+        imul    eax, edi, 48
+        add     eax, 8
+        push    eax
+        push    ebx
+        call    st_hex
+        add     esp, 20
+        inc     edi
+        cmp     edi, 16
+        jb      .ops
         movzx   eax, byte [esi + 15]            ; its first CDB byte: the SCSI opcode
         push    2
         push    eax
@@ -133,6 +159,48 @@ st_cbw_entry:
         popad
 st_cbw_jmp:
         db      0xe9                            ; jmp to the transfer function (rel32 patched)
+        dd      0
+
+; USBRT's REQUEST SENSE function jumps here (stack: [esp] its caller, [esp+4] the device). Runs
+; it (its displaced first instructions below), then shows the sense code it returns.
+st_sense_entry:
+        push    dword [esp + 4]
+        call    .orig
+        add     esp, 4
+        pushad
+        pushfd
+        call    .h
+.h:     pop     ebp
+        inc     dword [ebp + (st_nsense - .h)]
+        lea     ecx, [ebp + (st_fbblk - .h)]
+        call    st_gate
+        test    eax, eax
+        jz      .skip
+        mov     ebx, eax
+        push    6
+        push    dword [esp + 36]                ; the returned code: pushad's eax at +32, +4 for the push
+        push    104
+        push    8
+        push    ebx
+        call    st_hex
+        add     esp, 20
+        push    6
+        push    dword [ebp + (st_nsense - .h)]
+        push    104
+        push    120
+        push    ebx
+        call    st_hex
+        add     esp, 20
+.skip:  popfd
+        popad
+        ret
+.orig:  push    edi                             ; its own first instructions
+        push    1
+st_sense_call:
+        db      0xe8                            ; call (+0x2a12) (rel32 patched)
+        dd      0
+st_sense_jmp:
+        db      0xe9                            ; jmp back into it (+0x4c69) (rel32 patched)
         dd      0
 
 %include "sthex.inc"
@@ -177,6 +245,10 @@ st_install:
         jne     .out
         cmp     dword [esi + 0x4812], 0xfffffd17
         jne     .out
+        cmp     dword [esi + 0x4c61], 0xe8016a57        ; push edi; push 1; call (+0x2a12)
+        jne     .out
+        cmp     dword [esi + 0x4c65], 0xffffdda9
+        jne     .out
         push    esi                             ; copy the blob
         push    edi
         lea     ebx, [esi + ST_AREA]
@@ -202,6 +274,21 @@ st_install:
         lea     ecx, [ebx + (st_cbw_jmp - st_blob) + 5]
         sub     eax, ecx
         mov     [ebx + (st_cbw_jmp - st_blob) + 1], eax
+        lea     eax, [esi + 0x2a12]             ; the sense function's own call
+        lea     ecx, [ebx + (st_sense_call - st_blob) + 5]
+        sub     eax, ecx
+        mov     [ebx + (st_sense_call - st_blob) + 1], eax
+        lea     eax, [esi + 0x4c69]             ; back into it
+        lea     ecx, [ebx + (st_sense_jmp - st_blob) + 5]
+        sub     eax, ecx
+        mov     [ebx + (st_sense_jmp - st_blob) + 1], eax
+        lea     eax, [ebx + (st_sense_entry - st_blob)] ; its hook
+        lea     ecx, [esi + 0x4c66]
+        sub     eax, ecx
+        mov     word [esi + 0x4c66], 0x9090
+        mov     byte [esi + 0x4c68], 0x90
+        mov     [esi + 0x4c62], eax
+        mov     byte [esi + 0x4c61], 0xe9
         lea     eax, [ebx + (st_fd_entry - st_blob)]    ; the hooks, last
         lea     ecx, [esi + 0x1386]
         sub     eax, ecx

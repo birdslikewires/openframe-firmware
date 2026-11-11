@@ -103,9 +103,9 @@ def read_screen(fb):
     px = (lambda x, y: struct.unpack_from('<I', fb, (y * FB_W + x) * 4)[0]) if isinstance(fb, (bytes, bytearray)) else \
          (lambda x, y: fb.get((x, y), 0))
     out = []
-    for y in (8, 32, 56):
+    for y in (8, 32, 56, 80, 104):
         line = ''
-        for x in range(8, 392, 16):
+        for x in range(8, 776, 16):
             rows = [sum(0x80 >> c for c in range(8) if px(x + 2 * c, y + 2 * r)) for r in range(8)]
             line += next((ch for i, ch in enumerate('0123456789ABCDEF') if hexfont()[i] == rows), '.' if not any(rows) else '?')
         out.append(line.rstrip('.'))
@@ -300,6 +300,9 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     rt[0x4811:0x4816] = bytes.fromhex('e817fdffff')                  # call the transfer function (+0x452d)
     rt[0x4816:0x481a] = bytes.fromhex('83c410c3')                    # (the test's caller pops the four arguments)
     rt[0x452d] = 0xc3
+    rt[0x4c61:0x4c69] = bytes.fromhex('576a01e8a9ddffff')               # REQUEST SENSE: push edi; push 1; call +0x2a12
+    rt[0x4c69:0x4c71] = bytes.fromhex('595f' 'b8020402' '00c3')        # ...pop ecx; pop edi; return sense 2/04/02
+    rt[0x2a12:0x2a18] = bytes.fromhex('b800100000c3')                 # (+0x2a12 returns a buffer)
     assert len(rt) == 0x9f80, 'fixture slices changed the image size'
     rt_copies = [USB_AREA + 0x10000, USB_AREA + 0x20000]          # the normal copy, the SMM copy
     for base in rt_copies:
@@ -789,6 +792,11 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             for op, ln in ((0x12, 0x24), (0x25, 8)):
                 cbw(live[-1], op, ln)
                 sc['cbw'].append((live[-1], op, ln))
+            sc['sense'] = []
+            for k in range(2):                                     # push 0xde; call REQUEST SENSE; add esp, 4; ret
+                at = code + 0x500 + 0x20 * k
+                mu.mem_write(at, b'\x68\xde\x00\x00\x00\xb8' + struct.pack('<I', live[-1] + 0x4c61) + b'\xff\xd0\x83\xc4\x04\xc3')
+                sc['sense'].append((live[-1], call(at, [], 'REQUEST SENSE')))
             sc['fb_before_rtb'] = bytes(mu.mem_read(FB, FB_W * FB_H * 4))
     if profile:                                                   # timer ticks with fake interrupt frames
         tev = [e for e in evs.values() if e.get('type') == 0x80000200]
@@ -1128,10 +1136,13 @@ def main():
                     if b_ in hooked:
                         t1 = b_ + 0x1386 + struct.unpack_from('<i', m_, 0x1382)[0]
                         t2 = b_ + 0x4816 + struct.unpack_from('<i', m_, 0x4812)[0]
+                        t3 = b_ + 0x4c66 + struct.unpack_from('<i', m_, 0x4c62)[0]
                         if m_[0x1381] != 0xe9 or m_[0x1386:0x138a] != b'\x90' * 4 or m_[0x4811] != 0xe8 or \
-                                not (b_ + 0x9920 <= t1 < b_ + 0x9f6c and b_ + 0x9920 <= t2 < b_ + 0x9f6c):
+                                m_[0x4c61] != 0xe9 or m_[0x4c66:0x4c69] != b'\x90' * 3 or \
+                                not (b_ + 0x9920 <= t1 < b_ + 0x9f6c and b_ + 0x9920 <= t2 < b_ + 0x9f6c and b_ + 0x9920 <= t3 < b_ + 0x9f6c):
                             p.append('copy %d hooks %s %s' % (k_, m_[0x1381:0x138a].hex(), m_[0x4811:0x4816].hex()))
                     elif m_[0x1381:0x138a] != r['rt_orig'][k_][0x1381:0x138a] or m_[0x4811:0x4816] != r['rt_orig'][k_][0x4811:0x4816] \
+                            or m_[0x4c61:0x4c69] != r['rt_orig'][k_][0x4c61:0x4c69] \
                             or m_[0x9920:0x9f6c] != r['rt_orig'][k_][0x9920:0x9f6c]:
                         p.append('copy %d changed although not hooked' % k_)
                 Gr = [(en, (inf >> 8) & 1, inf & 0xff, c, ex) for st_, en, c, inf, ex in recs if inf >> 24 == 0x47]
@@ -1162,9 +1173,21 @@ def main():
                     b_, op, ln = cb[-1]
                     render(exp, 8, 56, op, 2)
                     render(exp, 56, 56, ln, 8)
-                    render(exp, 184 + 16, 56, sum(1 for x in cb if x[0] == b_), 6)
+                    mine = [x for x in cb if x[0] == b_]
+                    render(exp, 184 + 16, 56, len(mine), 6)
+                    ring = [0] * 16
+                    for i_, x in enumerate(mine):
+                        ring[i_ & 15] = x[1]
+                    for i_ in range(16):
+                        render(exp, 8 + 48 * i_, 80, ring[(len(mine) + i_) & 15], 2)
+                sn = [(b_, v) for b_, v in sc.get('sense', []) if b_ in hooked]
+                if any(v != 0x20402 for _, v in sc.get('sense', [])):
+                    p.append('REQUEST SENSE returned %s' % [hex(v) for _, v in sc.get('sense', [])])
+                if sn and smm:
+                    render(exp, 8, 104, sn[-1][1], 6)
+                    render(exp, 120, 104, len(sn), 6)
                 fbb = sc.get('fb_before_rtb', b'')
-                badpx = [(x, y) for y in range(0, 80) for x in range(0, 400)
+                badpx = [(x, y) for y in range(0, 128) for x in range(0, 800)
                          if struct.unpack_from('<I', fbb, (y * FB_W + x) * 4)[0] != exp.get((x, y), 0)]
                 if badpx:
                     p.append('framebuffer differs at %d pixels: drawn %s, expected %s' % (len(badpx), read_screen(fbb), read_screen(exp)))
@@ -1221,7 +1244,8 @@ def main():
                 want[0x530f:0x5313] = (0x3415).to_bytes(4, 'little')
                 want[0x3fa4] = 50
             if screen and img is dxe:
-                masked = set(range(0x1381, 0x138a)) | set(range(0x4812, 0x4816)) | set(range(0x9920, 0x9920 + 0x64c))
+                masked = set(range(0x1381, 0x138a)) | set(range(0x4812, 0x4816)) | set(range(0x4c61, 0x4c69)) | \
+                    set(range(0x9920, 0x9920 + 0x64c))
                 n_ = bytes(o_[i] if i in masked else n_[i] for i in range(len(n_)))
             if n_ != bytes(want):
                 p.append('USBRT copy %d changed at %s, expected %s' % (k, [hex(i) for i in range(len(o_)) if o_[i] != n_[i]][:8],
