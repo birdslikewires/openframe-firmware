@@ -1015,14 +1015,89 @@ ut_image:
         jae     .chk
         mov     [ecx + (ut_rt - .here) + edx * 4], eax
         inc     dword [ecx + (ut_nrt - .here)]
-.chk:   push    0
+.chk:
+%ifdef USBPATCH
+        push    eax
+%endif
+        push    0
         push    eax
         call    ut_check
         add     esp, 8
+%ifdef USBPATCH
+        call    ut_patch                        ; the base still at [esp]
+        add     esp, 4
+%endif
 .o:     pop     esi
         pop     edx
         pop     ecx
         ret
+
+%ifdef USBPATCH
+; ut_patch(base): EXPERIMENT (26.11.95). In a USBRT copy (the SMM one while SMRAM is open, as it
+; loads), shortens two FixedDelay waits, each only if the whole instruction sequence around it is
+; the stock one (no relocated bytes in either):
+;   A  +0x56be: mass-storage identify waits 500 ms (push 0x8235) before its first command: 10 ms;
+;   B  +0x5307: the ready loop waits 1 s (push 0x1046a) after sense 6/29/00, 2/04/01 or 2/04/02
+;      before asking again: 100 ms (the retry count stays).
+; Reads each value back. A P record: end = base, bit 0 = A done, bit 1 = B done. cdecl, keeps
+; ebx/esi/edi.
+ut_patch:
+        push    ebx
+        push    esi
+        push    edi
+        call    .here
+.here:  pop     edi
+        mov     esi, [esp + 16]
+        xor     ebx, ebx
+        lea     eax, [esi + 0x56be]
+        lea     ecx, [edi + (up_sig_a - .here)]
+        mov     edx, 18
+        call    .cmp
+        jne     .b
+        mov     dword [esi + 0x56c4], 0x29a     ; 10 ms
+        cmp     dword [esi + 0x56c4], 0x29a
+        jne     .b
+        or      ebx, 1
+.b:     lea     eax, [esi + 0x5307]
+        lea     ecx, [edi + (up_sig_b - .here)]
+        mov     edx, 17
+        call    .cmp
+        jne     .r
+        mov     dword [esi + 0x530f], 0x1a0a    ; 100 ms
+        cmp     dword [esi + 0x530f], 0x1a0a
+        jne     .r
+        or      ebx, 2
+.r:     or      ebx, 'P' << 24
+        rdtsc
+        shrd    eax, edx, 10
+        push    0
+        push    0
+        push    ebx
+        push    0
+        push    esi                             ; end field: the base
+        push    eax
+        call    ut_add
+        add     esp, 24
+        pop     edi
+        pop     esi
+        pop     ebx
+        ret
+; .cmp: eax = memory, ecx = signature, edx = length. ZF set if they are the same.
+.cmp:   push    esi
+        push    edi
+        mov     esi, eax
+        mov     edi, ecx
+        mov     ecx, edx
+        cld
+        repe    cmpsb
+        pop     edi
+        pop     esi
+        ret
+up_sig_a:       db      0xbb, 0x03, 0x01, 0x00, 0x00, 0x68, 0x35, 0x82, 0x00, 0x00, 0x89, 0x5d, 0x08
+                db      0xe8, 0xb1, 0xbc, 0xff, 0xff    ; mov ebx, 0x103; push 0x8235; mov [ebp+8], ebx; call FixedDelay
+up_sig_b:       db      0x3d, 0x06, 0x29, 0x00, 0x00, 0x75, 0x2a, 0x68, 0x6a, 0x04, 0x01, 0x00
+                db      0xe8, 0x69, 0xc0, 0xff, 0xff    ; cmp eax, 0x2906; jne; push 0x1046a; call FixedDelay
+%endif
 
 ; ut_stop: puts BS->Stall and each wrapped Trigger back, then checks the USBRT copies again.
 ; Keeps ebx/esi/edi.

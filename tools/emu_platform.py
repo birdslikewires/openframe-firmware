@@ -163,7 +163,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         bio=(), bio_late=(), create_event_fails=False, register_fails=False,
         gma=True, gma_decode=True, gma_bar=GMA_MMIO, fp=GOP_FP, nb_stage=True, nb_value=NB_DPLL, nb_signals=1,
         app_dpll=NB_DPLL, nb_img='before', nb_variant='stock', li_fails=False, timing=False,
-        mmc_img='after', mmc_variant='stock', profile=False, tm_ticks=70, usbtrace=False, uhcd_variant='stock'):
+        mmc_img='after', mmc_variant='stock', profile=False, tm_ticks=70, usbtrace=False, uhcd_variant='stock', usbrt_variant='stock'):
     """gma: the Poulsbo graphics device at 00:02.0 (8086:8108), its memory decode and BAR0.
     The GOP has set pipe B's PLL (fp, GOP_DPLL). nb_stage: after the entry, the boot manager's
     stage signal, on which NBDXE writes nb_value into DPLL_B and then the stage notifies run
@@ -640,9 +640,13 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         mu.mem_write(USB_AREA, bytes(uh))
         mu.mem_write(USB_AREA + 0x7000 + 0xdd9, struct.pack('<I', USB_AREA + 0x6700))   # the request
         rt = bytearray(0x9f80)
-        rt[0x1381:0x1386] = bytes.fromhex('53566a61e8')
-        rt[0x530e:0x5313] = bytes.fromhex('686a040100')
+        rt[0x1381:0x1389] = bytes.fromhex('53566a61e8aafeff')
+        rt[0x56be:0x56d0] = bytes.fromhex('bb030100006835820000895d08e8b1bcffff')
+        rt[0x5307:0x5318] = bytes.fromhex('3d06290000752a686a040100e869c0ffff')
+        if usbrt_variant == 'a_changed':
+            rt[0x56be + 16] ^= 1                                  # in the call: only a full-length check sees it
         mu.mem_write(USB_AREA + 0x10000, bytes(rt))
+        tm_var['rt_orig'] = bytes(rt)
         mu.mem_write(USB_AREA + 0x20000, b'\xff' * 0x9f80)
         for guid, base, size in ((UHCD_FILE, USB_AREA, 0x68e0), (USBRT_FILE, USB_AREA + 0x10000, 0x9f80),
                                  (USBRT_FILE, USB_AREA + 0x20000, 0x9f80)):
@@ -779,6 +783,8 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         hdr = bytearray(mu.mem_read(BS, hs)); hdr[0x10:0x14] = b'\0' * 4
         tm_var['bs_crc_ok'] = zlib.crc32(bytes(hdr)) == crc and bytes(mu.mem_read(BS, hs)) == bs_orig
         tm_var['trig_now'] = rd(SMMC_INST)
+        tm_var['rt_now'] = bytes(mu.mem_read(USB_AREA + 0x10000, 0x9f80))
+        tm_var['rt2_now'] = bytes(mu.mem_read(USB_AREA + 0x20000, 0x9f80))
     mmc_now = bytes(mu.mem_read(MMC_IMG, 0x34c0))
     cea_changed = [(i, mmc_now[i]) for i in range(0x34c0) if mmc_now[i] != mmc_orig[i]]
     return dict(cea_changed=cea_changed, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
@@ -793,7 +799,8 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
 
 
 def main():
-    usbtrace = '--usbtrace' in sys.argv                           # ... and -DUSBTRACE
+    usbpatch = '--usbpatch' in sys.argv                           # ... and -DUSBPATCH (experiment)
+    usbtrace = '--usbtrace' in sys.argv or usbpatch               # ... and -DUSBTRACE
     profile = '--profile' in sys.argv or usbtrace                 # ... with -DPROFILE as well
     timing = '--timing' in sys.argv or profile                    # the -DTIMING development build
     dxe, app = (open(p, 'rb').read() for p in [x for x in sys.argv[1:] if not x.startswith('--')][:2])
@@ -894,6 +901,7 @@ def main():
         ('MmcMediaDevice before the driver, NBDXE changed: MMC patched, NBDXE left alone', dxe, dict(store=lm(CARD), mmc_img='before', nb_variant='code', want_nbp='unpatched', want_pclk='notify'), 0, True, MAC, True),
         ('LoadedImage notify not registered: MmcMediaDevice loading later is left alone', dxe, dict(nb_img='none', store=lm(CARD), register_fails=True, want_mmc_ev='closed', want_pclk='rtb'), 0, True, MAC, True),
         ('USB trace build: another UHCD layout, requests not decoded', dxe, dict(store=lm(CARD), uhcd_variant='other'), 0, True, MAC, True),
+        ('USB trace build: USBRT\'s 500 ms wait not stock: only the 1 s one changed', dxe, dict(store=lm(CARD), usbrt_variant='a_changed'), 0, True, MAC, True),
         ('app build: MmcMediaDevice left alone', app, dict(store=lm(CARD), cpu_rev=0x217, enumerated_at_entry=True, mmc_img='before'), 0x80000014, False, MAC, True),
     ]
     bad = 0
@@ -965,9 +973,24 @@ def main():
             if S != [(tv.get('ut_stall_ret'), 1000, 5), (tv.get('ut_stall_ret2'), 50000, 1)]:
                 p.append('S records %s' % S)
             C = [(en, inf & 0xff) for st_, en, c, inf, ex in recs if inf >> 24 == 0x43]
-            if C[:4] != [(USB_AREA + 0x10000, 3), (USB_AREA + 0x20000, 0), (USB_AREA + 0x10000, 0x83), (USB_AREA + 0x20000, 0x80)] or \
-                    C[4:] != [(USB_AREA + 0x10000, 0x83), (USB_AREA + 0x20000, 0x80)] * ((len(C) - 4) // 2) or len(C) % 2:
+            pa = usbpatch and kw.get('usbrt_variant', 'stock') == 'stock'
+            pflags = (1 if pa else 0) | (2 if usbpatch else 0)
+            rtb_a = 0x80 | 1 | (0 if usbpatch else 2)              # after the patch its 1 s wait isn't stock
+            if C[:4] != [(USB_AREA + 0x10000, 3), (USB_AREA + 0x20000, 0), (USB_AREA + 0x10000, rtb_a), (USB_AREA + 0x20000, 0x80)] or \
+                    C[4:] != [(USB_AREA + 0x10000, rtb_a), (USB_AREA + 0x20000, 0x80)] * ((len(C) - 4) // 2) or len(C) % 2:
                 p.append('C records %s' % [(hex(a), hex(b)) for a, b in C])
+            Pr = [(en, inf & 0xff) for st_, en, c, inf, ex in recs if inf >> 24 == 0x50]
+            if Pr != ([(USB_AREA + 0x10000, pflags), (USB_AREA + 0x20000, 0)] if usbpatch else []):
+                p.append('P records %s' % [(hex(a), b) for a, b in Pr])
+            orig, now = tv.get('rt_orig', b''), tv.get('rt_now', b'')
+            changed = [i for i in range(len(orig)) if orig[i] != now[i]]
+            want_changed = ([i for i in range(0x56c4, 0x56c8) if orig[i] != (0x29a).to_bytes(4, 'little')[i - 0x56c4]] if pa else []) + \
+                ([i for i in range(0x530f, 0x5313) if orig[i] != (0x1a0a).to_bytes(4, 'little')[i - 0x530f]] if usbpatch else [])
+            if changed != sorted(want_changed) or (pa and now[0x56c4:0x56c8] != (0x29a).to_bytes(4, 'little')) or \
+                    (usbpatch and now[0x530f:0x5313] != (0x1a0a).to_bytes(4, 'little')):
+                p.append('readable USBRT copy changed at %s' % [hex(i) for i in changed][:10])
+            if tv.get('rt2_now') != b'\xff' * 0x9f80:
+                p.append('the closed copy was written')
             if any(en < st_ for st_, en, c, inf, ex in recs if inf >> 24 in (0x53, 0x54)):
                 p.append('a record ends before it starts')
         if profile and img is dxe and want_ev and not (kw.get('register_fails') or kw.get('create_event_fails')):
