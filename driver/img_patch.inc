@@ -3,12 +3,15 @@
 ; and a byte signature, and only once:
 ;   - NBDXE: the panel clock value it writes (panel_clock.inc, nb_patch_image), from 26.11.24;
 ;   - MmcMediaDevice: its CE-ATA check answers "no" at once (ceata.inc, cea_patch_image), from
-;     26.11.25.
-; NBDXE is loaded before this driver, so it is patched at the entry; MmcMediaDevice after, so
-; through a LoadedImage protocol notify, before the boot manager first connects the MMC.
+;     26.11.25;
+;   - USBRT, both copies (the SMM one while SMRAM is still open): two shorter waits and more
+;     tries (usbrt.inc, urt_patch_image), from 26.11.26.
+; NBDXE is loaded before this driver, so it is patched at the entry; the others after, so
+; through a LoadedImage protocol notify, before anything uses them.
 
 ; UINT32 img_patch(EFI_BOOT_SERVICES *BS): looks through every loaded image (EFI_LOADED_IMAGE)
-; for the ones to change. 1 once both changes are made (now or before), else 0. cdecl.
+; for the ones to change. 1 once all are made (now or before: NBDXE, MmcMediaDevice and two
+; USBRT copies), else 0. cdecl.
 ; Keeps ebx, esi, edi.
 img_patch:
         push    ebp
@@ -68,7 +71,13 @@ img_patch:
         test    eax, eax
         jz      .chk
         mov     byte [edi + (cea_done - .here)], 1
-.chk:   call    .both
+.chk:   cmp     byte [edi + (urt_n - .here)], 2 ; USBRT: any copy not changed yet (a changed one
+        jae     .all                            ; no longer matches, so isn't counted twice)
+        push    dword [ebp - 12]
+        call    urt_patch_image
+        add     esp, 4
+        add     [edi + (urt_n - .here)], al
+.all:   call    .both
         jnz     .free
 .next:  inc     dword [ebp - 16]
         jmp     .loop
@@ -82,12 +91,14 @@ img_patch:
         leave
         ret
 
-; .both: in edi = img_patch.here. eax = 1 and ZF clear if both changes are made, else eax = 0, ZF set.
+; .both: in edi = img_patch.here. eax = 1 and ZF clear if all changes are made, else eax = 0, ZF set.
 .both:  xor     eax, eax
         cmp     byte [edi + (nbp_done - .here)], 0
         je      .b0
         cmp     byte [edi + (cea_done - .here)], 0
         je      .b0
+        cmp     byte [edi + (urt_n - .here)], 2
+        jb      .b0
         inc     eax
 .b0:    test    eax, eax
         ret

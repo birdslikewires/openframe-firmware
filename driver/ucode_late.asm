@@ -43,6 +43,9 @@
 ; 8. Internal memory, again: the MMC/SD media driver probes the internal MMC for a CE-ATA disk on
 ;    every boot, with a command no MMC answers, and waits 2.8 s for it (ceata.inc). From 26.11.25
 ;    its loaded image is changed, as it loads, to skip that probe (img_patch.inc).
+; 9. USB: the firmware's USB code (USBRT, in SMM) waits 500 ms before a drive's first command,
+;    twice per drive, and 1 s between "not ready yet" retries (usbrt.inc). From 26.11.26 both of
+;    its copies are changed as they load: 10 ms, and 200 ms with five times the tries.
 ;
 ; Position-independent: data is reached through call/pop, so no relocations are needed.
 ; Assembled with `nasm -f bin`; build_ucode_driver.py wraps it in a PE32 image and an FFS
@@ -762,6 +765,7 @@ mac_ok: xor     eax, eax
 %include "mmc_fix.inc"
 %include "panel_clock.inc"
 %include "ceata.inc"
+%include "usbrt.inc"
 %include "img_patch.inc"
 %ifdef TIMING
 %include "timing.inc"
