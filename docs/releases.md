@@ -22,6 +22,7 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
 | 26.11.21 | SMBIOS Types 16/17: the memory array and device, size and speed found at boot |
 | 26.11.22 | Works around the MMC/SD driver's large-transfer bug: the shell can start a kernel from the internal memory |
 | 26.11.23 | Keeps the panel at 60 Hz: undoes the stock north-bridge driver's fixed 156 Hz panel clock |
+| 26.11.24 | No screen twitch at boot: the north-bridge driver is changed in memory to write the 60 Hz clock itself |
 
 ## Releases (2026-11-08)
 
@@ -192,3 +193,24 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
   `pre-programmed mode is 30 Hz (16628 kHz); using 60 Hz (33264 kHz)`, panel at 60 Hz. Then a clean shutdown and a cold
   boot by the smart plug: 25.5 s plug-on to SSH, DMI 26.11.23, 0x217, gma500 again found 30 Hz (the firmware's 60 Hz
   clock), panel at 60 Hz, lock registers 01, no failed units.
+- **26.11.24 (OF1)**, `of1-blw-26.11.24.bin` (md5 `3d71d9e4…`), block 9 only vs 26.11.23. With 26.11.23 the screen
+  **twitched** once at the boot manager's hand-over (10.55 s after power-on on the test unit, by Andy's stopwatch, with
+  Linux's graphics driver held back): NBDXE changed the PLL to its fixed value and our notify changed it back, and the
+  panel re-locked twice. Tried live on the test unit with on-screen markers: NBDXE's value then 60 Hz 150 µs later
+  twitches; rewriting the value the PLL already holds shows nothing. So BlwPlatformDxe now also changes NBDXE's loaded
+  image (`nb_patch` in `driver/panel_clock.inc`): an EFI_LOADED_IMAGE whose FilePath is one MEDIA_FW_VOL_FILEPATH node
+  with NBDXE's file GUID, big enough, and whose clock-writing function (RVA 0x3ca) matches `driver/nbdxe_sig.inc`
+  exactly (from `tools/nbdxe_sig.py`; the value included, the one relocated dword masked) gets that write's 4-byte value
+  (RVA 0x402) changed to `0xd8100003`. It runs at the driver's entry and from a LoadedImage protocol notify, so NBDXE is
+  patched as it loads, before its code runs. The 26.11.23 notify and ReadyToBoot fix stay as the safety net. A read-only
+  shell probe on 26.11.23 first confirmed the layout on hardware: all FV drivers' FilePath is that node, NBDXE's image
+  matches the signature, and this driver is listed before NBDXE. `tools/emu_platform.py`: 72 scenarios (9 new: loaded
+  before/after, another value, one code byte, another GUID, too small, no path, another node, lookup failing), 26.11.23's
+  driver passes 27, 12 mutations caught. Flash script `tools/flash/flash-block9-26.11.24.sh` (pre-check: blocks 1-15 =
+  26.11.23 `3c467c65…`; after: `70555f26…`; block 9 `55c380c3…`; the kernel check as 26.11.23).
+  **Flashed 2026-11-11 ~03:10** on the test unit from the stick (lock registers 01): fh programmed + verified 0x90000,
+  read-backs `897d0001…`, block 0 unchanged; dump `firmware/efi-dumps/of1-testunit-20261111-26.11.24-postflash.bin`.
+  Cold boot by the plug with the probe and gma500 held back: NBDXE's value in memory `d8100003` (patched by the driver),
+  firmware refresh 60.00 Hz, DMI 26.11.24, 0x217, lock registers 01, NVRAM diff 14 bytes = MonotonicCounter only;
+  **Andy: "Absolutely stable, no twitching!"** Normal cold boot: 25.3 s plug-on to SSH, gma500 found the 60 Hz clock and
+  kept it, BlwMac ok (no write), no failed units.
