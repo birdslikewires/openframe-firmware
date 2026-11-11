@@ -39,7 +39,10 @@
 ;    same protocol, registered after it, puts the display driver's value back straight after;
 ;    ReadyToBoot checks again. The app build does it at once. From 26.11.24 NBDXE's loaded image
 ;    is also changed to write the display driver's value itself, so the clock never changes and
-;    the screen doesn't twitch (nb_patch).
+;    the screen doesn't twitch (img_patch.inc).
+; 8. Internal memory, again: the MMC/SD media driver probes the internal MMC for a CE-ATA disk on
+;    every boot, with a command no MMC answers, and waits 2.8 s for it (ceata.inc). From 26.11.25
+;    its loaded image is changed, as it loads, to skip that probe (img_patch.inc).
 ;
 ; Position-independent: data is reached through call/pop, so no relocations are needed.
 ; Assembled with `nasm -f bin`; build_ucode_driver.py wraps it in a PE32 image and an FFS
@@ -159,14 +162,14 @@ entry:
         lea     eax, [edi + (pclk_nb_guid - entry.here)]
         lea     ecx, [edi + (panel_notify - entry.here)]
         call    notify_on
-        mov     eax, [ebp + 12]                 ; NBDXE writes the GOP's clock itself: patch it now
-        push    dword [eax + 0x3c]              ; if it is loaded, or as it loads
-        call    nb_patch
+        mov     eax, [ebp + 12]                 ; NBDXE (writes the GOP's clock itself) and
+        push    dword [eax + 0x3c]              ; MmcMediaDevice (no CE-ATA probe): patch them now
+        call    img_patch                       ; if they are loaded, or as they load
         add     esp, 4
         test    eax, eax
         jnz     .nbp
         lea     eax, [edi + (nbp_li_guid - entry.here)]
-        lea     ecx, [edi + (nb_patch_notify - entry.here)]
+        lea     ecx, [edi + (img_patch_notify - entry.here)]
         call    notify_on
 .nbp:
 %ifdef TIMING
@@ -745,6 +748,8 @@ mac_ok: xor     eax, eax
 %include "smbios_id.inc"
 %include "mmc_fix.inc"
 %include "panel_clock.inc"
+%include "ceata.inc"
+%include "img_patch.inc"
 %ifdef TIMING
 %include "timing.inc"
 %endif

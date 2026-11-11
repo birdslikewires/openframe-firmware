@@ -76,6 +76,9 @@ LOADED_IMAGE = G('5b1b31a1-9562-11d2-8e3f-00a0c969723b')
 NBDXE_FILE = G('e4ecd0b2-e277-4f2b-becb-e4d75c9a812e')
 NB_IMG = 0x62000000               # NBDXE's loaded image (its clock-writing function at +0x3ca)
 NB_IMM = 0x402                    # the value in its DPLL_B write
+MMC_FILE = G('dd223ef8-6d1b-490a-a53e-ba86faaeb778')
+MMC_IMG = 0x63000000              # MmcMediaDevice's loaded image (its CE-ATA check at +0x72b)
+CEA_FN = 0x72b
 # The boot-timing development build (-DTIMING) also watches these, and publishes BlwBootTimes.
 TM_GUIDS = {G('9042a9de-23dc-4a38-96fb-7aded080516a'): 'GOP ', G('964e5b22-6459-11d2-8e39-00a0c969723b'): 'SFS ',
             G('2b2f68d6-0cd2-44cf-8e8b-bba20b1b5b75'): 'USB ', G('387477c2-69c7-11d2-8e39-00a0c969723b'): 'OUT ',
@@ -152,7 +155,8 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         crc_fails=False, memmap=OF1_MAP, desc_size=48, getmap_fails=False, fsb_msr=0x111,
         bio=(), bio_late=(), create_event_fails=False, register_fails=False,
         gma=True, gma_decode=True, gma_bar=GMA_MMIO, fp=GOP_FP, nb_stage=True, nb_value=NB_DPLL, nb_signals=1,
-        app_dpll=NB_DPLL, nb_img='before', nb_variant='stock', li_fails=False, timing=False):
+        app_dpll=NB_DPLL, nb_img='before', nb_variant='stock', li_fails=False, timing=False,
+        mmc_img='after', mmc_variant='stock'):
     """gma: the Poulsbo graphics device at 00:02.0 (8086:8108), its memory decode and BAR0.
     The GOP has set pipe B's PLL (fp, GOP_DPLL). nb_stage: after the entry, the boot manager's
     stage signal, on which NBDXE writes nb_value into DPLL_B and then the stage notifies run
@@ -161,7 +165,11 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     notifies run), or 'none'. With an image, NBDXE writes the value its code now holds.
     nb_variant: 'stock', or what differs: 'value' (another fixed value), 'code' (one other byte),
     'guid' (another file), 'small' (ImageSize too small), 'nopath' (no FilePath), 'node' (another
-    device-path node type)."""
+    device-path node type).
+    mmc_img: MmcMediaDevice's loaded image there 'before' the entry, loaded 'after' it (as on an
+    OF1, where it loads just after this driver), or 'none'. mmc_variant: 'stock', 'code' (one byte
+    of the CE-ATA check different), 'guid', 'small', 'nopath', or 'done' (the check already
+    starts xor al, al; ret)."""
     """bio: BlockIo instances there before the driver loads, bio_late: ones a driver installs
     after its entry (the notify fires for each). Each is 'mmc' (the MMC driver's functions) or
     'other' (another driver's)."""
@@ -205,22 +213,39 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         nbd[0x3ca + 0x14] ^= 1
     mu.mem_write(NB_IMG, bytes(nbd))
     nb_orig = bytes(nbd)
+    mu.mem_map(MMC_IMG, 0x10000)
+    mmcd = bytearray(b'\x90' * 0x34c0)
+    cea = sig_code('ceata_sig.inc', 'cea_sig')
+    mmcd[CEA_FN:CEA_FN + len(cea)] = cea
+    if mmc_variant == 'code':
+        mmcd[CEA_FN + 0x30] ^= 1
+    if mmc_variant == 'done':
+        mmcd[CEA_FN:CEA_FN + 3] = b'\x32\xc0\xc3'
+    mu.mem_write(MMC_IMG, bytes(mmcd))
+    mmc_orig = bytes(mmcd)
 
-    def make_image(n, file_guid, base, size, node=b'\x04\x06\x14\x00'):
+    def make_image(n, file_guid, base, size, node=b'\x04\x06\x14\x00', nopath=None):
         li = NB_IMG + 0x8000 + 0x100 * n
         path = li + 0x80
         mu.mem_write(path, node + file_guid + b'\x7f\xff\x04\x00')
-        mu.mem_write(li, struct.pack('<IIIIII', 0x1000, 0, 0, 0, 0 if nb_variant == 'nopath' and file_guid == NBDXE_FILE else path, 0))
+        if nopath is None:
+            nopath = nb_variant == 'nopath' and file_guid == NBDXE_FILE
+        mu.mem_write(li, struct.pack('<IIIIII', 0x1000, 0, 0, 0, 0 if nopath else path, 0))
         mu.mem_write(li + 0x20, struct.pack('<IIQ', base, 0, size))
         images.append(li)
     def load_nbdxe():
         make_image(len(images), G('11111111-2222-3333-4444-555555555555') if nb_variant == 'guid' else NBDXE_FILE,
                    NB_IMG, 0x200 if nb_variant == 'small' else 0x3000,
                    b'\x04\x07\x14\x00' if nb_variant == 'node' else b'\x04\x06\x14\x00')
+    def load_mmc():
+        make_image(len(images), G('11111111-2222-3333-4444-555555555555') if mmc_variant == 'guid' else MMC_FILE,
+                   MMC_IMG, 0x700 if mmc_variant == 'small' else 0x34c0, nopath=mmc_variant == 'nopath')
     make_image(0, G('a5d5b0c1-7d2f-4c3e-9b1a-26b1e0f17217'), LOAD, 0x3000)   # this driver
     make_image(1, G('99999999-8888-7777-6666-555555555555'), NB_IMG, 0x3000)  # some other image, same memory
     if nb_img == 'before':
         load_nbdxe()
+    if mmc_img == 'before':
+        load_mmc()
     nb_bad = {'n': 0}
     mmio = {0x6018: GOP_DPLL, 0x6048: fp, 0x61204: 0x00000001, 0x71008: 0x80000000}
     mmio_writes = []                                              # (offset, value, PP_CONTROL then)
@@ -570,6 +595,12 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             if e.get('guid') == LOADED_IMAGE:
                 li_queues[e['key']].append(0xB20000 + len(images) - 1)
         notify(LOADED_IMAGE, 'LoadedImage notify')
+    if mmc_img == 'after':                                        # MmcMediaDevice loads after it
+        load_mmc()
+        for e in evs.values():
+            if e.get('guid') == LOADED_IMAGE:
+                li_queues[e['key']].append(0xB20000 + len(images) - 1)
+        notify(LOADED_IMAGE, 'LoadedImage notify')
     if timing:                                                    # the watched protocols appear
         for g in TM_GUIDS:
             notify(g, 'timing notify')
@@ -631,7 +662,9 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     final = struct.unpack('<I', mu.mem_read(GMA_MMIO + 0x6018, 4))[0] if gma else None
     nb_now = bytes(mu.mem_read(NB_IMG, 0x3000))
     nb_changed = [i for i in range(0x3000) if nb_now[i] != nb_orig[i]]
-    return dict(tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
+    mmc_now = bytes(mu.mem_read(MMC_IMG, 0x34c0))
+    cea_changed = [(i, mmc_now[i]) for i in range(0x34c0) if mmc_now[i] != mmc_orig[i]]
+    return dict(cea_changed=cea_changed, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
                 mmc_ev=mmc_ev, nb_ev=nb_ev, evs=evs, mmio_writes=mmio_writes, dpll=final,
                 pp_final=struct.unpack('<I', mu.mem_read(GMA_MMIO + 0x61204, 4))[0] if gma else None,
                 nb_after_notify=nb_bad.get('after_notify'), wrapped=wrapped, entry_bio=entry_bio, late_bio=late_bio, in_image=in_image,
@@ -728,6 +761,20 @@ def main():
         ('NBDXE with no FilePath: left alone', dxe, dict(store=lm(CARD), nb_variant='nopath', want_nbp='unpatched', want_pclk='notify'), 0, True, MAC, True),
         ('NBDXE path node not an FV file: left alone', dxe, dict(store=lm(CARD), nb_variant='node', want_nbp='unpatched', want_pclk='notify'), 0, True, MAC, True),
         ('LocateHandleBuffer(LoadedImage) fails: the notify puts the clock back', dxe, dict(store=lm(CARD), li_fails=True, want_nbp='unpatched', want_pclk='notify'), 0, True, MAC, True),
+        # MmcMediaDevice's CE-ATA check (ceata.inc). want_cea: 'patched' (its first three bytes
+        # xor al, al; ret, nothing else changed) or 'unpatched' (its image untouched).
+        ('MmcMediaDevice loads after the driver (as on an OF1): CE-ATA check patched as it loads', dxe, dict(store=lm(CARD), mmc_img='after'), 0, True, MAC, True),
+        ('MmcMediaDevice loaded before the driver: patched at the entry, no LoadedImage notify', dxe, dict(store=lm(CARD), mmc_img='before'), 0, True, MAC, True),
+        ('NBDXE and MmcMediaDevice both load after the driver: both patched as they load', dxe, dict(store=lm(CARD), nb_img='after', mmc_img='after'), 0, True, MAC, True),
+        ('no MmcMediaDevice: NBDXE still patched, nothing else changed', dxe, dict(store=lm(CARD), mmc_img='none'), 0, True, MAC, True),
+        ('MmcMediaDevice with one byte of the check different: left alone', dxe, dict(store=lm(CARD), mmc_variant='code'), 0, True, MAC, True),
+        ('the same check under another file GUID: left alone', dxe, dict(store=lm(CARD), mmc_variant='guid'), 0, True, MAC, True),
+        ('MmcMediaDevice image smaller than the check: left alone', dxe, dict(store=lm(CARD), mmc_variant='small'), 0, True, MAC, True),
+        ('MmcMediaDevice with no FilePath: left alone', dxe, dict(store=lm(CARD), mmc_variant='nopath'), 0, True, MAC, True),
+        ('MmcMediaDevice check already skipped: left as it is', dxe, dict(store=lm(CARD), mmc_variant='done'), 0, True, MAC, True),
+        ('MmcMediaDevice before the driver, NBDXE changed: MMC patched, NBDXE left alone', dxe, dict(store=lm(CARD), mmc_img='before', nb_variant='code', want_nbp='unpatched', want_pclk='notify'), 0, True, MAC, True),
+        ('LoadedImage notify not registered: MmcMediaDevice loading later is left alone', dxe, dict(nb_img='none', store=lm(CARD), register_fails=True, want_mmc_ev='closed', want_pclk='rtb'), 0, True, MAC, True),
+        ('app build: MmcMediaDevice left alone', app, dict(store=lm(CARD), cpu_rev=0x217, enumerated_at_entry=True, mmc_img='before'), 0x80000014, False, MAC, True),
     ]
     bad = 0
     for name, img, kw, want_status, want_ev, want_mac, want_io in cases:
@@ -741,6 +788,10 @@ def main():
         want_mmc_ev = kw.pop('want_mmc_ev', 'registered' if img is dxe and want_ev else 'none')
         nb_patchable = kw.get('nb_img', 'before') != 'none' and kw.get('nb_variant', 'stock') == 'stock' and not kw.get('li_fails')
         want_nbp = kw.pop('want_nbp', 'patched' if img is dxe and want_ev and nb_patchable else 'unpatched')
+        mmc_img = kw.get('mmc_img', 'after')
+        cea_patchable = (mmc_img != 'none' and kw.get('mmc_variant', 'stock') == 'stock' and not kw.get('li_fails') and
+                         (mmc_img == 'before' or not (kw.get('register_fails') or kw.get('create_event_fails'))))
+        want_cea = kw.pop('want_cea', 'patched' if img is dxe and want_ev and cea_patchable else 'unpatched')
         want_pclk = kw.pop('want_pclk', ('untouched' if want_nbp == 'patched' else 'notify' if want_ev else 'untouched')
                            if img is dxe else 'app')
         # NBDXE (with the 'value' variant) writes its own value; the notify must leave that alone
@@ -768,7 +819,9 @@ def main():
                     pre = tags[tags.index(b'PRE ') + 1:tags.index(b'PREE')] if b'PRE ' in tags and b'PREE' in tags else None
                     want_pre = [b'\xc1\xb0\xd5\xa5', b'\x99\x99\x99\x99'] + \
                         ([{'guid': b'\x11' * 4, 'nopath': b'LI??', 'node': b'LI??'}.get(kw.get('nb_variant'), NBDXE_FILE[:4])]
-                         if kw.get('nb_img', 'before') == 'before' else [])
+                         if kw.get('nb_img', 'before') == 'before' else []) + \
+                        ([b'\x11' * 4 if kw.get('mmc_variant') == 'guid' else b'LI??' if kw.get('mmc_variant') == 'nopath' else MMC_FILE[:4]]
+                         if kw.get('mmc_img', 'after') == 'before' else [])
                     if not kw.get('li_fails') and pre != want_pre:
                         p.append('images before the entry %s, expected %s' % (pre, want_pre))
                     if kw.get('nb_img') == 'after' and NBDXE_FILE[:4] not in tags:
@@ -783,9 +836,15 @@ def main():
                 p.append('NBDXE still wrote %s' % ['%#x' % v for v in r['nb_wrote']])
         elif r['nb_changed']:
             p.append('NBDXE image changed at %s' % r['nb_changed'][:8])
-        if not timing and want_nbp == 'patched' and kw.get('nb_img', 'before') == 'before' and \
-                any(e.get('guid') == LOADED_IMAGE for e in r['evs'].values()):
-            p.append('LoadedImage notify registered although NBDXE was patched at the entry')
+        # MmcMediaDevice's CE-ATA check (ceata.inc)
+        if want_cea == 'patched':
+            if r['cea_changed'] != [(CEA_FN, 0x32), (CEA_FN + 1, 0xc0), (CEA_FN + 2, 0xc3)]:
+                p.append('MmcMediaDevice changed at %s, expected its CE-ATA check to start xor al, al; ret' % r['cea_changed'][:6])
+        elif r['cea_changed']:
+            p.append('MmcMediaDevice changed at %s' % r['cea_changed'][:6])
+        if not timing and want_nbp == 'patched' and want_cea == 'patched' and kw.get('nb_img', 'before') == 'before' and \
+                kw.get('mmc_img', 'after') == 'before' and any(e.get('guid') == LOADED_IMAGE for e in r['evs'].values()):
+            p.append('LoadedImage notify registered although both images were patched at the entry')
         # Panel clock
         w = r['mmio_writes']
         if want_pclk == 'value':                                  # another fixed value: not ours to change
