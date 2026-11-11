@@ -189,4 +189,6 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
   verified 0x90000, read-backs `2790bf3e…`, block 0 unchanged; dump `firmware/efi-dumps/of1-testunit-20261111-26.11.23-postflash.bin`.
   Reboot: DMI 26.11.23, vendor line, slots 1/1, 0x217; with gma500 held back the firmware leaves `0xd8100003`, **60.00 Hz**;
   MAC ok (no BlwMac write), lock registers 01, NVRAM diff 14 bytes = MonotonicCounter only. Normal boot: gma500 logs
-  `pre-programmed mode is 30 Hz (16628 kHz); using 60 Hz (33264 kHz)`, panel at 60 Hz. (Warm reboots; no plug cycle.)
+  `pre-programmed mode is 30 Hz (16628 kHz); using 60 Hz (33264 kHz)`, panel at 60 Hz. Then a clean shutdown and a cold
+  boot by the smart plug: 25.5 s plug-on to SSH, DMI 26.11.23, 0x217, gma500 again found 30 Hz (the firmware's 60 Hz
+  clock), panel at 60 Hz, lock registers 01, no failed units.
