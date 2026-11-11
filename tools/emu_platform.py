@@ -303,6 +303,8 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     rt[0x4c61:0x4c69] = bytes.fromhex('576a01e8a9ddffff')               # REQUEST SENSE: push edi; push 1; call +0x2a12
     rt[0x4c69:0x4c71] = bytes.fromhex('595f' 'b8020402' '00c3')        # ...pop ecx; pop edi; return sense 2/04/02
     rt[0x2a12:0x2a18] = bytes.fromhex('b800100000c3')                 # (+0x2a12 returns a buffer)
+    if screen_variant == 'sense_changed':                         # another REQUEST SENSE: push 2, not push 1
+        rt[0x4c63] = 2
     assert len(rt) == 0x9f80, 'fixture slices changed the image size'
     rt_copies = [USB_AREA + 0x10000, USB_AREA + 0x20000]          # the normal copy, the SMM copy
     for base in rt_copies:
@@ -322,8 +324,13 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 fake_tsc['t'] += 0x1000
                 uc.reg_write(UC_X86_REG_EAX, fake_tsc['t']); uc.reg_write(UC_X86_REG_EDX, fake_tsc_hi)
                 uc.reg_write(UC_X86_REG_EIP, addr + 2)
-        for base in rt_copies:
-            mu.hook_add(UC_HOOK_CODE, rdtsc_hook, begin=base + 0x9920, end=base + 0x9920 + 0x64c)
+        def hook_stub_rdtsc():                                    # once the stubs are in: hook just their rdtscs
+            for base in rt_copies:
+                area = bytes(mu.mem_read(base + 0x9920, 0x64c))
+                i = area.find(b'\x0f\x31')
+                while i >= 0:
+                    mu.hook_add(UC_HOOK_CODE, rdtsc_hook, begin=base + 0x9920 + i, end=base + 0x9920 + i)
+                    i = area.find(b'\x0f\x31', i + 1)
 
     def load_usbrt():
         for base in rt_copies:
@@ -672,7 +679,14 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         errors.append('OUT to port %#x size %d value %#x' % (port, size, value))
 
     mu.hook_add(UC_HOOK_CODE, stub, begin=STUBS, end=STUBS + 0x3000)
-    mu.hook_add(UC_HOOK_CODE, cpu_hook, begin=LOAD, end=LOAD + size_img)
+    # cpuid, rdmsr and wrmsr: hooked at each place they occur in the image (an instruction only
+    # fires its hook where it starts, so a byte pair inside other code or data never triggers it)
+    image_now = bytes(mu.mem_read(LOAD, size_img))
+    for op in (b'\x0f\xa2', b'\x0f\x32', b'\x0f\x30'):
+        i = image_now.find(op)
+        while i >= 0:
+            mu.hook_add(UC_HOOK_CODE, cpu_hook, begin=LOAD + i, end=LOAD + i)
+            i = image_now.find(op, i + 1)
     mu.hook_add(UC_HOOK_INSN, port_in, None, 1, 0, UC_X86_INS_IN)
     mu.hook_add(UC_HOOK_INSN, port_out, None, 1, 0, UC_X86_INS_OUT)
 
@@ -725,6 +739,8 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             notify(g, 'timing notify')
     if usbrt_img == 'after':                                      # USBRT's two copies load (as on an OF1)
         load_usbrt()
+        if screen:
+            hook_stub_rdtsc()
     if usbtrace:                                                  # UHCD, SmmControl
         uh = bytearray(0x68e0)
         uh[0x4fcd] = 0xa1 if uhcd_variant == 'stock' else 0x8b      # another UHCD: requests not decoded
@@ -919,11 +935,14 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
 
 
 def main():
+    first_fail = '--first-fail' in sys.argv                       # stop at the first failing scenario (mutation runs)
+    only = sys.argv[sys.argv.index('--only') + 1] if '--only' in sys.argv else None   # run just the matching scenarios
     screen = '--screen' in sys.argv                               # ... and -DSCREEN
     usbtrace = '--usbtrace' in sys.argv or screen                 # ... and -DUSBTRACE
     profile = '--profile' in sys.argv or usbtrace                 # ... with -DPROFILE as well
     timing = '--timing' in sys.argv or profile                    # the -DTIMING development build
-    dxe, app = (open(p, 'rb').read() for p in [x for x in sys.argv[1:] if not x.startswith('--')][:2])
+    files = [x for i, x in enumerate(sys.argv[1:], 1) if not x.startswith('--') and sys.argv[i - 1] != '--only']
+    dxe, app = (open(p, 'rb').read() for p in files[:2])
     Z = bytes(6)
     lm = lambda d, attr=7: {('BlwMac', BLW): (attr, d)}
     EV = dict(type=0x200, tpl=8, ctx=ST, group=RTB)
@@ -1038,9 +1057,12 @@ def main():
         ('screen trace build: no framebuffer yet when GOP appears, one by the first USB request: drawn', dxe, dict(store=lm(CARD), screen_variant='late_mode'), 0, True, MAC, True),
         ('screen trace build: never a framebuffer: nothing drawn anywhere', dxe, dict(store=lm(CARD), screen_variant='no_fb'), 0, True, MAC, True),
         ('screen trace build: a bit-mask pixel format: nothing drawn anywhere', dxe, dict(store=lm(CARD), screen_variant='bitmask'), 0, True, MAC, True),
+        ('screen trace build: REQUEST SENSE not stock: no hooks at all', dxe, dict(store=lm(CARD), screen_variant='sense_changed'), 0, True, MAC, True),
         ('app build: MmcMediaDevice left alone', app, dict(store=lm(CARD), cpu_rev=0x217, enumerated_at_entry=True, mmc_img='before'), 0x80000014, False, MAC, True),
     ]
     bad = 0
+    if only:
+        cases = [c for c in cases if only in c[0]]
     for name, img, kw, want_status, want_ev, want_mac, want_io in cases:
         kw = dict(kw)
         want_count = kw.pop('want_count', 'BootCount: 0000001613')
@@ -1126,7 +1148,7 @@ def main():
                 uv_ = kw.get('usbrt_variant', 'stock')
                 seen_ = kw.get('usbrt_img', 'after') == 'after' and uv_ not in ('guid', 'nopath', 'small')
                 I = [(en, inf & 0xff) for st_, en, c, inf, ex in recs if inf >> 24 == 0x49]
-                want_I = [(b_, 2 if (sv == 'unrelocated' or (uv_ == 'closed' and k_ == 1)) else 1)
+                want_I = [(b_, 2 if (sv == 'unrelocated' or (uv_ == 'closed' and k_ == 1)) else 3 if sv == 'sense_changed' else 1)
                           for k_, b_ in enumerate([USB_AREA + 0x10000, USB_AREA + 0x20000])] if seen_ else []
                 if I != want_I:
                     p.append('I records %s, expected %s' % ([(hex(a), b) for a, b in I], [(hex(a), b) for a, b in want_I]))
@@ -1180,15 +1202,20 @@ def main():
                         ring[i_ & 15] = x[1]
                     for i_ in range(16):
                         render(exp, 8 + 48 * i_, 80, ring[(len(mine) + i_) & 15], 2)
-                sn = [(b_, v) for b_, v in sc.get('sense', []) if b_ in hooked]
-                if any(v != 0x20402 for _, v in sc.get('sense', [])):
-                    p.append('REQUEST SENSE returned %s' % [hex(v) for _, v in sc.get('sense', [])])
+                sn = [(b_, v or 0) for b_, v in sc.get('sense', []) if b_ in hooked]
+                if sv != 'sense_changed' and any(v != 0x20402 for _, v in sc.get('sense', [])):
+                    p.append('REQUEST SENSE returned %s' % [hex(v) if v is not None else None for _, v in sc.get('sense', [])])
                 if sn and smm:
                     render(exp, 8, 104, sn[-1][1], 6)
                     render(exp, 120, 104, len(sn), 6)
                 fbb = sc.get('fb_before_rtb', b'')
-                badpx = [(x, y) for y in range(0, 128) for x in range(0, 800)
-                         if struct.unpack_from('<I', fbb, (y * FB_W + x) * 4)[0] != exp.get((x, y), 0)]
+                want_fb = bytearray(128 * FB_W * 4)
+                for (x, y), v in exp.items():
+                    struct.pack_into('<I', want_fb, (y * FB_W + x) * 4, v)
+                badpx = []
+                if fbb[:len(want_fb)] != bytes(want_fb):
+                    badpx = [(x, y) for y in range(0, 128) for x in range(0, 800)
+                             if struct.unpack_from('<I', fbb, (y * FB_W + x) * 4)[0] != exp.get((x, y), 0)]
                 if badpx:
                     p.append('framebuffer differs at %d pixels: drawn %s, expected %s' % (len(badpx), read_screen(fbb), read_screen(exp)))
                 if sc.get('fb_end') != fbb:
@@ -1380,6 +1407,9 @@ def main():
         for x in p:
             print('       ' + x)
         bad += bool(p)
+        if p and first_fail:
+            print('stopped at the first failure (--first-fail)')
+            sys.exit(1)
     print('%d of %d scenarios passed' % (len(cases) - bad, len(cases)))
     sys.exit(1 if bad else 0)
 
