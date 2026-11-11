@@ -79,6 +79,13 @@ NB_IMM = 0x402                    # the value in its DPLL_B write
 MMC_FILE = G('dd223ef8-6d1b-490a-a53e-ba86faaeb778')
 MMC_IMG = 0x63000000              # MmcMediaDevice's loaded image (its CE-ATA check at +0x72b)
 CEA_FN = 0x72b
+# The USB trace build (-DUSBTRACE): SmmControl, UHCD and USBRT, all below 512 MB (the build only
+# follows pointers there).
+SMMC_GUID = G('8d12e231-c667-4fd1-98f2-2449a7e7b2e5')
+UHCD_FILE = G('580dd900-385d-11d7-883a-00500473d4eb')
+USBRT_FILE = G('04eaaaa1-29a1-11d7-8838-00500473d4eb')
+USB_AREA = 0x08000000             # UHCD +0, USBRT copies +0x10000 (readable) and +0x20000 (SMRAM closed)
+SMMC_INST, SMMC_TRIG = USB_AREA + 0x30000, 0x30000020
 # The boot-timing development build (-DTIMING) also watches these, and publishes BlwBootTimes.
 TM_GUIDS = {G('9042a9de-23dc-4a38-96fb-7aded080516a'): 'GOP ', G('964e5b22-6459-11d2-8e39-00a0c969723b'): 'SFS ',
             G('2b2f68d6-0cd2-44cf-8e8b-bba20b1b5b75'): 'USB ', G('387477c2-69c7-11d2-8e39-00a0c969723b'): 'OUT ',
@@ -156,7 +163,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         bio=(), bio_late=(), create_event_fails=False, register_fails=False,
         gma=True, gma_decode=True, gma_bar=GMA_MMIO, fp=GOP_FP, nb_stage=True, nb_value=NB_DPLL, nb_signals=1,
         app_dpll=NB_DPLL, nb_img='before', nb_variant='stock', li_fails=False, timing=False,
-        mmc_img='after', mmc_variant='stock', profile=False, tm_ticks=70):
+        mmc_img='after', mmc_variant='stock', profile=False, tm_ticks=70, usbtrace=False, uhcd_variant='stock'):
     """gma: the Poulsbo graphics device at 00:02.0 (8086:8108), its memory decode and BAR0.
     The GOP has set pipe B's PLL (fp, GOP_DPLL). nb_stage: after the entry, the boot manager's
     stage signal, on which NBDXE writes nb_value into DPLL_B and then the stage notifies run
@@ -279,6 +286,8 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     mu.mem_write(BS, b'BOOTSERV' + struct.pack('<II', 0x20000, bs_hdr))
     for off in range(0x18, bs_hdr, 4):
         mu.mem_write(BS + off, struct.pack('<I', BS_STUB + off))
+    mu.mem_write(BS + 0x10, struct.pack('<I', zlib.crc32(bytes(mu.mem_read(BS, bs_hdr)))))   # with its CRC field 0
+    bs_orig = bytes(mu.mem_read(BS, bs_hdr))
     mu.mem_write(RT, b'RUNTSERV' + struct.pack('<II', 0x20000, 0x58))
     for off in range(0x18, 0x58, 4):
         mu.mem_write(RT + off, struct.pack('<I', RT_STUB + off))
@@ -316,6 +325,9 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         if addr == STUBS + 0x10:                                   # MP->StartupAllAPs
             cpu['ap'] = (a[1], a[5])
             return ret(0)
+        if addr == SMMC_TRIG:                                      # SmmControl->Trigger, the real one
+            tm_var.setdefault('trig_calls', []).append(tuple(a[:5]))
+            return ret(0x5a5a0000 + len(tm_var['trig_calls']))
         if BS_STUB <= addr < BS_STUB + 0x100:
             off = addr - BS_STUB
             if off == 0x38 and profile:                            # SetTimer(ev, type, lo, hi)
@@ -366,6 +378,8 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                     return ret(0x80000002)
                 uc.mem_write(a[2], struct.pack('<I', zlib.crc32(bytes(uc.mem_read(a[0], a[1])))))
                 return ret(0)
+            if off == 0xac and usbtrace and bytes(uc.mem_read(a[0], 16)) == SMMC_GUID:
+                return ret(0x8000000E)                             # not installed yet
             if off == 0xac:                                        # LocateProtocol(guid, reg, &if)
                 ok = bytes(uc.mem_read(a[0], 16)) == MP_GUID
                 if ok:
@@ -384,7 +398,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 return ret(0)
             if off == 0x60:                                        # RegisterProtocolNotify(guid, ev, &reg)
                 g = bytes(uc.mem_read(a[0], 16))
-                ok = (BLOCKIO, NB_STAGE, LOADED_IMAGE) + (tuple(TM_GUIDS) if timing else ())
+                ok = (BLOCKIO, NB_STAGE, LOADED_IMAGE) + (tuple(TM_GUIDS) if timing else ()) + ((SMMC_GUID,) if usbtrace else ())
                 if g not in ok or a[1] not in evs or 'guid' in evs[a[1]]:
                     errors.append('RegisterProtocolNotify for something else')
                     return ret(0x80000002)
@@ -434,6 +448,9 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 if g == BLOCKIO and 0 <= a[0] - 0xB10000 < len(bios):
                     uc.mem_write(a[2], struct.pack('<I', bios[a[0] - 0xB10000][0]))
                     return ret(0)
+                if g == SMMC_GUID and usbtrace and a[0] == 0xB30000:
+                    uc.mem_write(a[2], struct.pack('<I', SMMC_INST))
+                    return ret(0)
                 if g == LOADED_IMAGE and 0 <= a[0] - 0xB20000 < len(images):
                     uc.mem_write(a[2], struct.pack('<I', images[a[0] - 0xB20000]))
                     return ret(0)
@@ -451,7 +468,8 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             if off == 0x38 and timing:                             # SetVariable(name, guid, attr, size, data)
                 name, g = wstring(a[0]), bytes(uc.mem_read(a[1], 16))
                 import re as _re
-                ok_name = name == 'BlwBootTimes' or (profile and (name == 'BlwProfImg' or _re.fullmatch(r'BlwProf[0-9A-F]{2}', name)))
+                ok_name = name == 'BlwBootTimes' or (profile and (name == 'BlwProfImg' or _re.fullmatch(r'BlwProf[0-9A-F]{2}', name))) \
+                    or (usbtrace and _re.fullmatch(r'BlwUsbTr[0-9A-F]{2}', name))
                 if not ok_name or g != BLW or a[2] & 1 or a[2] != 6:
                     errors.append('SetVariable(%s, attr %#x) in the timing build' % (name, a[2]))
                     return ret(0x80000002)
@@ -613,6 +631,57 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     if timing:                                                    # the watched protocols appear
         for g in TM_GUIDS:
             notify(g, 'timing notify')
+    if usbtrace:                                                  # UHCD, two USBRT copies, SmmControl
+        mu.mem_map(USB_AREA, 0x40000)
+        uh = bytearray(0x68e0)
+        uh[0x4fcd] = 0xa1 if uhcd_variant == 'stock' else 0x8b      # another UHCD: requests not decoded
+        uh[0x4fce:0x4fd2] = struct.pack('<I', USB_AREA + 0x62b8)
+        uh[0x62bc:0x62c0] = struct.pack('<I', USB_AREA + 0x7000)          # gUsbData
+        mu.mem_write(USB_AREA, bytes(uh))
+        mu.mem_write(USB_AREA + 0x7000 + 0xdd9, struct.pack('<I', USB_AREA + 0x6700))   # the request
+        rt = bytearray(0x9f80)
+        rt[0x1381:0x1386] = bytes.fromhex('53566a61e8')
+        rt[0x530e:0x5313] = bytes.fromhex('686a040100')
+        mu.mem_write(USB_AREA + 0x10000, bytes(rt))
+        mu.mem_write(USB_AREA + 0x20000, b'\xff' * 0x9f80)
+        for guid, base, size in ((UHCD_FILE, USB_AREA, 0x68e0), (USBRT_FILE, USB_AREA + 0x10000, 0x9f80),
+                                 (USBRT_FILE, USB_AREA + 0x20000, 0x9f80)):
+            make_image(len(images), guid, base, size, nopath=False)
+            for e in evs.values():
+                if e.get('guid') == LOADED_IMAGE:
+                    li_queues[e['key']].append(0xB20000 + len(images) - 1)
+            notify(LOADED_IMAGE, 'LoadedImage notify')
+        mu.mem_write(SMMC_INST, struct.pack('<I', SMMC_TRIG))
+        for e in evs.values():
+            if e.get('guid') == SMMC_GUID:
+                li_queues[e['key']].append(0xB30000)
+        notify(SMMC_GUID, 'SmmControl notify')
+        code = USB_AREA + 0x38000
+        def trig(smi, fn, sub):
+            mu.mem_write(USB_AREA + 0x6700, bytes([fn, sub]))
+            mu.mem_write(USB_AREA + 0x6600, bytes([smi]) + b'\0\0\0' + struct.pack('<I', 1))
+            st = (b'\x68' + struct.pack('<I', USB_AREA + 0x435) + b'\x55\x89\xe5\x6a\x00\x6a\x00' +
+                  b'\x68' + struct.pack('<I', USB_AREA + 0x6604) + b'\x68' + struct.pack('<I', USB_AREA + 0x6600) +
+                  b'\x68' + struct.pack('<I', SMMC_INST) + b'\xff\x15' + struct.pack('<I', SMMC_INST) +
+                  b'\x83\xc4\x14\x5d\x83\xc4\x04\xc3')
+            mu.mem_write(code, st)
+            return call(code, [], 'UHCD SMI')
+        def stall(us):                                            # one stub per value (no code rewritten)
+            at = code + 0x100 + (0x40 if us != 1000 else 0)
+            st = b'\x68' + struct.pack('<I', us) + b'\xff\x15' + struct.pack('<I', BS + 0x88) + b'\x83\xc4\x04\xc3'
+            mu.mem_write(at, st)
+            call(at, [], 'Stall')
+            return at + 11
+        ut_expect = []
+        for smi, fn, sub in ((0x31, 0x27, 0x05), (0x31, 0x2e, 0x00), (0x32, 0x99, 0x99)):
+            r_ = trig(smi, fn, sub)
+            ut_expect.append(('T', USB_AREA + 0x435, 0x54000000 | smi | ((fn | sub << 8) << 8 if smi == 0x31 and uhcd_variant == 'stock' else 0), r_))
+        for k in range(5):
+            sret = stall(1000)
+        sret2 = stall(50000)
+        tm_var['ut_stall_ret2'] = sret2
+        tm_var['ut_expect'] = ut_expect
+        tm_var['ut_stall_ret'] = sret
     if profile:                                                   # timer ticks with fake interrupt frames
         tev = [e for e in evs.values() if e.get('type') == 0x80000200]
         img = bytes(mu.mem_read(LOAD, 0x3000))
@@ -704,6 +773,12 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     final = struct.unpack('<I', mu.mem_read(GMA_MMIO + 0x6018, 4))[0] if gma else None
     nb_now = bytes(mu.mem_read(NB_IMG, 0x3000))
     nb_changed = [i for i in range(0x3000) if nb_now[i] != nb_orig[i]]
+    if usbtrace:
+        tm_var['bs_stall'] = rd(BS + 0x88)
+        hs = rd(BS + 0x0c); crc = rd(BS + 0x10)
+        hdr = bytearray(mu.mem_read(BS, hs)); hdr[0x10:0x14] = b'\0' * 4
+        tm_var['bs_crc_ok'] = zlib.crc32(bytes(hdr)) == crc and bytes(mu.mem_read(BS, hs)) == bs_orig
+        tm_var['trig_now'] = rd(SMMC_INST)
     mmc_now = bytes(mu.mem_read(MMC_IMG, 0x34c0))
     cea_changed = [(i, mmc_now[i]) for i in range(0x34c0) if mmc_now[i] != mmc_orig[i]]
     return dict(cea_changed=cea_changed, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
@@ -718,7 +793,8 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
 
 
 def main():
-    profile = '--profile' in sys.argv                             # ... with -DPROFILE as well
+    usbtrace = '--usbtrace' in sys.argv                           # ... and -DUSBTRACE
+    profile = '--profile' in sys.argv or usbtrace                 # ... with -DPROFILE as well
     timing = '--timing' in sys.argv or profile                    # the -DTIMING development build
     dxe, app = (open(p, 'rb').read() for p in [x for x in sys.argv[1:] if not x.startswith('--')][:2])
     Z = bytes(6)
@@ -817,6 +893,7 @@ def main():
         ('MmcMediaDevice check already skipped: left as it is', dxe, dict(store=lm(CARD), mmc_variant='done'), 0, True, MAC, True),
         ('MmcMediaDevice before the driver, NBDXE changed: MMC patched, NBDXE left alone', dxe, dict(store=lm(CARD), mmc_img='before', nb_variant='code', want_nbp='unpatched', want_pclk='notify'), 0, True, MAC, True),
         ('LoadedImage notify not registered: MmcMediaDevice loading later is left alone', dxe, dict(nb_img='none', store=lm(CARD), register_fails=True, want_mmc_ev='closed', want_pclk='rtb'), 0, True, MAC, True),
+        ('USB trace build: another UHCD layout, requests not decoded', dxe, dict(store=lm(CARD), uhcd_variant='other'), 0, True, MAC, True),
         ('app build: MmcMediaDevice left alone', app, dict(store=lm(CARD), cpu_rev=0x217, enumerated_at_entry=True, mmc_img='before'), 0x80000014, False, MAC, True),
     ]
     bad = 0
@@ -840,7 +917,7 @@ def main():
         # NBDXE (with the 'value' variant) writes its own value; the notify must leave that alone
         if kw.get('nb_variant') == 'value':
             want_pclk = 'value'
-        r = run(img, timing=timing, profile=profile and img is dxe, **kw)
+        r = run(img, timing=timing, profile=profile and img is dxe, usbtrace=usbtrace and img is dxe, **kw)
         p = list(r['errors'])
         tv = r['tm_var']
         if timing and img is dxe and want_ev:                      # ReadyToBoot ran: the records published
@@ -871,6 +948,28 @@ def main():
                         p.append('NBDXE\'s load not recorded: %s' % tags)
         elif tv.get('data') or tv.get('prof'):
             p.append('BlwBootTimes written without ReadyToBoot')
+        if usbtrace and img is dxe and want_ev and not (kw.get('register_fails') or kw.get('create_event_fails')):
+            if tv.get('bs_stall') != BS_STUB + 0x88 or not tv.get('bs_crc_ok'):
+                p.append('BS->Stall %#x, CRC ok %s at the end' % (tv.get('bs_stall') or 0, tv.get('bs_crc_ok')))
+            if tv.get('trig_now') != SMMC_TRIG:
+                p.append('SmmControl->Trigger %#x at the end' % (tv.get('trig_now') or 0))
+            tc = tv.get('trig_calls', [])
+            if [c[0] for c in tc] != [SMMC_INST] * 3 or [c[1] for c in tc] != [USB_AREA + 0x6600] * 3:
+                p.append('real Trigger called with %s' % tc)
+            raw = b''.join(tv.get('prof', {}).get('BlwUsbTr%02X' % i, b'') for i in range(32))
+            recs = [struct.unpack_from('<IIIII', raw, i) for i in range(0, len(raw), 20)]
+            T = [('T', c, inf, ex) for st_, en, c, inf, ex in recs if inf >> 24 == 0x54]
+            if T != tv.get('ut_expect'):
+                p.append('T records %s, expected %s' % ([(a, hex(b), hex(c_), hex(d)) for a, b, c_, d in T], tv.get('ut_expect')))
+            S = [(c, inf & 0xffffff, ex) for st_, en, c, inf, ex in recs if inf >> 24 == 0x53 and c in (tv.get('ut_stall_ret'), tv.get('ut_stall_ret2'))]
+            if S != [(tv.get('ut_stall_ret'), 1000, 5), (tv.get('ut_stall_ret2'), 50000, 1)]:
+                p.append('S records %s' % S)
+            C = [(en, inf & 0xff) for st_, en, c, inf, ex in recs if inf >> 24 == 0x43]
+            if C[:4] != [(USB_AREA + 0x10000, 3), (USB_AREA + 0x20000, 0), (USB_AREA + 0x10000, 0x83), (USB_AREA + 0x20000, 0x80)] or \
+                    C[4:] != [(USB_AREA + 0x10000, 0x83), (USB_AREA + 0x20000, 0x80)] * ((len(C) - 4) // 2) or len(C) % 2:
+                p.append('C records %s' % [(hex(a), hex(b)) for a, b in C])
+            if any(en < st_ for st_, en, c, inf, ex in recs if inf >> 24 in (0x53, 0x54)):
+                p.append('a record ends before it starts')
         if profile and img is dxe and want_ev and not (kw.get('register_fails') or kw.get('create_event_fails')):
             tev = tv.get('tev') or []
             if len(tev) != 1 or tev[0]['tpl'] != 16:
@@ -894,7 +993,7 @@ def main():
                 want = [(e, 0, 0) for e, _, _ in want]
             if [g[1:] for g in got] != want:
                 p.append('samples %s, expected %s' % ([g[1:] for g in got][:3], want[:3]))
-            if any(set(pr) - {'BlwProfImg'} - {'BlwProf%02X' % i for i in range((len(want) + 63) // 64)}):
+            if any(set(k for k in pr if not k.startswith('BlwUsbTr')) - {'BlwProfImg'} - {'BlwProf%02X' % i for i in range((len(want) + 63) // 64)}):
                 p.append('sample variables %s' % sorted(pr))
             if [g[0] for g in got] != sorted(g[0] for g in got):
                 p.append('sample timestamps not in order')

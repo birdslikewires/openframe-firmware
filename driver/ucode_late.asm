@@ -194,6 +194,9 @@ entry:
 %ifdef PROFILE
         call    tm_prof_start
 %endif
+%ifdef USBTRACE
+        call    ut_start
+%endif
         mov     eax, 'ENTE'
         call    tm_rec
 %endif
@@ -523,6 +526,10 @@ rtb_notify:
 %ifdef TIMING
         push    dword [esp + 4]                 ; development build: hand the records over
         call    tm_publish
+%ifdef USBTRACE
+        call    ut_stop
+        call    ut_publish
+%endif
 %ifdef PROFILE
         call    tp_publish
 %endif
