@@ -34,7 +34,11 @@ boot block are the stock ones.
     doesn't twitch;
   - from 26.11.25, boots 2.8 s faster: the stock MMC/SD driver asked the internal memory whether
     it was a CE-ATA disk on every boot and waited for an answer no MMC gives; it is changed in
-    memory to skip that question (`driver/ceata.inc`).
+    memory to skip that question (`driver/ceata.inc`);
+  - from 26.11.26, boots up to 1 s faster with a USB drive attached: the firmware's USB code (run
+    in SMM) waited 500 ms before a drive's first command, twice per drive, and 1 s between "not
+    ready yet" retries; it is changed in memory as it loads to 10 ms, and to 200 ms with five
+    times the tries, so a drive spinning up gets the same patience (`driver/usbrt.inc`).
 - **BlwMac.efi** (`driver/blwmac.asm`) runs from `boot.nsh` and keeps that MAC in NVRAM, writing
   only when it changes. openframe-linux ships it and feeds it the right MAC.
 - **BlwMmcFix.efi** (`driver/blwmmcfix.asm`) is the same MMC workaround as a shell app, for
@@ -49,7 +53,7 @@ AMI's NVRAM code corrupts the store when that happens ([docs/nvram.md](docs/nvra
 ## Using a release
 
 Each version's image is a download on this repository's
-[Releases](https://github.com/birdslikewires/openframe-firmware/releases) page (26.11.25 is the
+[Releases](https://github.com/birdslikewires/openframe-firmware/releases) page (26.11.26 is the
 latest); `releases/MD5SUMS` lists their md5s. The images are not kept in git. Releases from
 26.11.16 on differ from the previous one in block 9 only, and the scripts in
 `tools/flash/` write just that block, after checking the chip holds the previous release. Flashing
