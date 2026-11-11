@@ -156,7 +156,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         bio=(), bio_late=(), create_event_fails=False, register_fails=False,
         gma=True, gma_decode=True, gma_bar=GMA_MMIO, fp=GOP_FP, nb_stage=True, nb_value=NB_DPLL, nb_signals=1,
         app_dpll=NB_DPLL, nb_img='before', nb_variant='stock', li_fails=False, timing=False,
-        mmc_img='after', mmc_variant='stock'):
+        mmc_img='after', mmc_variant='stock', profile=False, tm_ticks=70):
     """gma: the Poulsbo graphics device at 00:02.0 (8086:8108), its memory decode and BAR0.
     The GOP has set pipe B's PLL (fp, GOP_DPLL). nb_stage: after the entry, the boot manager's
     stage signal, on which NBDXE writes nb_value into DPLL_B and then the stage notifies run
@@ -318,6 +318,9 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             return ret(0)
         if BS_STUB <= addr < BS_STUB + 0x100:
             off = addr - BS_STUB
+            if off == 0x38 and profile:                            # SetTimer(ev, type, lo, hi)
+                tm_var.setdefault('timer', []).append((a[0], a[1], a[2], a[3]))
+                return ret(0)
             if off not in BS_OK:
                 errors.append('unexpected boot service call: BS+%#x' % off)
                 return ret(0x80000003)
@@ -447,9 +450,15 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             off = addr - RT_STUB
             if off == 0x38 and timing:                             # SetVariable(name, guid, attr, size, data)
                 name, g = wstring(a[0]), bytes(uc.mem_read(a[1], 16))
-                if name != 'BlwBootTimes' or g != BLW or a[2] & 1 or a[2] != 6:
+                import re as _re
+                ok_name = name == 'BlwBootTimes' or (profile and (name == 'BlwProfImg' or _re.fullmatch(r'BlwProf[0-9A-F]{2}', name)))
+                if not ok_name or g != BLW or a[2] & 1 or a[2] != 6:
                     errors.append('SetVariable(%s, attr %#x) in the timing build' % (name, a[2]))
                     return ret(0x80000002)
+                if name != 'BlwBootTimes':
+                    tm_var.setdefault('prof', {})[name] = bytes(uc.mem_read(a[4], a[3])) if a[3] else b''
+                    events.append('SetVariable(%s)' % name)
+                    return ret(0)
                 tm_var['data'] = bytes(uc.mem_read(a[4], a[3])) if a[3] else b''
                 tm_var['n'] = tm_var.get('n', 0) + 1
                 events.append('SetVariable(BlwBootTimes)')
@@ -604,6 +613,39 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     if timing:                                                    # the watched protocols appear
         for g in TM_GUIDS:
             notify(g, 'timing notify')
+    if profile:                                                   # timer ticks with fake interrupt frames
+        tev = [e for e in evs.values() if e.get('type') == 0x80000200]
+        img = bytes(mu.mem_read(LOAD, 0x3000))
+        callpos = next(i for i in range(0x100, 0x3000 - 8) if img[i] == 0xe8) + 5   # just after a call rel32
+        nocall = next(i for i in range(0x100, 0x3000) if img[i - 5] != 0xe8 and img[i - 6] != 0xff and img[i - 3] != 0xff and img[i - 2] != 0xff)
+        cs = mu.reg_read(UC_X86_REG_CS)
+        prof_expect = []
+        for k in range(tm_ticks if tev else 0):
+            sp = STACK + 0x4000
+            mu.mem_write(sp, b'\0' * 0x800)
+            eip = LOAD + 0x200 + k
+            frame = sp + 4 + 8 + 0x40
+            mu.mem_write(frame - 0x20, struct.pack('<III', LOAD + 0x999, cs, 0x7))   # a decoy: EFLAGS impossible
+            mu.mem_write(frame - 0x10, struct.pack('<III', 0x10, cs, 0x246))         # a decoy: EIP implausible
+            if k % 5 != 4:                                        # every fifth: no frame at all
+                mu.mem_write(frame, struct.pack('<III', eip, cs, 0x246))
+                mu.mem_write(frame + 12, struct.pack('<IIII', 0x12345678, LOAD + nocall, LOAD + callpos, 0xd0100000))
+                prof_expect.append((eip, LOAD + callpos, 0))
+            else:
+                prof_expect.append((0, 0, 0))
+            mu.mem_write(sp, struct.pack('<III', RET_MAGIC, tev[0]['handle'], 0))
+            mu.reg_write(UC_X86_REG_ESP, sp)
+            for r, v in SAVED:
+                mu.reg_write(r, v)
+            try:
+                mu.emu_start(tev[0]['fn'], RET_MAGIC, count=1_000_000)
+            except UcError as e:
+                errors.append('profile tick: %s at %#x' % (e, mu.reg_read(UC_X86_REG_EIP)))
+                break
+            if mu.reg_read(UC_X86_REG_ESP) != sp + 4 or not all(mu.reg_read(r) == v for r, v in SAVED):
+                errors.append('profile tick: stack or registers not kept')
+        tm_var['expect'] = prof_expect[:512]
+        tm_var['tev'] = tev
     cpu['phase'] = 'BDS'
     for k in bio_late:                                            # a driver installs BlockIo later
         install_bio(k)
@@ -676,7 +718,8 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
 
 
 def main():
-    timing = '--timing' in sys.argv                               # the -DTIMING development build
+    profile = '--profile' in sys.argv                             # ... with -DPROFILE as well
+    timing = '--timing' in sys.argv or profile                    # the -DTIMING development build
     dxe, app = (open(p, 'rb').read() for p in [x for x in sys.argv[1:] if not x.startswith('--')][:2])
     Z = bytes(6)
     lm = lambda d, attr=7: {('BlwMac', BLW): (attr, d)}
@@ -797,7 +840,7 @@ def main():
         # NBDXE (with the 'value' variant) writes its own value; the notify must leave that alone
         if kw.get('nb_variant') == 'value':
             want_pclk = 'value'
-        r = run(img, timing=timing, **kw)
+        r = run(img, timing=timing, profile=profile and img is dxe, **kw)
         p = list(r['errors'])
         tv = r['tm_var']
         if timing and img is dxe and want_ev:                      # ReadyToBoot ran: the records published
@@ -826,8 +869,35 @@ def main():
                         p.append('images before the entry %s, expected %s' % (pre, want_pre))
                     if kw.get('nb_img') == 'after' and NBDXE_FILE[:4] not in tags:
                         p.append('NBDXE\'s load not recorded: %s' % tags)
-        elif tv:
+        elif tv.get('data') or tv.get('prof'):
             p.append('BlwBootTimes written without ReadyToBoot')
+        if profile and img is dxe and want_ev and not (kw.get('register_fails') or kw.get('create_event_fails')):
+            tev = tv.get('tev') or []
+            if len(tev) != 1 or tev[0]['tpl'] != 16:
+                p.append('profile timer event %s' % tev)
+            tm = tv.get('timer', [])
+            if not tm or tm[0][1:] != (1, 100000, 0) or tm[-1][1:] != (0, 0, 0):
+                p.append('SetTimer calls %s' % tm)
+            pr = tv.get('prof', {})
+            imgs = pr.get('BlwProfImg', b'')
+            tab = [struct.unpack_from('<III', imgs, i) for i in range(0, len(imgs), 12)]
+            if not kw.get('li_fails') and (G('a5d5b0c1-7d2f-4c3e-9b1a-26b1e0f17217')[:4], LOAD, 0x3000) not in [(struct.pack('<I', t[0]), t[1], t[2]) for t in tab]:
+                p.append('this driver not in the image table %s' % tab[:3])
+            want_n = len(tab)
+            if kw.get('mmc_img', 'after') == 'after' and (struct.unpack('<I', MMC_FILE[:4])[0], MMC_IMG, 0x700 if kw.get('mmc_variant') == 'small' else 0x34c0) not in tab \
+                    and kw.get('mmc_variant', 'stock') not in ('nopath', 'guid'):
+                p.append('MmcMediaDevice (loaded later) not in the image table')
+            samples = b''.join(pr.get('BlwProf%02X' % i, b'') for i in range(16))
+            got = [struct.unpack_from('<IIII', samples, i) for i in range(0, len(samples), 16)]
+            want = tv.get('expect', [])
+            if kw.get('li_fails'):                                # images before the entry unknown: no return addresses
+                want = [(e, 0, 0) for e, _, _ in want]
+            if [g[1:] for g in got] != want:
+                p.append('samples %s, expected %s' % ([g[1:] for g in got][:3], want[:3]))
+            if any(set(pr) - {'BlwProfImg'} - {'BlwProf%02X' % i for i in range((len(want) + 63) // 64)}):
+                p.append('sample variables %s' % sorted(pr))
+            if [g[0] for g in got] != sorted(g[0] for g in got):
+                p.append('sample timestamps not in order')
         # NBDXE patch
         if want_nbp == 'patched':
             if r['nb_imm'] != GOP_DPLL or [i for i in r['nb_changed'] if not NB_IMM <= i < NB_IMM + 4]:

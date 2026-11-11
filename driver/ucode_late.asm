@@ -191,6 +191,9 @@ entry:
         TMW     pclk_nb_guid, 'STGN'
         TMW     tm_g_stg3, 'STG3'
         TMW     tm_g_stg4, 'STG4'
+%ifdef PROFILE
+        call    tm_prof_start
+%endif
         mov     eax, 'ENTE'
         call    tm_rec
 %endif
@@ -520,6 +523,9 @@ rtb_notify:
 %ifdef TIMING
         push    dword [esp + 4]                 ; development build: hand the records over
         call    tm_publish
+%ifdef PROFILE
+        call    tp_publish
+%endif
         add     esp, 4
 %endif
         add     esp, 8
