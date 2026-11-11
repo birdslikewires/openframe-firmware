@@ -44,7 +44,7 @@ def run_one(label, file, old, new, a, tmp_root):
             return label, 'BUILD FAILED', (b.stdout + b.stderr).strip().splitlines()[-1:]
         e = subprocess.run([sys.executable, '-I', os.path.join(tmp, 'tools', 'emu_platform.py'),
                             os.path.join(tmp, 'd.efi'), os.path.join(tmp, 'a.efi'), '--first-fail'] +
-                           (['--' + a.mode] if a.mode else []), capture_output=True, text=True)
+                           ['--' + m for m in a.mode.split(',') if m], capture_output=True, text=True)
         lines = [l for l in (e.stdout + e.stderr).splitlines() if l.startswith('FAIL') or l.startswith('Traceback')]
         return label, ('CAUGHT' if e.returncode else 'SURVIVED'), lines[:1]
     finally:
@@ -58,7 +58,7 @@ def main():
     ap.add_argument('--version', required=True)
     ap.add_argument('--date', default='11/11/2026')
     ap.add_argument('--define', action='append', default=[])
-    ap.add_argument('--mode', default='', help='emu_platform mode: timing, profile, usbtrace, screen')
+    ap.add_argument('--mode', default='', help='emu_platform modes, comma-separated: timing, profile, usbtrace, screen, startunit')
     ap.add_argument('-j', type=int, default=os.cpu_count())
     a = ap.parse_args()
     muts = runpy.run_path(a.mutations)['MUTATIONS']

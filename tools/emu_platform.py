@@ -197,7 +197,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         gma=True, gma_decode=True, gma_bar=GMA_MMIO, fp=GOP_FP, nb_stage=True, nb_value=NB_DPLL, nb_signals=1,
         app_dpll=NB_DPLL, nb_img='before', nb_variant='stock', li_fails=False, timing=False,
         mmc_img='after', mmc_variant='stock', profile=False, tm_ticks=70, usbtrace=False, uhcd_variant='stock', usbrt_variant='stock', usbrt_img='after', screen=False, screen_variant='stock',
-        fake_tsc_hi=0):
+        fake_tsc_hi=0, startunit=False):
     """gma: the Poulsbo graphics device at 00:02.0 (8086:8108), its memory decode and BAR0.
     The GOP has set pipe B's PLL (fp, GOP_DPLL). nb_stage: after the entry, the boot manager's
     stage signal, on which NBDXE writes nb_value into DPLL_B and then the stage notifies run
@@ -302,7 +302,19 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     rt[0x452d] = 0xc3
     rt[0x4c61:0x4c69] = bytes.fromhex('576a01e8a9ddffff')               # REQUEST SENSE: push edi; push 1; call +0x2a12
     rt[0x4c69:0x4c71] = bytes.fromhex('595f' 'b8020402' '00c3')        # ...pop ecx; pop edi; return sense 2/04/02
-    rt[0x2a12:0x2a18] = bytes.fromhex('b800100000c3')                 # (+0x2a12 returns a buffer)
+    rt[0x2a12:0x2a18] = b'\xb8' + struct.pack('<I', USB_AREA + 0x3a000) + b'\xc3'   # (+0x2a12 returns a buffer)
+    # StartUnit (+0x4e84), the real bytes, its relocated dwords at a fake gUsbData pointer; what it calls
+    su = bytearray.fromhex('578b7c2408f6474520740433c05fc3566a01e877dbffff8bf085f6597507b8ff000000eb48c6061bc6460401'
+                           'e8d7f2ffffa1f098001066c780e40d00001027a1f098001089b0e60d0000a1f098001057c680ea0d00000c'
+                           'e8cefaffff6a0156e805dcffff57e873fdffff83c4105e5fc3')
+    for off in (50, 64, 75):
+        su[off:off + 4] = struct.pack('<I', USB_AREA + 0x7200)
+    if usbrt_variant == 'start_changed':
+        su[0x2b] ^= 1                                             # (the 0x1b becomes 0x1a)
+    rt[0x4e84:0x4ef4] = su
+    for a_ in (0x418c, 0x49ae, 0x2aed):
+        rt[a_] = 0xc3
+    rt[0x56d0:0x56d5] = bytes.fromhex('595e5bc9c3')                 # identify's pop ecx; (then the test returns)
     if screen_variant == 'sense_changed':                         # another REQUEST SENSE: push 2, not push 1
         rt[0x4c63] = 2
     assert len(rt) == 0x9f80, 'fixture slices changed the image size'
@@ -311,6 +323,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         rt[0x52ad:0x52b1] = struct.pack('<I', 0x100098f0 if screen_variant == 'unrelocated' else base + 0x98f0)
         mu.mem_write(base, b'\xff' * 0x9f80 if (usbrt_variant == 'closed' and base == rt_copies[1]) else bytes(rt))
     rt_orig = [bytes(mu.mem_read(a, 0x9f80)) for a in rt_copies]
+    mu.mem_write(USB_AREA + 0x7200, struct.pack('<I', USB_AREA + 0x7000))  # the fake gUsbData pointer
     if screen:                                                    # the framebuffer and the GOP's Mode/Info
         mu.mem_map(FB, (FB_W * FB_H * 4 + 0xfff) & ~0xfff)
         mu.mem_write(GOP_INST + 0x0c, struct.pack('<I', GOP_INST + 0x100))
@@ -741,6 +754,20 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         load_usbrt()
         if screen:
             hook_stub_rdtsc()
+        ident = tm_var['ident'] = []
+        for k_, base in enumerate(rt_copies):
+            if (usbrt_variant == 'closed' and k_ == 1) or usbrt_variant == 'a_changed':
+                continue                                          # (a_changed breaks identify's own call)
+            dev = USB_AREA + 0x39000
+            mu.mem_write(dev, b'\0' * 0x100)
+            mu.mem_write(USB_AREA + 0x3a000, b'\0' * 0x20)
+            mu.mem_write(USB_AREA + 0x7000 + 0xde4, b'\0\0')
+            at = USB_AREA + 0x38000 + 0x600 + 0x20 * k_            # push ebp; mov ebp, esp; sub esp, 16; push ebx; push esi;
+            mu.mem_write(at, b'\x55\x89\xe5\x83\xec\x10\x53\x56\xbe' + struct.pack('<I', dev) +   # mov esi, dev; mov ebx, 0x103;
+                         b'\xbb\x03\x01\x00\x00\xb8' + struct.pack('<I', base + 0x56c3) + b'\xff\xe0')  # jmp +0x56c3
+            call(at, [], 'identify\'s first step (copy %d)' % k_)
+            cdb = bytes(mu.mem_read(USB_AREA + 0x3a000, 5))
+            ident.append((k_, cdb[0], cdb[4], struct.unpack('<H', mu.mem_read(USB_AREA + 0x7000 + 0xde4, 2))[0]))
     if usbtrace:                                                  # UHCD, SmmControl
         uh = bytearray(0x68e0)
         uh[0x4fcd] = 0xa1 if uhcd_variant == 'stock' else 0x8b      # another UHCD: requests not decoded
@@ -923,7 +950,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     mmc_now = bytes(mu.mem_read(MMC_IMG, 0x34c0))
     cea_changed = [(i, mmc_now[i]) for i in range(0x34c0) if mmc_now[i] != mmc_orig[i]]
     rt_now = [bytes(mu.mem_read(a, 0x9f80)) for a in rt_copies]
-    return dict(rt_orig=rt_orig, rt_now=rt_now, cea_changed=cea_changed, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
+    return dict(ident=tm_var.get('ident'), rt_orig=rt_orig, rt_now=rt_now, cea_changed=cea_changed, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
                 mmc_ev=mmc_ev, nb_ev=nb_ev, evs=evs, mmio_writes=mmio_writes, dpll=final,
                 pp_final=struct.unpack('<I', mu.mem_read(GMA_MMIO + 0x61204, 4))[0] if gma else None,
                 nb_after_notify=nb_bad.get('after_notify'), wrapped=wrapped, entry_bio=entry_bio, late_bio=late_bio, in_image=in_image,
@@ -938,6 +965,7 @@ def main():
     first_fail = '--first-fail' in sys.argv                       # stop at the first failing scenario (mutation runs)
     only = sys.argv[sys.argv.index('--only') + 1] if '--only' in sys.argv else None   # run just the matching scenarios
     screen = '--screen' in sys.argv                               # ... and -DSCREEN
+    startunit = '--startunit' in sys.argv                         # ... and -DSTARTUNIT (experiment)
     usbtrace = '--usbtrace' in sys.argv or screen                 # ... and -DUSBTRACE
     profile = '--profile' in sys.argv or usbtrace                 # ... with -DPROFILE as well
     timing = '--timing' in sys.argv or profile                    # the -DTIMING development build
@@ -1052,6 +1080,7 @@ def main():
         ('the same code under another file GUID: USBRT left alone', dxe, dict(store=lm(CARD), usbrt_variant='guid'), 0, True, MAC, True),
         ('USBRT image smaller than the sites: left alone', dxe, dict(store=lm(CARD), usbrt_variant='small'), 0, True, MAC, True),
         ('USBRT with no FilePath: left alone', dxe, dict(store=lm(CARD), usbrt_variant='nopath'), 0, True, MAC, True),
+        ('USBRT\'s StartUnit not stock: identify keeps its (10 ms) wait', dxe, dict(store=lm(CARD), usbrt_variant='start_changed'), 0, True, MAC, True),
         ('screen trace build: USBRT not relocated yet: no hooks, nothing drawn from SMM', dxe, dict(store=lm(CARD), screen_variant='unrelocated'), 0, True, MAC, True),
         ('screen trace build: TSC past 5 minutes: the SMM hooks draw nothing', dxe, dict(store=lm(CARD), fake_tsc_hi=0x5d), 0, True, MAC, True),
         ('screen trace build: no framebuffer yet when GOP appears, one by the first USB request: drawn', dxe, dict(store=lm(CARD), screen_variant='late_mode'), 0, True, MAC, True),
@@ -1083,7 +1112,8 @@ def main():
         # NBDXE (with the 'value' variant) writes its own value; the notify must leave that alone
         if kw.get('nb_variant') == 'value':
             want_pclk = 'value'
-        r = run(img, timing=timing, profile=profile and img is dxe, usbtrace=usbtrace and img is dxe, screen=screen and img is dxe, **kw)
+        r = run(img, timing=timing, profile=profile and img is dxe, usbtrace=usbtrace and img is dxe, screen=screen and img is dxe,
+                startunit=startunit, **kw)
         p = list(r['errors'])
         tv = r['tm_var']
         if timing and img is dxe and want_ev:                      # ReadyToBoot ran: the records published
@@ -1185,11 +1215,13 @@ def main():
                     render(exp, 280, 8, len(T_), 4)
                 smm = kw.get('fake_tsc_hi', 0) < 0x5d and drawable
                 fdh = [(b_, ret_, n_) for b_, ret_, n_ in sc.get('fd', []) if b_ in hooked]
-                if fdh and smm:
+                if fdh and smm:                                   # (identify's wait, where it still waits, counts too)
                     b_, ret_, n_ = fdh[-1]
+                    waited = sum(1 for k_, op, _, _ in (r.get('ident') or []) if op != 0x1b and
+                                 [USB_AREA + 0x10000, USB_AREA + 0x20000][k_] == b_)
                     render(exp, 8, 32, (ret_ - b_) & 0xfffff, 5)
                     render(exp, 88, 32, n_, 5)
-                    render(exp, 184, 32, sum(1 for x in fdh if x[0] == b_), 6)
+                    render(exp, 184, 32, sum(1 for x in fdh if x[0] == b_) + waited, 6)
                 cb = [(b_, op, ln) for b_, op, ln in sc.get('cbw', []) if b_ in hooked]
                 if cb and smm:
                     b_, op, ln = cb[-1]
@@ -1205,9 +1237,11 @@ def main():
                 sn = [(b_, v or 0) for b_, v in sc.get('sense', []) if b_ in hooked]
                 if sv != 'sense_changed' and any(v != 0x20402 for _, v in sc.get('sense', [])):
                     p.append('REQUEST SENSE returned %s' % [hex(v) if v is not None else None for _, v in sc.get('sense', [])])
-                if sn and smm:
+                woke_hooked = sum(1 for k_, op, _, _ in (r.get('ident') or []) if op == 0x1b and
+                                  [USB_AREA + 0x10000, USB_AREA + 0x20000][k_] == (sn[-1][0] if sn else None))
+                if sn and smm:                                    # (StartUnit's own REQUEST SENSE counts too)
                     render(exp, 8, 104, sn[-1][1], 6)
-                    render(exp, 120, 104, len(sn), 6)
+                    render(exp, 120, 104, len(sn) + woke_hooked, 6)
                 fbb = sc.get('fb_before_rtb', b'')
                 want_fb = bytearray(128 * FB_W * 4)
                 for (x, y), v in exp.items():
@@ -1265,11 +1299,16 @@ def main():
             wa = urt_ok and readable and uv != 'a_changed'
             wbc = urt_ok and readable and uv not in ('b_changed', 'c_changed')
             want = bytearray(o_)
-            if wa:
+            su_ok = startunit and uv != 'start_changed'
+            if wa and su_ok:                                     # identify calls StartUnit instead of waiting
+                want[0x56c3:0x56c8] = b'\x56\x90\x90\x90\x90'
+                want[0x56cc:0x56d0] = struct.pack('<i', 0x4e84 - 0x56d0)
+            elif wa:
                 want[0x56c4:0x56c8] = (0x29a).to_bytes(4, 'little')
             if wbc:
                 want[0x530f:0x5313] = (0x3415).to_bytes(4, 'little')
                 want[0x3fa4] = 50
+            n_ = bytes(n_[:0x1251]) + bytes([o_[0x1251]]) + bytes(n_[0x1252:])   # (the fake IoRead8's own toggle byte)
             if screen and img is dxe:
                 masked = set(range(0x1381, 0x138a)) | set(range(0x4812, 0x4816)) | set(range(0x4c61, 0x4c69)) | \
                     set(range(0x9920, 0x9920 + 0x64c))
@@ -1277,6 +1316,13 @@ def main():
             if n_ != bytes(want):
                 p.append('USBRT copy %d changed at %s, expected %s' % (k, [hex(i) for i in range(len(o_)) if o_[i] != n_[i]][:8],
                                                                      [hex(i) for i in range(len(o_)) if o_[i] != want[i]][:8]))
+        # identify's first step, run: START STOP UNIT (start, 10 s timeout) where StartUnit is called
+        for k_, op, start_bit, tmo in r.get('ident', []) or []:
+            woke = urt_ok and not (k_ == 1 and uv == 'closed') and uv != 'a_changed' and startunit and uv != 'start_changed'
+            if woke and (op, start_bit, tmo) != (0x1b, 1, 0x2710):
+                p.append('copy %d: identify sent %02x/%d, timeout %d, not START UNIT' % (k_, op, start_bit, tmo))
+            if not woke and (op, tmo) != (0, 0):
+                p.append('copy %d: identify sent a command (%02x) although StartUnit is not patched in' % (k_, op))
         # MmcMediaDevice's CE-ATA check (ceata.inc)
         if want_cea == 'patched':
             if r['cea_changed'] != [(CEA_FN, 0x32), (CEA_FN + 1, 0xc0), (CEA_FN + 2, 0xc3)]:

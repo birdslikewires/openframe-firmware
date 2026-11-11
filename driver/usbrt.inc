@@ -55,6 +55,29 @@ urt_patch_image:
         mov     edx, 18
         call    .cmp
         jne     .bc
+%ifdef STARTUNIT
+        ; EXPERIMENT: instead of waiting, wake the drive: identify's push 0x8235 / call FixedDelay
+        ; becomes push esi (the device) / call StartUnit (START STOP UNIT, start; 10 s timeout),
+        ; same length, same pop after it. Only if StartUnit is the stock function.
+        lea     eax, [edi + (urt_sig_start - .here)]
+        push    eax
+        lea     eax, [esi + URT_START_RVA]
+        push    eax
+        call    mmc_sig_match
+        add     esp, 8
+        test    eax, eax
+        jz      .wait
+        mov     dword [esi + 0x56c4], 0x90909090    ; nop x4 (the old push's imm32)
+        mov     byte [esi + 0x56c3], 0x56           ; push esi
+        mov     dword [esi + 0x56cc], URT_START_RVA - 0x56d0   ; call StartUnit
+        cmp     byte [esi + 0x56c3], 0x56
+        jne     .bc
+        cmp     dword [esi + 0x56cc], URT_START_RVA - 0x56d0
+        jne     .bc
+        or      ebx, 1
+        jmp     .bc
+.wait:
+%endif
         mov     dword [esi + 0x56c4], 0x29a
         cmp     dword [esi + 0x56c4], 0x29a
         jne     .bc
@@ -107,5 +130,8 @@ urt_sig_a:      db      0xbb, 0x03, 0x01, 0x00, 0x00, 0x68, 0x35, 0x82, 0x00, 0x
                 db      0xe8, 0xb1, 0xbc, 0xff, 0xff    ; mov ebx, 0x103; push 0x8235; mov [ebp+8], ebx; call FixedDelay
 urt_sig_b:      db      0x3d, 0x06, 0x29, 0x00, 0x00, 0x75, 0x2a, 0x68, 0x6a, 0x04, 0x01, 0x00
                 db      0xe8, 0x69, 0xc0, 0xff, 0xff    ; cmp eax, 0x2906; jne; push 0x1046a; call FixedDelay
+%ifdef STARTUNIT
+%include "usbrt_sig.inc"
+%endif
 urt_sig_c:      db      0x8a, 0x81, 0x43, 0x0e, 0x00, 0x00, 0xfe, 0xc0, 0xb2, 0x0a, 0xf6, 0xea
                 db      0x88, 0x81, 0xe3, 0x0d, 0x00, 0x00, 0xc3 ; mov al, [ecx+0xe43]; inc al; mov dl, 10; imul dl; mov [ecx+0xde3], al; ret
