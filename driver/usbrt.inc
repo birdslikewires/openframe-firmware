@@ -1,5 +1,6 @@
-; usbrt.inc: shortens two fixed waits in the firmware's USB code, which cost 1 s on every boot with
-; a USB drive attached (from 26.11.26).
+; usbrt.inc: changes to the firmware's USB code: two fixed waits shortened, which cost 1 s on every
+; boot with a USB drive attached (A-C, from 26.11.26); and a drive that is slow to answer while it
+; spins up no longer stops the boot (D, E).
 ;
 ; AMI's USB stack does its work in SMM (USBRT, file 04EAAAA1-29A1-11D7-8838-00500473D4EB): one copy
 ; is loaded as a normal driver, which loads a second into SMRAM; the SMM one runs everything.
@@ -16,6 +17,18 @@
 ;   C  ...and the number of tries goes from (setting + 1) x 10 to (setting + 1) x 50 (the setter
 ;      at RVA 0x3f95, run when USB starts, long after this patch), so a drive that's genuinely
 ;      not ready still gets the same 10 to 40 s. B and C are made together or not at all.
+;   D  When a transfer to a drive fails, USBRT sends what is meant to be a Bulk-Only Mass Storage
+;      Reset, but with the request in the wrong field: 21 00 FF 00 (bRequest 0, wValue 0xFF), not
+;      21 FF 00 00. An ASMedia ASM1053 caddy rejects it and then refuses every command until the
+;      host resets the port, which USBRT never does: the boot hangs. Now the real reset (the
+;      11 bytes at RVA 0x4388 that push its arguments, re-encoded; same length), after which the
+;      caddy answers again at once (replayed from Linux through usbfs, 2026-11-11).
+;   E  USBRT gives each phase of a transfer 5 s (the default at RVA 0x3382) and the data of READ,
+;      WRITE, READ CAPACITY and START STOP UNIT 10 s (RVAs 0x4a0e, 0x4eba, 0x57fa). That caddy
+;      holds a reply for up to 7 s while its drive spins up, and the first read for 12 s; Linux
+;      waits up to 30 s and sees nothing wrong. Now 20 s for all of them. The waits end as soon
+;      as the device answers; only a device that never answers at all costs more (20 s, not 5,
+;      per attempt: USBRT's transfers never give up on their own, error counter CErr = 0).
 ; Each is made only where the whole instruction sequence around it is the stock one (none has a
 ; relocated byte), and each value is read back. FixedDelay (RVA 0x1381) counts 15 us refresh
 ; ticks: 0x29a = 10 ms, 0x3415 = 200 ms.
@@ -23,7 +36,7 @@
 URT_GUID0       equ     0x04eaaaa1              ; USBRT's file GUID, first dword
 
 ; UINT32 urt_patch_image(EFI_LOADED_IMAGE_PROTOCOL *Li): 1 if this is a stock USBRT copy and now
-; has the shorter waits (A, or B and C, or all three), else 0. Keeps ebx, esi, edi.
+; has any of the changes (A; B and C; D; E), else 0. Keeps ebx, esi, edi.
 urt_patch_image:
         push    ebx
         push    esi
@@ -44,7 +57,7 @@ urt_patch_image:
         repe    cmpsb
         pop     edi
         jne     .no
-        cmp     dword [ebx + 0x28], 0x5800      ; ImageSize: past the last site
+        cmp     dword [ebx + 0x28], 0x5803      ; ImageSize: past the last site
         jb      .no
         mov     esi, [ebx + 0x20]               ; ImageBase
         test    esi, esi
@@ -99,7 +112,52 @@ urt_patch_image:
         cmp     dword [esi + 0x530f], 0x3415
         jne     .r
         or      ebx, 2
-.r:     xor     eax, eax
+.r:     lea     eax, [esi + 0x437e]             ; D: the reset's arguments
+        lea     ecx, [edi + (urt_sig_d - .here)]
+        mov     edx, 29
+        call    .cmp
+        jne     .e
+        push    esi
+        push    edi
+        lea     eax, [esi + 0x4388]
+        lea     esi, [edi + (urt_new_d - .here)]
+        mov     edi, eax
+        mov     ecx, 11
+        cld
+        rep     movsb
+        pop     edi
+        pop     esi
+        lea     eax, [esi + 0x4388]
+        lea     ecx, [edi + (urt_new_d - .here)]
+        mov     edx, 11
+        call    .cmp
+        jne     .e
+        or      ebx, 4
+.e:     xor     ecx, ecx                        ; E: all four stock, or none is changed
+.e_chk: mov     eax, [edi + (urt_e_rva - .here) + ecx * 4]
+        add     eax, esi
+        push    ecx
+        test    ecx, ecx                        ; the first is the default (e12), the rest overrides (de4)
+        lea     ecx, [edi + (urt_sig_e12 - .here)]
+        jz      .e_one
+        lea     ecx, [edi + (urt_sig_de4 - .here)]
+.e_one: mov     edx, 9
+        call    .cmp
+        pop     ecx
+        jne     .x
+        inc     ecx
+        cmp     ecx, 4
+        jb      .e_chk
+        xor     ecx, ecx
+.e_set: mov     eax, [edi + (urt_e_rva - .here) + ecx * 4]
+        mov     word [esi + eax + 7], URT_TIMEOUT_MS
+        cmp     word [esi + eax + 7], URT_TIMEOUT_MS
+        jne     .x
+        inc     ecx
+        cmp     ecx, 4
+        jb      .e_set
+        or      ebx, 8
+.x:     xor     eax, eax
         test    ebx, ebx
         setnz   al
         jmp     .out
@@ -120,6 +178,8 @@ urt_patch_image:
         pop     esi
         ret
 
+URT_TIMEOUT_MS  equ     20000                   ; E: every transfer phase may take this long
+
 urt_n:          db 0                            ; USBRT copies changed so far
         align   4, db 0
 urt_guid:                                       ; 04EAAAA1-29A1-11D7-8838-00500473D4EB USBRT
@@ -130,6 +190,14 @@ urt_sig_a:      db      0xbb, 0x03, 0x01, 0x00, 0x00, 0x68, 0x35, 0x82, 0x00, 0x
                 db      0xe8, 0xb1, 0xbc, 0xff, 0xff    ; mov ebx, 0x103; push 0x8235; mov [ebp+8], ebx; call FixedDelay
 urt_sig_b:      db      0x3d, 0x06, 0x29, 0x00, 0x00, 0x75, 0x2a, 0x68, 0x6a, 0x04, 0x01, 0x00
                 db      0xe8, 0x69, 0xc0, 0xff, 0xff    ; cmp eax, 0x2906; jne; push 0x1046a; call FixedDelay
+urt_sig_d:      db      0x6a, 0x00, 0x83, 0xea, 0x10, 0x6a, 0x00, 0xc1, 0xfa, 0x04 ; push 0; sub edx, 0x10; push 0; sar edx, 4
+                db      0x68, 0xff, 0x00, 0x00, 0x00, 0x6b, 0xd2, 0x41, 0x57, 0x6a, 0x21 ; push 0xff; imul edx, edx, 0x41; push edi; push 0x21
+                db      0x81, 0xc1, 0xf4, 0x01, 0x00, 0x00, 0x56, 0x51 ; add ecx, 0x1f4; push esi; push ecx
+urt_new_d:      db      0x6a, 0x00, 0x6b, 0xd2, 0x41, 0x57, 0x68, 0x21, 0xff, 0x00, 0x00 ; push 0 (wValue); imul; push edi (wIndex); push 0xff21 (21 FF)
+urt_sig_e12:    db      0x66, 0xc7, 0x80, 0x12, 0x0e, 0x00, 0x00, 0x88, 0x13 ; mov word [eax+0xe12], 5000
+urt_sig_de4:    db      0x66, 0xc7, 0x80, 0xe4, 0x0d, 0x00, 0x00, 0x10, 0x27 ; mov word [eax+0xde4], 10000
+        align   4, db 0
+urt_e_rva:      dd      0x3382, 0x4a0e, 0x4eba, 0x57fa ; the default, then the three overrides
 %ifdef STARTUNIT
 %include "usbrt_sig.inc"
 %endif

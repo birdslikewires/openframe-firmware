@@ -312,6 +312,15 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     if usbrt_variant == 'start_changed':
         su[0x2b] ^= 1                                             # (the 0x1b becomes 0x1a)
     rt[0x4e84:0x4ef4] = su
+    # D: the "BOT reset"'s argument pushes; E: the 5 s default and the 10 s overrides (+0x4eba is in StartUnit)
+    rt[0x437e:0x439b] = bytes.fromhex('6a0083ea106a00c1fa0468ff0000006bd241576a2181c1f40100005651')
+    rt[0x3382:0x338b] = bytes.fromhex('66c780120e00008813')
+    for a_ in (0x4a0e, 0x57fa):
+        rt[a_:a_ + 9] = bytes.fromhex('66c780e40d00001027')
+    if usbrt_variant == 'd_changed':
+        rt[0x437e + 28] ^= 1                                      # the reset's last push (push ecx -> push edx)
+    if usbrt_variant == 'e_changed':
+        rt[0x57fa + 8] ^= 1                                       # the last override's value
     for a_ in (0x418c, 0x49ae, 0x2aed):
         rt[a_] = 0xc3
     rt[0x56d0:0x56d5] = bytes.fromhex('595e5bc9c3')                 # identify's pop ecx; (then the test returns)
@@ -1081,6 +1090,8 @@ def main():
         ('USBRT image smaller than the sites: left alone', dxe, dict(store=lm(CARD), usbrt_variant='small'), 0, True, MAC, True),
         ('USBRT with no FilePath: left alone', dxe, dict(store=lm(CARD), usbrt_variant='nopath'), 0, True, MAC, True),
         ('USBRT\'s StartUnit not stock: identify keeps its (10 ms) wait', dxe, dict(store=lm(CARD), usbrt_variant='start_changed'), 0, True, MAC, True),
+        ('USBRT\'s reset arguments not stock: the reset left as it is, the rest changed', dxe, dict(store=lm(CARD), usbrt_variant='d_changed'), 0, True, MAC, True),
+        ('one of USBRT\'s four timeouts not stock: none of them changed', dxe, dict(store=lm(CARD), usbrt_variant='e_changed'), 0, True, MAC, True),
         ('screen trace build: USBRT not relocated yet: no hooks, nothing drawn from SMM', dxe, dict(store=lm(CARD), screen_variant='unrelocated'), 0, True, MAC, True),
         ('screen trace build: TSC past 5 minutes: the SMM hooks draw nothing', dxe, dict(store=lm(CARD), fake_tsc_hi=0x5d), 0, True, MAC, True),
         ('screen trace build: no framebuffer yet when GOP appears, one by the first USB request: drawn', dxe, dict(store=lm(CARD), screen_variant='late_mode'), 0, True, MAC, True),
@@ -1308,6 +1319,11 @@ def main():
             if wbc:
                 want[0x530f:0x5313] = (0x3415).to_bytes(4, 'little')
                 want[0x3fa4] = 50
+            if urt_ok and readable and uv != 'd_changed':        # D: push 0; imul; push edi; push 0xff21
+                want[0x4388:0x4393] = bytes.fromhex('6a006bd241576821ff0000')
+            if urt_ok and readable and uv != 'e_changed':        # E: 20 s everywhere
+                for a_ in (0x3382, 0x4a0e, 0x4eba, 0x57fa):
+                    want[a_ + 7:a_ + 9] = (20000).to_bytes(2, 'little')
             n_ = bytes(n_[:0x1251]) + bytes([o_[0x1251]]) + bytes(n_[0x1252:])   # (the fake IoRead8's own toggle byte)
             if screen and img is dxe:
                 masked = set(range(0x1381, 0x138a)) | set(range(0x4812, 0x4816)) | set(range(0x4c61, 0x4c69)) | \
@@ -1319,7 +1335,7 @@ def main():
         # identify's first step, run: START STOP UNIT (start, 10 s timeout) where StartUnit is called
         for k_, op, start_bit, tmo in r.get('ident', []) or []:
             woke = urt_ok and not (k_ == 1 and uv == 'closed') and uv != 'a_changed' and startunit and uv != 'start_changed'
-            if woke and (op, start_bit, tmo) != (0x1b, 1, 0x2710):
+            if woke and (op, start_bit, tmo) != (0x1b, 1, 0x2710 if uv == 'e_changed' else 20000):
                 p.append('copy %d: identify sent %02x/%d, timeout %d, not START UNIT' % (k_, op, start_bit, tmo))
             if not woke and (op, tmo) != (0, 0):
                 p.append('copy %d: identify sent a command (%02x) although StartUnit is not patched in' % (k_, op))
