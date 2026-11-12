@@ -1,5 +1,5 @@
 # Mutations for the on-screen USB trace (driver/screentrace.inc, timing.inc's SCREEN parts).
-# venv/bin/python -I tools/mutate.py tools/mutations/screen.py --base <26.11.9x base> --version 26.11.99 \
+# venv/bin/python -I tools/mutate.py tools/mutations/screen.py --base <base> --version 26.11.26-dev1 \
 #     --define TIMING --define PROFILE --define USBTRACE --define SCREEN --mode screen
 S = 'driver/screentrace.inc'
 T = 'driver/timing.inc'

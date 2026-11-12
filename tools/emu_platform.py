@@ -332,6 +332,10 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         rt[a_:a_ + 7] = bytes.fromhex(h_)
     if usbrt_variant == 'f_changed':
         rt[0x4a50 + 20] ^= 1
+    # H: the command-block builder's clear (two rep stos), which F needs gone
+    rt[0x47a6:0x47c4] = bytes.fromhex('84db8bb0e60d00007614' '8bcf8bfe8bf1c1e90233c0f3ab' '8bce83e103f3aa')
+    if usbrt_variant == 'h_changed':
+        rt[0x47a6 + 29] ^= 1
     if usbrt_variant == 'g_changed':
         rt[0x7003 + 6] ^= 1
     # D: the "BOT reset"'s argument pushes; E: the 5 s default and the 10 s overrides (+0x4eba is in StartUnit)
@@ -853,7 +857,13 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             r32 = lambda a: struct.unpack('<I', uc.mem_read(a, 4))[0]
             cmdp, dea, deb = r32(G_FAKE + 0xde6), uc.mem_read(G_FAKE + 0xdea, 1)[0], uc.mem_read(G_FAKE + 0xdeb, 1)[0]
             dec, df0 = r32(G_FAKE + 0xdec), r32(G_FAKE + 0xdf0)
-            cdb = bytes(uc.mem_read(cmdp, 16))
+            # the command as it goes out: USBRT's builder (+0x476d) moves it up 15 bytes, then (unless
+            # H took its rep stos out) clears as many bytes at the start as it is long
+            blk = bytearray(uc.mem_read(cmdp, 31))
+            blk[15:15 + dea] = blk[0:dea]
+            if bytes(uc.mem_read(addr - 0x49ae + 0x47bb, 2)) == b'\xf3\xab':
+                blk[0:dea] = bytes(dea)
+            cdb = bytes(blk[15:31])
             disp['log'].append((cdb[:dea], deb, dec, df0, cmdp, uc.reg_read(UC_X86_REG_ESP) & 3))
             uc.mem_write(cmdp, b'USBC' + bytes(range(0x41, 0x41 + 27)))   # (USBRT builds the command block in place)
             ret = 0
@@ -1223,6 +1233,7 @@ def main():
         ('one of USBRT\'s four timeouts not stock: none of them changed', dxe, dict(store=lm(CARD), usbrt_variant='e_changed'), 0, True, MAC, True),
         ('READ CAPACITY\'s dispatcher call not stock: no READ CAPACITY(16) stub', dxe, dict(store=lm(CARD), usbrt_variant='f_changed'), 0, True, MAC, True),
         ('one control-transfer token not stock: CErr left at 0 in all five', dxe, dict(store=lm(CARD), usbrt_variant='g_changed'), 0, True, MAC, True),
+        ('the command-block builder not stock: neither H nor F (F needs H)', dxe, dict(store=lm(CARD), usbrt_variant='h_changed'), 0, True, MAC, True),
         ('screen trace build: USBRT not relocated yet: no hooks, nothing drawn from SMM', dxe, dict(store=lm(CARD), screen_variant='unrelocated'), 0, True, MAC, True),
         ('screen trace build: TSC past 5 minutes: the SMM hooks draw nothing', dxe, dict(store=lm(CARD), fake_tsc_hi=0x5d), 0, True, MAC, True),
         ('screen trace build: no framebuffer yet when GOP appears, one by the first USB request: drawn', dxe, dict(store=lm(CARD), screen_variant='late_mode'), 0, True, MAC, True),
@@ -1512,7 +1523,10 @@ def main():
                 for a_ in (0x3382, 0x4a0e, 0x4eba, 0x57fa):
                     want[a_ + 7:a_ + 9] = (20000).to_bytes(2, 'little')
             base_ = [USB_AREA + 0x10000, USB_AREA + 0x20000][k]
-            if urt_ok and readable and uv != 'f_changed':        # F: the call to the stub; the stub (run below), its base
+            if urt_ok and readable and uv != 'h_changed':        # H: the builder's clear gone
+                want[0x47bb:0x47bd] = b'\x90\x90'
+                want[0x47c2:0x47c4] = b'\x90\x90'
+            if urt_ok and readable and uv not in ('f_changed', 'h_changed'):   # F: the call to the stub; the stub (run below), its base
                 want[0x4a5c:0x4a60] = struct.pack('<i', F_RVA + 8 - 0x4a60)
                 want[F_RVA:0x9f80] = n_[F_RVA:0x9f80]
                 if struct.unpack_from('<I', n_, F_RVA)[0] != base_:
@@ -1533,7 +1547,7 @@ def main():
         rc10 = (b'\x25' + b'\0' * 11, 0x80, USB_AREA + 0x3b100, 8, USB_AREA + 0x3b000, 0)
         rc16 = (RC16_CDB, 0x80, USB_AREA + 0x3b100, 32, USB_AREA + 0x3b000, 0)
         for k_, case, off, ret_, log, data8, params in r.get('rcap') or []:
-            hooked = urt_ok and not (k_ == 1 and uv == 'closed') and uv != 'f_changed'
+            hooked = urt_ok and not (k_ == 1 and uv == 'closed') and uv not in ('f_changed', 'h_changed')
             if off != (F_RVA + 8 if hooked else 0x49ae):
                 p.append('copy %d: READ CAPACITY calls +%#x' % (k_, off))
             want_log = [rc10] + ([rc16] if hooked and case == 'big' else [])

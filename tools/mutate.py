@@ -1,6 +1,6 @@
 """Mutation testing for BlwPlatformDxe: breaks one thing at a time and checks the emulator notices.
 
-    venv/bin/python -I tools/mutate.py MUTATIONS.py --base /tmp/base.bin --version 26.11.99 \\
+    venv/bin/python -I tools/mutate.py MUTATIONS.py --base /tmp/base.bin --version 26.11.26-dev1 \\
         [--define TIMING ...] [--mode screen] [-j 24]
 
 MUTATIONS.py (any path) defines MUTATIONS = [(label, file, old, new), ...]: in `file` (relative to

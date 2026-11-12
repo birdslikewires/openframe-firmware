@@ -36,6 +36,12 @@
 ;      So READ CAPACITY's call into the command dispatcher (RVA 0x4a5b) goes to a stub (f_blob,
 ;      put at the end of USBRT's relocation section) that, when the answer is FFFFFFFF, also sends
 ;      READ CAPACITY(16), then puts READ CAPACITY(10)'s answer back for USBRT to read as before.
+;   H  ...which needs USBRT's command-block builder (RVA 0x476d) fixed: it moves the command up 15
+;      bytes into the block, then clears as many bytes at the start as the command is long, which
+;      for a 16-byte command (READ CAPACITY(16)) wipes its opcode (seen on the screen trace: the
+;      caddy got 00 10 ..., a TEST UNIT READY). All 15 bytes of the block's header are written
+;      straight after, so the clear does nothing for USBRT's own 12-byte commands: its two rep stos
+;      (RVAs 0x47bb, 0x47c2) become nops. F is made only if H is.
 ;   G  The error counter (CErr) in the transfer descriptors of control transfers (setup requests)
 ;      is 0, so a device that answers with garbage is retried for the whole timeout (the Joggler's
 ;      internal Wi-Fi does that while a powered ASM1053 caddy is attached: 20 s on every boot).
@@ -48,7 +54,7 @@
 URT_GUID0       equ     0x04eaaaa1              ; USBRT's file GUID, first dword
 
 ; UINT32 urt_patch_image(EFI_LOADED_IMAGE_PROTOCOL *Li): 1 if this is a stock USBRT copy and now
-; has any of the changes (A; B and C; D; E), else 0. Keeps ebx, esi, edi.
+; has any of the changes (A 1; B and C 2; D 4; E 8; F 16; G 32; H 64), else 0. Keeps ebx, esi, edi.
 urt_patch_image:
         push    ebx
         push    esi
@@ -169,7 +175,19 @@ urt_patch_image:
         cmp     ecx, 4
         jb      .e_set
         or      ebx, 8
-.x:     lea     eax, [esi + 0x4a01]             ; F: READ CAPACITY(10), its call into the dispatcher
+.x:     lea     eax, [esi + 0x47a6]             ; H: the command-block builder's needless clear
+        lea     ecx, [edi + (urt_sig_h - .here)]
+        mov     edx, 30
+        call    .cmp
+        jne     .g                              ; (F needs H: without it, F's command loses its opcode)
+        mov     word [esi + 0x47bb], 0x9090     ; rep stosd -> nop nop
+        mov     word [esi + 0x47c2], 0x9090     ; rep stosb -> nop nop
+        cmp     word [esi + 0x47bb], 0x9090
+        jne     .g
+        cmp     word [esi + 0x47c2], 0x9090
+        jne     .g
+        or      ebx, 64
+        lea     eax, [esi + 0x4a01]             ; F: READ CAPACITY(10), its call into the dispatcher
         lea     ecx, [edi + (urt_sig_f1 - .here)]
         mov     edx, 8
         call    .cmp
@@ -340,6 +358,9 @@ urt_sig_e12:    db      0x66, 0xc7, 0x80, 0x12, 0x0e, 0x00, 0x00, 0x88, 0x13 ; m
 urt_sig_de4:    db      0x66, 0xc7, 0x80, 0xe4, 0x0d, 0x00, 0x00, 0x10, 0x27 ; mov word [eax+0xde4], 10000
         align   4, db 0
 urt_e_rva:      dd      0x3382, 0x4a0e, 0x4eba, 0x57fa ; the default, then the three overrides
+urt_sig_h:      db      0x84, 0xdb, 0x8b, 0xb0, 0xe6, 0x0d, 0x00, 0x00, 0x76, 0x14 ; test bl, bl; mov esi, [eax+0xde6]; jbe
+                db      0x8b, 0xcf, 0x8b, 0xfe, 0x8b, 0xf1, 0xc1, 0xe9, 0x02, 0x33, 0xc0, 0xf3, 0xab ; ... xor eax, eax; rep stosd
+                db      0x8b, 0xce, 0x83, 0xe1, 0x03, 0xf3, 0xaa ; mov ecx, esi; and ecx, 3; rep stosb
 urt_sig_f1:     db      0xc6, 0x06, 0x25, 0xe8, 0x83, 0xf7, 0xff, 0xff ; mov byte [esi], 0x25 (READ CAPACITY); call (+0x418c)
 urt_sig_f2:     db      0x57, 0xc7, 0x80, 0xf0, 0x0d, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00 ; push edi; mov dword [eax+0xdf0], 8
                 db      0xe8, 0x4e, 0xff, 0xff, 0xff, 0x3b, 0xc3, 0x59, 0x8b, 0x0d ; call (+0x49ae); cmp eax, ebx; pop ecx; mov ecx, ...

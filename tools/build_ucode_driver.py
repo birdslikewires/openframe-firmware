@@ -168,7 +168,7 @@ def main():
     ap.add_argument('--pe', help='also write the PE32 image here')
     ap.add_argument('--raw-sections', action='store_true', help='PE32 and UI uncompressed (v10/v11 packaging)')
     ap.add_argument('--check-with-core', metavar='CORE_DXE_PE', help='verify the compressed stream with the firmware decompressor')
-    ap.add_argument('--bios-version', required=True, help='SMBIOS BIOS version, e.g. 26.11.16')
+    ap.add_argument('--bios-version', required=True, help='SMBIOS BIOS version, e.g. 26.11.16; a development build 26.11.26-dev1')
     ap.add_argument('--bios-date', required=True, help='SMBIOS BIOS release date, MM/DD/YYYY')
     ap.add_argument('--smbios-out', help='also write the SMBIOS entry point + table here (address 0)')
     ap.add_argument('--app', help='also write an EFI application build (subsystem 10) here, for running from the shell')
@@ -184,9 +184,9 @@ def main():
     if any(g == DRIVER_GUID for _, g, _ in files):
         bp.fail('base already has the driver')
     entry, sig, pf, rev_old, rev_new = pick_ucode(img, a.microcode)
-    m = re.fullmatch(r'(\d+)\.(\d+)\.\d+', a.bios_version)
+    m = re.fullmatch(r'(\d+)\.(\d+)\.\d+(-dev\d+)?', a.bios_version)     # (-devN: a development build)
     if not m or not re.fullmatch(r'\d\d/\d\d/\d{4}', a.bios_date):
-        bp.fail('--bios-version must be YY.M.N and --bios-date MM/DD/YYYY')
+        bp.fail('--bios-version must be YY.M.N (or YY.M.N-devN) and --bios-date MM/DD/YYYY')
     release = (int(m.group(1)), int(m.group(2)))      # SMBIOS BIOS major/minor release
 
     with tempfile.TemporaryDirectory() as td:

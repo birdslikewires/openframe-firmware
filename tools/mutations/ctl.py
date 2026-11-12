@@ -1,5 +1,5 @@
 """Mutations for screentrace.inc's transfer / port-status hook (26.11.89; .88 without the error-log and port lines):
-    venv/bin/python -I tools/mutate.py tools/mutations/ctl.py --base BASE --version 26.11.89 \\
+    venv/bin/python -I tools/mutate.py tools/mutations/ctl.py --base BASE --version 26.11.26-dev1 \\
         --define TIMING --define PROFILE --define USBTRACE --define SCREEN --mode timing,profile,usbtrace,screen"""
 F = 'driver/screentrace.inc'
 MUTATIONS = [

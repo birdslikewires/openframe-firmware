@@ -1,5 +1,5 @@
 # Mutations for the StartUnit experiment (driver/usbrt.inc under STARTUNIT).
-# venv/bin/python -I tools/mutate.py tools/mutations/startunit.py --base <base> --version 26.11.91 \
+# venv/bin/python -I tools/mutate.py tools/mutations/startunit.py --base <base> --version 26.11.26-dev1 \
 #     --define TIMING --define PROFILE --define USBTRACE --define SCREEN --define STARTUNIT --mode screen,startunit
 U = 'driver/usbrt.inc'
 MUTATIONS = [

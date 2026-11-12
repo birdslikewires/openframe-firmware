@@ -1,5 +1,5 @@
 """Mutations for usbrt.inc's F (READ CAPACITY(16) after an FFFFFFFF answer) and G (CErr = 3):
-    venv/bin/python -I tools/mutate.py tools/mutations/usbrt_fg.py --base BASE --version 26.11.88"""
+    venv/bin/python -I tools/mutate.py tools/mutations/usbrt_fg.py --base BASE --version 26.11.26-dev1"""
 F = 'driver/usbrt.inc'
 MUTATIONS = [
     ('F: condition inverted', F, '        cmp     dword [edx], 0xffffffff         ; last block "FFFFFFFF": over 2 TiB\n        jne     .out',
@@ -24,4 +24,7 @@ MUTATIONS = [
     ('G: CErr 2, not 3', F, '        or      byte [esi + eax + 4], 0x0c      ; the token', '        or      byte [esi + eax + 4], 0x08      ; the token'),
     ('G: wrong site', F, 'urt_g_rva:      dd      0x6f95, 0x6fc4, 0x6fcd, 0x6ffa, 0x7003', 'urt_g_rva:      dd      0x6f95, 0x6fc4, 0x6fcd, 0x6ffa, 0x7004'),
     ('F: count not kept', F, '        inc     dword [ebp + (f_count - .h)]\n', '        nop\n'),
+    ('H: signature one byte short', F, '        lea     ecx, [edi + (urt_sig_h - .here)]\n        mov     edx, 30', '        lea     ecx, [edi + (urt_sig_h - .here)]\n        mov     edx, 29'),
+    ('H: rep stosd left in', F, '        mov     word [esi + 0x47bb], 0x9090     ; rep stosd -> nop nop\n', '        nop\n'),
+    ('H: made although not stock', F, '        jne     .g                              ; (F needs H: without it, F\'s command loses its opcode)', '        jne     .hx                             ; (F needs H: without it, F\'s command loses its opcode)\n.hx:'),
 ]

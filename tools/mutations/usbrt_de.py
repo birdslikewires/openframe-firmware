@@ -1,5 +1,5 @@
 """Mutations for usbrt.inc's D (the real Bulk-Only reset) and E (20 s transfer timeouts):
-    venv/bin/python -I tools/mutate.py tools/mutations/usbrt_de.py --base BASE --version 26.11.92"""
+    venv/bin/python -I tools/mutate.py tools/mutations/usbrt_de.py --base BASE --version 26.11.26-dev1"""
 F = 'driver/usbrt.inc'
 MUTATIONS = [
     ('D: shorter signature check', F, '        mov     edx, 29\n', '        mov     edx, 28\n'),

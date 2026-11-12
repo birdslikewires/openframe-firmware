@@ -134,16 +134,18 @@ Only then tell anyone it exists.
 timestamp counter) its own entry, the images already loaded by then (in order), each driver
 loaded after it, protocols appearing (graphics, BlockIo, file systems, USB, console, PCI), the
 boot manager's stage signals and ReadyToBoot, and leaves them in the volatile variable
-`BlwBootTimes` (BS+RT, no NV bit: nothing reaches the flash). Use a version in the 26.11.9x range
-so it is never mistaken for a release, and never publish it.
+`BlwBootTimes` (BS+RT, no NV bit: nothing reaches the flash). Give a development build the version
+of the release it is built on plus `-devN`, counting up (`26.11.26-dev1`, `-dev2`, ...), so it is
+never mistaken for a release, and never publish it. (Until 2026-11-12 development builds took
+26.11.90-99 and then counted down from .89; the dumps and scripts from then keep those names.)
 
 ```
-venv/bin/python -I tools/build_ucode_driver.py /tmp/base.bin /tmp/of1-blw-26.11.90-timing.bin \
-    --microcode third_party/intel-ucode/06-1c-02 --bios-version 26.11.90 --bios-date MM/DD/YYYY \
+venv/bin/python -I tools/build_ucode_driver.py /tmp/base.bin /tmp/of1-blw-26.11.26-dev1-timing.bin \
+    --microcode third_party/intel-ucode/06-1c-02 --bios-version 26.11.26-dev1 --bios-date MM/DD/YYYY \
     --check-with-core /tmp/core.pe --define TIMING --pe /tmp/tdxe.efi --app /tmp/tapp.efi
 venv/bin/python -I tools/emu_platform.py /tmp/tdxe.efi /tmp/tapp.efi --timing
 # on the unit, after a cold boot (efivarfs mounted):
 #   cp /sys/firmware/efi/efivars/BlwBootTimes-ec87d643-eba4-4bb5-a1e5-3f3e36b20da9 /tmp/bt
-venv/bin/python -I tools/boot_times.py /tmp/bt /tmp/of1-blw-26.11.90-timing.bin
+venv/bin/python -I tools/boot_times.py /tmp/bt /tmp/of1-blw-26.11.26-dev1-timing.bin
 ```
 A release build without `--define` is unchanged by any of this (byte for byte).
