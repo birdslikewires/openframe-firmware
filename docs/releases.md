@@ -287,3 +287,43 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
   host has sent READ CAPACITY(16), which AMI's code never does, and AMI's recovery from that then makes it worse (a
   malformed Bulk-Only reset, a retry that sends a corrupt command). Linux sends READ CAPACITY(16) first and is fine. Being
   fixed in development builds (26.11.26-dev5 onwards).
+- **26.11.27 (OF1)**, `of1-blw-26.11.27.bin` (md5 `1de33e3f…`), block 9 only vs 26.11.26. **A USB drive attached at power-on
+  no longer stops the boot.** With a 4 TB drive asleep in an ASMedia ASM1053 caddy (174c:55aa, self-powered), every
+  release so far sat on the boot logo for many minutes or for good. Traced with development builds 26.11.26-dev1 to -dev10
+  (the screen trace, `--define SCREEN`: USBRT's requests, delays, SCSI commands and USB transfers drawn live from SMM) and
+  by replaying USBRT's exact command sequence against the caddy from Linux through usbfs. Five changes to USBRT as it
+  loads (`driver/usbrt.inc`, each only where the code is stock, each read back; A-C are 26.11.26's):
+  **D** its "Bulk-Only Mass Storage Reset" put the request in the wrong field (21 00 FF 00 ..., bRequest 0); the caddy
+  rejects that and then refuses every command until a port reset, which USBRT never does. The 11 bytes that push its
+  arguments are re-encoded to send 21 FF 00 00 (after it the caddy answers again at once, even after a timed-out read).
+  **E** every transfer phase got 5 s, and the data of READ, WRITE, READ CAPACITY and START STOP UNIT 10 s; the caddy holds
+  a reply for up to 7 s, and the first read for 12 s, while its drive spins up (Linux waits 30 s): now 20 s for all.
+  **F** READ CAPACITY(10) of a drive over 2 TiB answers FFFFFFFF ("ask READ CAPACITY(16)"); USBRT never asks and goes
+  on to READ(10), and the caddy hangs on READ(10) (no data, then no answer to anything) until the host has sent READ
+  CAPACITY(16). READ CAPACITY's call into USBRT's dispatcher now goes to a stub at the end of USBRT's relocation section
+  that, after an FFFFFFFF answer, also sends READ CAPACITY(16), then puts the first answer back for USBRT. **H** that
+  needs USBRT's command-block builder fixed: it cleared as many bytes at the start of the block as the command is long,
+  which for a 16-byte command wipes its opcode (the caddy got 00 10 ...); the header is written straight after anyway, so
+  its two `rep stos` become nops (no change for USBRT's own 12-byte commands); F is made only if H is. **G** the error
+  counter (CErr) in control transfers' descriptors was 0, so a device answering with garbage was retried for the whole
+  timeout: now 3, as Linux has it. The Joggler's internal Wi-Fi (RT2770, port 5) can't work at high speed while a powered
+  ASM1053 is attached (electrical: fine with the caddy unpowered, in any power-on order; Linux falls back to full speed):
+  that cost 5 s on every boot, 20 s with E; now under a second.
+  `tools/emu_platform.py`: F run against a stand-in dispatcher that applies the builder's move and clear as the real
+  (patched or not) bytes say, so the version without H fails as the hardware did; 108 scenarios (D-H: each site not
+  stock, F without H), all builds 108/108; mutations: usbrt_de 12/12, usbrt_fg 23/23. Flash script
+  `tools/flash/flash-block9-26.11.27.sh` (pre-check: blocks 1-15 = 26.11.26 `654dfeef…`; after: `6e687d87…`; block 9
+  `acafc0c5…`). **Flashed 2026-11-12** on the test unit (from 26.11.26-dev10 back to 26.11.26 with that build's script,
+  then with the release script itself; lock registers 01): fh programmed + verified 0x90000, read-backs `e89b3dfb…`,
+  block 0 unchanged; dump `firmware/efi-dumps/of1-testunit-20261112-26.11.27-postflash.bin`. Cold boots by the plug from
+  the USB stick: **shell 4.72/4.72/4.72 s from reset** (26.11.26: 4.66 s), kernel 6.36 s, plug-on to SSH 22.2/22.2/22.3
+  s; DMI 26.11.27, vendor line, slots 1/1, serial/UUID, BootCount, 0x217 (both threads), lock registers 01, NVRAM diff =
+  three MonotonicCounter records (one per boot), fsck clean, no failed units. With the 4 TB asleep in the caddy and no
+  stick (the internal MMC's system): the drive spins up as the firmware sets it up, the kernel starts at 17.7-20.8 s
+  (an empty port: 5.3 s; most of the difference is the drive's 12.5 s spin-up, which Linux would wait for too), plug-on
+  to SSH 34-44 s; Linux finds the drive spinning and readable. **Known behaviour:** with such a drive attached, the
+  shell's direct start of the kernel (the EFI stub line in `boot.nsh`) sometimes fails (one boot of two) and the
+  `grub` line after it starts the kernel instead (about 3 s later); the unit boots either way. Not yet traced (perhaps
+  the kernel's ExitBootServices racing the firmware's USB driver); the shell's direct start works with the caddy
+  unpowered. **Still not fixed:** a drive that can't be read over USB 2 at all (the 12 TB above) still keeps the unit
+  waiting a long time at the boot logo.
