@@ -217,7 +217,7 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
   **Andy: "Absolutely stable, no twitching!"** Normal cold boot: 25.3 s plug-on to SSH, gma500 found the 60 Hz clock and
   kept it, BlwMac ok (no write), no failed units.
 - **26.11.25 (OF1)**, `of1-blw-26.11.25.bin` (md5 `7ad10462…`), block 9 only vs 26.11.24. **2.8 s off every boot.**
-  Found with a timing build (26.11.90, `--define TIMING`, test unit only: TSC-stamped protocol installs, image loads and
+  Found with a timing build (26.11.24-dev1, then numbered 26.11.90; `--define TIMING`, test unit only: TSC-stamped protocol installs, image loads and
   boot-manager stages in a volatile variable): from reset, BlwPlatformDxe's entry 1.06 s, every driver loaded by 1.13 s,
   GOP 1.34 s, console 1.96 s, first USB device 3.49 s, the USB stick's BlockIo 4.66 s, then **the internal MMC's BlockIo
   only at 8.09 s**, ReadyToBoot 8.17 s, shell ~8.5 s (which disk was which: the shell's handle numbers). The new shell
@@ -238,7 +238,7 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
   byte different, another GUID, too small, no path, already patched, NBDXE changed, notify failing, app build), 10
   mutations caught; the timing build with it passes `--timing`. Flash script `tools/flash/flash-block9-26.11.25.sh`
   (pre-check: blocks 1-15 = 26.11.24 `70555f26…`; after: `ce47813a…`; block 9 `ca2fe519…`; the kernel check as before).
-  **Flashed 2026-11-11 ~08:05** on the test unit, from 26.11.90-timing with a one-off copy of that script (lock
+  **Flashed 2026-11-11 ~08:05** on the test unit, from 26.11.24-dev1 with a one-off copy of that script (lock
   registers 01): fh programmed + verified 0x90000, read-backs `db5feef0…`, block 0 unchanged; dump
   `firmware/efi-dumps/of1-testunit-20261111-26.11.25-postflash.bin`. Cold boots by the plug: **shell 5.63/5.62/5.62 s
   from reset** (26.11.24: 8.46-9.22 s), kernel 7.24-7.25 s, **plug-on to SSH 23.1/23.4/23.1 s** (26.11.24: 25.3-26.8 s);
@@ -250,12 +250,12 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
   USB drive attached.** After 26.11.25 the firmware's USB start-up was the biggest cost: about 2.7 s, from the console
   (1.96 s from reset) to the USB stick's BlockIo (4.64 s). AMI's USB stack runs in SMM (USBRT), where nothing in DXE can
   sample it, so three development builds measured it from outside (none released):
-  26.11.93 (`--define TIMING --define PROFILE`, a 10 ms timer event sampling the interrupted code and return addresses;
+  26.11.25-dev1 (then 26.11.93; `--define TIMING --define PROFILE`, a 10 ms timer event sampling the interrupted code and return addresses;
   the firmware's timer actually ticks every 55 ms) showed the USB start-up as one 2.7 s stretch with no samples at all;
-  26.11.94 (`--define USBTRACE`: SmmControl->Trigger and BS->Stall wrapped, put back at ReadyToBoot with the BS CRC
+  26.11.25-dev2 (then 26.11.94; `--define USBTRACE`: SmmControl->Trigger and BS->Stall wrapped, put back at ReadyToBoot with the BS CRC
   restored) split it into three SMIs of UHCD's USB requests (SW SMI 0x31, request block at gUsbData+0xdd9): 0x20/00
   1528 ms (USB start: controllers, ports, class drivers), 0x2e/01 635 ms, 0x27/0b 506 ms (mass storage), and showed
-  USBRT's SMM copy (0x1fb24000) readable as stock code as it loads, not at ReadyToBoot; 26.11.95 (an in-memory change of
+  USBRT's SMM copy (0x1fb24000) readable as stock code as it loads, not at ReadyToBoot; 26.11.25-dev3 (then 26.11.95; an in-memory change of
   two USBRT delays as it loads) showed the SMM copy writable then too, and that USBRT's 500 ms wait before a
   mass-storage device's first command (FixedDelay at RVA 0x56cb, in the identify step 0x567f; FixedDelay counts 15 us
   port-0x61 refresh ticks) ran **twice per drive**: 0x2e/01 went to 128 ms, 0x27/0b to 13 ms, the stick ready at 3.64 s
@@ -270,7 +270,7 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
   stock, SMM copy unreadable, other GUID, too small, no path), notifies run highest TPL first as in the core; release,
   timing, profile and USB-trace modes all 96/96; nine mutations caught. Flash script `tools/flash/flash-block9-26.11.26.sh`
   (pre-check: blocks 1-15 = 26.11.25 `ce47813a…`; after: `654dfeef…`; block 9 `b6e53203…`).
-  **Flashed 2026-11-11** on the test unit (first from 26.11.95 with a one-off script, read-backs `0b75b2b2…`; later from
+  **Flashed 2026-11-11** on the test unit (first from 26.11.25-dev3 with a one-off script, read-backs `0b75b2b2…`; later from
   26.11.25 with the release script itself, read-backs `48335074…`; block 0 unchanged both times; dump
   `firmware/efi-dumps/of1-testunit-20261111-26.11.26-postflash.bin`). Cold boots by the plug from the USB stick:
   **shell 4.66/4.66/4.66 s from reset** (26.11.25: 5.62 s), kernel 6.27-6.28 s, **plug-on to SSH 21.8/22.2/22.5 s**
@@ -279,6 +279,11 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
   errors). With the USB port empty the unit boots the MMC (startup.nsh tries `fs1:boot`, the USB drive, then `fs0:boot`):
   kernel at 5.31 s. With a 150 GB WD Raptor in an ASMedia (174c:55aa) caddy powered at the plug's click, the firmware
   finds no FAT file system on it and boots the MMC: kernel at **6.97 s** (26.11.25: 7.42 s); the drive spinning up takes
-  most of the time the shorter wait would save. **Not fixed, and in every release so far:** with a 12 TB GPT/exFAT drive
-  attached, 26.11.26 and 26.11.25 alike stay on the boot logo indefinitely, the drive's light flashing (likely its size:
-  over 2 TiB, which READ CAPACITY(10) can't express).
+  most of the time the shorter wait would save. **Not fixed, and in every release so far:** some USB drives attached
+  at power-on keep the unit on the boot logo for many minutes or indefinitely, the drive's light flashing. Corrected
+  2026-11-12 (this note first blamed the size of a 12 TB drive): that 12 TB drive turned out unreadable over USB 2
+  anywhere (Linux and macOS too: every read a medium error; fine over USB 3), and the cause for a good drive is the
+  firmware's USB code: with a 4 TB drive in an ASMedia ASM1053 caddy (174c:55aa), the caddy hangs on READ(10) until the
+  host has sent READ CAPACITY(16), which AMI's code never does, and AMI's recovery from that then makes it worse (a
+  malformed Bulk-Only reset, a retry that sends a corrupt command). Linux sends READ CAPACITY(16) first and is fine. Being
+  fixed in development builds (26.11.26-dev5 onwards).

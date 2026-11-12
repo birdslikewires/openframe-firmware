@@ -136,8 +136,27 @@ loaded after it, protocols appearing (graphics, BlockIo, file systems, USB, cons
 boot manager's stage signals and ReadyToBoot, and leaves them in the volatile variable
 `BlwBootTimes` (BS+RT, no NV bit: nothing reaches the flash). Give a development build the version
 of the release it is built on plus `-devN`, counting up (`26.11.26-dev1`, `-dev2`, ...), so it is
-never mistaken for a release, and never publish it. (Until 2026-11-12 development builds took
-26.11.90-99 and then counted down from .89; the dumps and scripts from then keep those names.)
+never mistaken for a release, and never publish it.
+
+Until 2026-11-12 development builds were numbered 26.11.90-99 and then counted down from .89; some
+pushed commits, test-unit dumps and scripts carry those numbers. They are, in order:
+
+| then | now | what |
+|---|---|---|
+| 26.11.90 | 26.11.24-dev1 | boot timing (`TIMING`): found the MMC's CE-ATA probe (26.11.25) |
+| 26.11.93 | 26.11.25-dev1 | + `PROFILE` |
+| 26.11.94 | 26.11.25-dev2 | + `USBTRACE` |
+| 26.11.95 | 26.11.25-dev3 | USBRT's waits changed in memory (became 26.11.26) |
+| 26.11.97 | 26.11.26-dev1 | + `SCREEN` (accepted a framebuffer base of 0: drew into low memory; don't boot it) |
+| 26.11.98 | 26.11.26-dev2 | screen trace, framebuffer re-read before every draw |
+| 26.11.99 | 26.11.26-dev3 | + the last 16 SCSI opcodes, USBRT's sense codes |
+| 26.11.91 | 26.11.26-dev4 | START UNIT experiment (disproved; removed) |
+| 26.11.92 | 26.11.26-dev5 | `usbrt.inc` D (a real Bulk-Only reset), E (20 s transfers) |
+| 26.11.96 | 26.11.26-dev6 | + control transfers, USBRT's error log on the screen |
+| 26.11.89 | 26.11.26-dev7 | every transfer drawn as it starts, with its port |
+| 26.11.88 | 26.11.26-dev8 | `usbrt.inc` F (READ CAPACITY(16)), G (CErr = 3) |
+| 26.11.87 | 26.11.26-dev9 | F's count on the screen: F fired, but its command lost its opcode |
+| - | 26.11.26-dev10 | `usbrt.inc` H (the command-block builder's clear) |
 
 ```
 venv/bin/python -I tools/build_ucode_driver.py /tmp/base.bin /tmp/of1-blw-26.11.26-dev1-timing.bin \
