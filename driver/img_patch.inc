@@ -4,14 +4,16 @@
 ;   - NBDXE: the panel clock value it writes (panel_clock.inc, nb_patch_image), from 26.11.24;
 ;   - MmcMediaDevice: its CE-ATA check answers "no" at once (ceata.inc, cea_patch_image), from
 ;     26.11.25;
+;   - SdHost's command wait polls every 4 us, and MmcMediaDevice waits 1 ms, not 50, after CMD0
+;     (mmcinit.inc, sdh_patch_image and mmw_patch_image), from 26.11.28;
 ;   - USBRT, both copies (the SMM one while SMRAM is still open): two shorter waits and more
 ;     tries (usbrt.inc, urt_patch_image), from 26.11.26.
 ; NBDXE is loaded before this driver, so it is patched at the entry; the others after, so
 ; through a LoadedImage protocol notify, before anything uses them.
 
 ; UINT32 img_patch(EFI_BOOT_SERVICES *BS): looks through every loaded image (EFI_LOADED_IMAGE)
-; for the ones to change. 1 once all are made (now or before: NBDXE, MmcMediaDevice and two
-; USBRT copies), else 0. cdecl.
+; for the ones to change. 1 once all are made (now or before: NBDXE, MmcMediaDevice (both changes),
+; SdHost and two USBRT copies), else 0. cdecl.
 ; Keeps ebx, esi, edi.
 img_patch:
         push    ebp
@@ -71,7 +73,19 @@ img_patch:
         test    eax, eax
         jz      .chk
         mov     byte [edi + (cea_done - .here)], 1
-.chk:   cmp     byte [edi + (urt_n - .here)], 2 ; USBRT: any copy not changed yet (a changed one
+.chk:   cmp     byte [edi + (sdh_done - .here)], 0
+        jne     .mmw
+        push    dword [ebp - 12]
+        call    sdh_patch_image
+        add     esp, 4
+        mov     [edi + (sdh_done - .here)], al
+.mmw:   cmp     byte [edi + (mmw_done - .here)], 0
+        jne     .urt
+        push    dword [ebp - 12]
+        call    mmw_patch_image
+        add     esp, 4
+        mov     [edi + (mmw_done - .here)], al
+.urt:   cmp     byte [edi + (urt_n - .here)], 2 ; USBRT: any copy not changed yet (a changed one
         jae     .all                            ; no longer matches, so isn't counted twice)
         push    dword [ebp - 12]
         call    urt_patch_image
@@ -96,6 +110,10 @@ img_patch:
         cmp     byte [edi + (nbp_done - .here)], 0
         je      .b0
         cmp     byte [edi + (cea_done - .here)], 0
+        je      .b0
+        cmp     byte [edi + (sdh_done - .here)], 0
+        je      .b0
+        cmp     byte [edi + (mmw_done - .here)], 0
         je      .b0
         cmp     byte [edi + (urt_n - .here)], 2
         jb      .b0

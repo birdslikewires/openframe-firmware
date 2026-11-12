@@ -79,6 +79,12 @@ NB_IMM = 0x402                    # the value in its DPLL_B write
 MMC_FILE = G('dd223ef8-6d1b-490a-a53e-ba86faaeb778')
 MMC_IMG = 0x63000000              # MmcMediaDevice's loaded image (its CE-ATA check at +0x72b)
 CEA_FN = 0x72b
+MMW_SITES = (0x170b, 0x187d)       # MmcMediaDevice's two 50 ms waits after CMD0 (mmcinit.inc)
+MMW_SIGS = ((0x16f4, 'mmw_sig1'), (0x1869, 'mmw_sig2'))
+SDH_FILE = G('89c24dfa-a105-4e8d-afe6-0ba7d40972ae')
+SDH_IMG = 0x64000000              # SdHost's loaded image (its SendCommand wait at +0x4f0-0x5a0)
+SDH_SIZE = 0xbea
+SDH_SIG = 0x4f0
 # The USB trace build (-DUSBTRACE): SmmControl, UHCD and USBRT, all below 512 MB (the build only
 # follows pointers there).
 SMMC_GUID = G('8d12e231-c667-4fd1-98f2-2449a7e7b2e5')
@@ -159,6 +165,20 @@ def sig_code(name, label):
     return bytes(code)
 
 
+def inc_bytes(name, label):
+    """The db bytes after `label` in driver/<name>, up to the next label."""
+    import os, re
+    out, cur = b'', False
+    for line in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'driver', name)):
+        if re.match(label + r':', line):
+            cur = True
+        elif cur and re.match(r'\w+:', line):
+            break
+        elif cur and line.strip().startswith('db'):
+            out += bytes(int(x, 16) for x in line.strip()[2:].split(','))
+    return out
+
+
 def mmc_functions():
     """Code that matches driver/mmc_sig.inc: the MMC driver's ReadBlocks and WriteBlocks with their
     relocated dwords (which the signature skips) filled with something else."""
@@ -207,7 +227,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         bio=(), bio_late=(), create_event_fails=False, register_fails=False,
         gma=True, gma_decode=True, gma_bar=GMA_MMIO, fp=GOP_FP, nb_stage=True, nb_value=NB_DPLL, nb_signals=1,
         app_dpll=NB_DPLL, nb_img='before', nb_variant='stock', li_fails=False, timing=False,
-        mmc_img='after', mmc_variant='stock', profile=False, tm_ticks=70, usbtrace=False, uhcd_variant='stock', usbrt_variant='stock', usbrt_img='after', screen=False, screen_variant='stock',
+        mmc_img='after', mmc_variant='stock', mmw_variant='stock', sdh_img='after', sdh_variant='stock', profile=False, tm_ticks=70, usbtrace=False, uhcd_variant='stock', usbrt_variant='stock', usbrt_img='after', screen=False, screen_variant='stock',
         fake_tsc_hi=0):
     """gma: the Poulsbo graphics device at 00:02.0 (8086:8108), its memory decode and BAR0.
     The GOP has set pipe B's PLL (fp, GOP_DPLL). nb_stage: after the entry, the boot manager's
@@ -273,8 +293,26 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         mmcd[CEA_FN + 0x30] ^= 1
     if mmc_variant == 'done':
         mmcd[CEA_FN:CEA_FN + 3] = b'\x32\xc0\xc3'
+    for rva, label in MMW_SIGS:                                   # the waits after CMD0 (mmcinit.inc)
+        c = sig_code('mmcinit_sig.inc', label)
+        mmcd[rva:rva + len(c)] = c
+    if mmw_variant == 'sd_changed':                               # one byte of the SD path's signature
+        mmcd[MMW_SIGS[0][0] + 0x08] ^= 1
+    if mmw_variant == 'mmc_changed':                              # one byte of the MMC path's
+        mmcd[MMW_SIGS[1][0] + 0x0c] ^= 1
+    if mmw_variant == 'done':                                     # already 1 ms: the signature no longer matches
+        for a in MMW_SITES:
+            mmcd[a:a + 4] = struct.pack('<I', 1000)
     mu.mem_write(MMC_IMG, bytes(mmcd))
     mmc_orig = bytes(mmcd)
+    mu.mem_map(SDH_IMG, 0x1000)                                   # SdHost: its SendCommand wait loop
+    sdhd = bytearray(b'\x90' * SDH_SIZE)
+    c = sig_code('mmcinit_sig.inc', 'sdh_sig')
+    sdhd[SDH_SIG:SDH_SIG + len(c)] = c
+    if sdh_variant == 'code':                                     # one byte of the loop different
+        sdhd[SDH_SIG + 0x50] ^= 1
+    mu.mem_write(SDH_IMG, bytes(sdhd))
+    sdh_orig = bytes(sdhd)
 
     def make_image(n, file_guid, base, size, node=b'\x04\x06\x14\x00', nopath=None):
         li = NB_IMG + 0x8000 + 0x100 * n
@@ -292,6 +330,9 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     def load_mmc():
         make_image(len(images), G('11111111-2222-3333-4444-555555555555') if mmc_variant == 'guid' else MMC_FILE,
                    MMC_IMG, 0x700 if mmc_variant == 'small' else 0x34c0, nopath=mmc_variant == 'nopath')
+    def load_sdh():
+        make_image(len(images), G('11111111-2222-3333-4444-555555555555') if sdh_variant == 'guid' else SDH_FILE,
+                   SDH_IMG, 0x500 if sdh_variant == 'small' else SDH_SIZE, nopath=sdh_variant == 'nopath')
     mu.mem_map(USB_AREA, 0x40000)
     rt = bytearray(0x9f80)                                        # USBRT: the sites usbrt.inc changes
     rt[0x1381:0x1389] = bytes.fromhex('53566a61e8aafeff')
@@ -428,6 +469,8 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         load_nbdxe()
     if mmc_img == 'before':
         load_mmc()
+    if sdh_img == 'before':
+        load_sdh()
     if usbrt_img == 'before':
         for base in rt_copies:
             make_image(len(images), USBRT_FILE, base, 0x9f80, nopath=False)
@@ -819,6 +862,12 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             if e.get('guid') == LOADED_IMAGE:
                 li_queues[e['key']].append(0xB20000 + len(images) - 1)
         notify(LOADED_IMAGE, 'LoadedImage notify')
+    if sdh_img == 'after':                                        # SdHost loads after it
+        load_sdh()
+        for e in evs.values():
+            if e.get('guid') == LOADED_IMAGE:
+                li_queues[e['key']].append(0xB20000 + len(images) - 1)
+        notify(LOADED_IMAGE, 'LoadedImage notify')
     if timing:                                                    # the watched protocols appear
         for g in TM_GUIDS:
             notify(g, 'timing notify')
@@ -1084,9 +1133,13 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         tm_var['trig_now'] = rd(SMMC_INST)
 
     mmc_now = bytes(mu.mem_read(MMC_IMG, 0x34c0))
-    cea_changed = [(i, mmc_now[i]) for i in range(0x34c0) if mmc_now[i] != mmc_orig[i]]
+    mmw_bytes = set(a + k for a in MMW_SITES for k in range(4))
+    cea_changed = [(i, mmc_now[i]) for i in range(0x34c0) if mmc_now[i] != mmc_orig[i] and i not in mmw_bytes]
+    mmw_changed = [(i, mmc_now[i]) for i in range(0x34c0) if mmc_now[i] != mmc_orig[i] and i in mmw_bytes]
+    sdh_now = bytes(mu.mem_read(SDH_IMG, SDH_SIZE))
+    sdh_changed = [(i, sdh_now[i]) for i in range(SDH_SIZE) if sdh_now[i] != sdh_orig[i]]
     rt_now = [bytes(mu.mem_read(a, 0x9f80)) for a in rt_copies]
-    return dict(ident=tm_var.get('ident'), rcap=tm_var.get('rcap'), rt_orig=rt_orig, rt_now=rt_now, cea_changed=cea_changed, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
+    return dict(ident=tm_var.get('ident'), rcap=tm_var.get('rcap'), rt_orig=rt_orig, rt_now=rt_now, cea_changed=cea_changed, mmw_changed=mmw_changed, sdh_changed=sdh_changed, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
                 mmc_ev=mmc_ev, nb_ev=nb_ev, evs=evs, mmio_writes=mmio_writes, dpll=final,
                 pp_final=struct.unpack('<I', mu.mem_read(GMA_MMIO + 0x61204, 4))[0] if gma else None,
                 nb_after_notify=nb_bad.get('after_notify'), wrapped=wrapped, entry_bio=entry_bio, late_bio=late_bio, in_image=in_image,
@@ -1193,10 +1246,23 @@ def main():
         # xor al, al; ret, nothing else changed) or 'unpatched' (its image untouched).
         ('MmcMediaDevice loads after the driver (as on an OF1): CE-ATA check patched as it loads', dxe, dict(store=lm(CARD), mmc_img='after'), 0, True, MAC, True),
         ('MmcMediaDevice loaded before the driver: patched at the entry', dxe, dict(store=lm(CARD), mmc_img='before'), 0, True, MAC, True),
-        ('NBDXE, MmcMediaDevice and USBRT all loaded before the driver: all patched at the entry, no LoadedImage notify', dxe, dict(store=lm(CARD), mmc_img='before', usbrt_img='before'), 0, True, MAC, True),
+        ('NBDXE, MmcMediaDevice, SdHost and USBRT all loaded before the driver: all patched at the entry, no LoadedImage notify', dxe, dict(store=lm(CARD), mmc_img='before', sdh_img='before', usbrt_img='before'), 0, True, MAC, True),
+        ('all but SdHost loaded before the driver: the LoadedImage notify stays for it', dxe, dict(store=lm(CARD), mmc_img='before', usbrt_img='before'), 0, True, MAC, True),
+        # mmcinit.inc: MmcMediaDevice's waits after CMD0, SdHost's command wait. want_mmw / want_sdh:
+        # 'patched' (exactly the expected bytes) or 'unpatched' (untouched).
+        ('SdHost loaded before the driver: its wait changed at the entry', dxe, dict(store=lm(CARD), sdh_img='before'), 0, True, MAC, True),
+        ('no SdHost: the rest still changed', dxe, dict(store=lm(CARD), sdh_img='none'), 0, True, MAC, True),
+        ('SdHost with one byte of the loop different: left alone', dxe, dict(store=lm(CARD), sdh_variant='code'), 0, True, MAC, True),
+        ('the same loop under another file GUID: SdHost left alone', dxe, dict(store=lm(CARD), sdh_variant='guid'), 0, True, MAC, True),
+        ('SdHost image smaller than the loop: left alone', dxe, dict(store=lm(CARD), sdh_variant='small'), 0, True, MAC, True),
+        ('SdHost with no FilePath: left alone', dxe, dict(store=lm(CARD), sdh_variant='nopath'), 0, True, MAC, True),
+        ('MmcMediaDevice SD-path wait not stock: neither wait changed, the CE-ATA check still skipped', dxe, dict(store=lm(CARD), mmw_variant='sd_changed'), 0, True, MAC, True),
+        ('MmcMediaDevice MMC-path wait not stock: neither wait changed', dxe, dict(store=lm(CARD), mmw_variant='mmc_changed'), 0, True, MAC, True),
+        ('MmcMediaDevice waits already 1 ms: left as they are', dxe, dict(store=lm(CARD), mmw_variant='done'), 0, True, MAC, True),
+
         ('NBDXE and MmcMediaDevice both load after the driver: both patched as they load', dxe, dict(store=lm(CARD), nb_img='after', mmc_img='after'), 0, True, MAC, True),
         ('no MmcMediaDevice: NBDXE still patched, nothing else changed', dxe, dict(store=lm(CARD), mmc_img='none'), 0, True, MAC, True),
-        ('MmcMediaDevice with one byte of the check different: left alone', dxe, dict(store=lm(CARD), mmc_variant='code'), 0, True, MAC, True),
+        ('MmcMediaDevice with one byte of the CE-ATA check different: check left alone, the waits after CMD0 still changed', dxe, dict(store=lm(CARD), mmc_variant='code'), 0, True, MAC, True),
         ('the same check under another file GUID: left alone', dxe, dict(store=lm(CARD), mmc_variant='guid'), 0, True, MAC, True),
         ('MmcMediaDevice image smaller than the check: left alone', dxe, dict(store=lm(CARD), mmc_variant='small'), 0, True, MAC, True),
         ('MmcMediaDevice with no FilePath: left alone', dxe, dict(store=lm(CARD), mmc_variant='nopath'), 0, True, MAC, True),
@@ -1247,6 +1313,14 @@ def main():
         cea_patchable = (mmc_img != 'none' and kw.get('mmc_variant', 'stock') == 'stock' and not kw.get('li_fails') and
                          (mmc_img == 'before' or not (kw.get('register_fails') or kw.get('create_event_fails'))))
         want_cea = kw.pop('want_cea', 'patched' if img is dxe and want_ev and cea_patchable else 'unpatched')
+        mmw_patchable = (mmc_img != 'none' and kw.get('mmc_variant', 'stock') in ('stock', 'code', 'done') and
+                         kw.get('mmw_variant', 'stock') == 'stock' and not kw.get('li_fails') and
+                         (mmc_img == 'before' or not (kw.get('register_fails') or kw.get('create_event_fails'))))
+        want_mmw = kw.pop('want_mmw', 'patched' if img is dxe and want_ev and mmw_patchable else 'unpatched')
+        sdh_img = kw.get('sdh_img', 'after')
+        sdh_patchable = (sdh_img != 'none' and kw.get('sdh_variant', 'stock') == 'stock' and not kw.get('li_fails') and
+                         (sdh_img == 'before' or not (kw.get('register_fails') or kw.get('create_event_fails'))))
+        want_sdh = kw.pop('want_sdh', 'patched' if img is dxe and want_ev and sdh_patchable else 'unpatched')
         want_pclk = kw.pop('want_pclk', ('untouched' if want_nbp == 'patched' else 'notify' if want_ev else 'untouched')
                            if img is dxe else 'app')
         # NBDXE (with the 'value' variant) writes its own value; the notify must leave that alone
@@ -1278,6 +1352,8 @@ def main():
                          if kw.get('nb_img', 'before') == 'before' else []) + \
                         ([b'\x11' * 4 if kw.get('mmc_variant') == 'guid' else b'LI??' if kw.get('mmc_variant') == 'nopath' else MMC_FILE[:4]]
                          if kw.get('mmc_img', 'after') == 'before' else []) + \
+                        ([b'\x11' * 4 if kw.get('sdh_variant') == 'guid' else b'LI??' if kw.get('sdh_variant') == 'nopath' else SDH_FILE[:4]]
+                         if kw.get('sdh_img', 'after') == 'before' else []) + \
                         ([USBRT_FILE[:4]] * 2 if kw.get('usbrt_img', 'after') == 'before' else [])
                     if not kw.get('li_fails') and pre != want_pre:
                         p.append('images before the entry %s, expected %s' % (pre, want_pre))
@@ -1545,8 +1621,24 @@ def main():
                 p.append('MmcMediaDevice changed at %s, expected its CE-ATA check to start xor al, al; ret' % r['cea_changed'][:6])
         elif r['cea_changed']:
             p.append('MmcMediaDevice changed at %s' % r['cea_changed'][:6])
+        # MmcMediaDevice's waits after CMD0 and SdHost's command wait (mmcinit.inc)
+        want_w = [(a + k, b) for a in MMW_SITES for k, b in enumerate(struct.pack('<I', 1000)) if b != struct.pack('<I', 50000)[k]]
+        if want_mmw == 'patched':
+            if r['mmw_changed'] != want_w:
+                p.append('MmcMediaDevice waits changed %s, expected %s' % (r['mmw_changed'], want_w))
+        elif r['mmw_changed']:
+            p.append('MmcMediaDevice waits changed at %s' % r['mmw_changed'][:6])
+        if want_sdh == 'patched':
+            new = inc_bytes('mmcinit_sig.inc', 'sdh_new')
+            stock = sig_code('mmcinit_sig.inc', 'sdh_sig')[0x536 - SDH_SIG:0x536 - SDH_SIG + len(new)]
+            want_s = sorted([(0x52a, 0x59), (0x530, 0x53)] + [(0x536 + k, b) for k, b in enumerate(new) if b != stock[k]])
+            if r['sdh_changed'] != want_s:
+                p.append('SdHost changed %s, expected %s' % (r['sdh_changed'][:8], want_s[:8]))
+        elif r['sdh_changed']:
+            p.append('SdHost changed at %s' % r['sdh_changed'][:6])
         if not timing and want_nbp == 'patched' and want_cea == 'patched' and kw.get('nb_img', 'before') == 'before' and \
                 kw.get('mmc_img', 'after') == 'before' and kw.get('usbrt_img', 'after') == 'before' and \
+                want_mmw == 'patched' and want_sdh == 'patched' and kw.get('sdh_img', 'after') == 'before' and \
                 any(e.get('guid') == LOADED_IMAGE for e in r['evs'].values()):
             p.append('LoadedImage notify registered although every image was patched at the entry')
         # Panel clock

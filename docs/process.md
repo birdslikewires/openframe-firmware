@@ -157,6 +157,7 @@ pushed commits, test-unit dumps and scripts carry those numbers. They are, in or
 | 26.11.88 | 26.11.26-dev8 | `usbrt.inc` F (READ CAPACITY(16)), G (CErr = 3) |
 | 26.11.87 | 26.11.26-dev9 | F's count on the screen: F fired, but its command lost its opcode |
 | - | 26.11.26-dev10 | `usbrt.inc` H (the command-block builder's clear) |
+| - | 26.11.27-dev1 | `mmcinit.inc`: SdHost's command wait polls every 4 us; MmcMediaDevice waits 1 ms, not 50, after CMD0 |
 
 ```
 venv/bin/python -I tools/build_ucode_driver.py /tmp/base.bin /tmp/of1-blw-26.11.26-dev1-timing.bin \

@@ -1,0 +1,164 @@
+; mmcinit.inc: two shorter waits in the firmware's start-up of the OF1's internal memory (MMC),
+; changed in memory as the drivers load, like ceata.inc. About 0.4 s per boot in all.
+;
+; 1. SdHost (89C24DFA-A105-4E8D-AFE6-0BA7D40972AE, Intel EDK), SendCommand. After writing a
+;    command it reads the error and normal interrupt status, and while the command (and any
+;    data) isn't done it stalls 1000 us and counts one off the caller's timeout (ms). Commands
+;    take microseconds, but the first read comes before that, so nearly every command paid a
+;    whole millisecond: about 360 ms per boot on an OF1. The loop now stalls 4 us a pass, and
+;    counts passes in a spare byte (the status word's upper byte, which the 16-bit reads leave
+;    alone and nothing tests), taking a millisecond off the timeout every 256 passes: no timeout
+;    is shorter than before. The two 'done' branches go straight to the response read, past
+;    the counter check that can only fail there for a timeout of 0. Checked against the stock
+;    loop under emulation (tools/emu_mmcinit.py).
+;
+; 2. MmcMediaDevice (DD223EF8-6D1B-490A-A53E-BA86FAAEB778): 50 ms after each CMD0 (GO_IDLE),
+;    once on the SD path and once on the MMC path: now 1 ms, as Linux waits (mmc_go_idle). The
+;    card's real start-up time is spent in the CMD1 polls that follow (5000 x 1 ms allowed).
+;
+; Only the exact stock code is changed (mmcinit_sig.inc, generated and checked by
+; tools/mmcinit_sig.py), and only once per image.
+
+; UINT32 sdh_patch_image(EFI_LOADED_IMAGE_PROTOCOL *Li): 1 if this is the stock SdHost and its
+; SendCommand wait now polls every 4 us. Keeps ebx, esi, edi.
+sdh_patch_image:
+        push    ebx
+        push    esi
+        push    edi
+        call    .here
+.here:  pop     edi
+        lea     eax, [edi + (sdh_guid - .here)]
+        push    SDH_END_RVA
+        push    eax
+        push    dword [esp + 24]                ; Li
+        call    mmi_image_base
+        add     esp, 12
+        test    eax, eax
+        jz      .no
+        mov     esi, eax                        ; ImageBase
+        lea     eax, [edi + (sdh_sig - .here)]
+        push    eax
+        lea     eax, [esi + SDH_SIG_RVA]
+        push    eax
+        call    mmc_sig_match
+        add     esp, 8
+        test    eax, eax
+        jz      .no
+        push    esi                             ; the loop's new bytes, then the two branches
+        push    edi
+        lea     edi, [esi + SDH_NEW_RVA]
+        mov     esi, [esp]                      ; .here
+        lea     esi, [esi + (sdh_new - .here)]
+        mov     ecx, SDH_NEW_LEN
+        cld
+        rep     movsb
+        pop     edi
+        pop     esi
+        mov     byte [esi + SDH_BR1_RVA], SDH_BR1_NEW
+        mov     byte [esi + SDH_BR2_RVA], SDH_BR2_NEW
+        push    esi                             ; check it all landed
+        push    edi
+        lea     edi, [esi + SDH_NEW_RVA]
+        mov     esi, [esp]
+        lea     esi, [esi + (sdh_new - .here)]
+        mov     ecx, SDH_NEW_LEN
+        repe    cmpsb
+        pop     edi
+        pop     esi
+        jne     .no
+        cmp     byte [esi + SDH_BR1_RVA], SDH_BR1_NEW
+        jne     .no
+        cmp     byte [esi + SDH_BR2_RVA], SDH_BR2_NEW
+        jne     .no
+        mov     eax, 1
+        jmp     .out
+.no:    xor     eax, eax
+.out:   pop     edi
+        pop     esi
+        pop     ebx
+        ret
+
+; UINT32 mmw_patch_image(EFI_LOADED_IMAGE_PROTOCOL *Li): 1 if this is the stock MmcMediaDevice
+; and both waits after CMD0 are now 1 ms. Keeps ebx, esi, edi.
+mmw_patch_image:
+        push    ebx
+        push    esi
+        push    edi
+        call    .here
+.here:  pop     edi
+        lea     eax, [edi + (cea_mmc_guid - .here)]
+        push    MMW_END_RVA
+        push    eax
+        push    dword [esp + 24]                ; Li
+        call    mmi_image_base
+        add     esp, 12
+        test    eax, eax
+        jz      .no
+        mov     esi, eax
+        lea     eax, [edi + (mmw_sig1 - .here)]
+        push    eax
+        lea     eax, [esi + MMW_SIG1_RVA]
+        push    eax
+        call    mmc_sig_match
+        add     esp, 8
+        test    eax, eax
+        jz      .no
+        lea     eax, [edi + (mmw_sig2 - .here)]
+        push    eax
+        lea     eax, [esi + MMW_SIG2_RVA]
+        push    eax
+        call    mmc_sig_match
+        add     esp, 8
+        test    eax, eax
+        jz      .no
+        mov     dword [esi + MMW_SD_RVA], MMW_NEW_US
+        mov     dword [esi + MMW_MMC_RVA], MMW_NEW_US
+        cmp     dword [esi + MMW_SD_RVA], MMW_NEW_US
+        jne     .no
+        cmp     dword [esi + MMW_MMC_RVA], MMW_NEW_US
+        jne     .no
+        mov     eax, 1
+        jmp     .out
+.no:    xor     eax, eax
+.out:   pop     edi
+        pop     esi
+        pop     ebx
+        ret
+
+; UINT8 *mmi_image_base(EFI_LOADED_IMAGE_PROTOCOL *Li, EFI_GUID *File, UINT32 MinSize): the image's
+; base if it was loaded from the firmware volume file File (FilePath is that one node) and is at
+; least MinSize bytes, else 0. Keeps ebx, esi, edi.
+mmi_image_base:
+        push    esi
+        push    edi
+        mov     edx, [esp + 12]                 ; Li
+        mov     esi, [edx + 0x10]               ; FilePath: one MEDIA_FW_VOL_FILEPATH node
+        test    esi, esi
+        jz      .no
+        cmp     dword [esi], 0x00140604         ; type 4, subtype 6, length 20
+        jne     .no
+        add     esi, 4                          ; its file GUID
+        mov     edi, [esp + 16]
+        mov     ecx, 16
+        cld
+        repe    cmpsb
+        jne     .no
+        mov     eax, [esp + 20]
+        cmp     [edx + 0x28], eax               ; ImageSize (low half: IA32)
+        jb      .no
+        mov     eax, [edx + 0x20]               ; ImageBase
+        jmp     .out
+.no:    xor     eax, eax
+.out:   pop     edi
+        pop     esi
+        ret
+
+sdh_done:       db 0                            ; set once SdHost is changed
+mmw_done:       db 0                            ; set once MmcMediaDevice's waits are changed
+        align   4, db 0
+sdh_guid:                                       ; 89C24DFA-A105-4E8D-AFE6-0BA7D40972AE SdHost
+        dd      0x89c24dfa
+        dw      0xa105, 0x4e8d
+        db      0xaf, 0xe6, 0x0b, 0xa7, 0xd4, 0x09, 0x72, 0xae
+
+%include "mmcinit_sig.inc"

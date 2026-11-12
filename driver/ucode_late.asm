@@ -770,6 +770,7 @@ mac_ok: xor     eax, eax
 %include "mmc_fix.inc"
 %include "panel_clock.inc"
 %include "ceata.inc"
+%include "mmcinit.inc"
 %include "usbrt.inc"
 %include "img_patch.inc"
 %ifdef TIMING
