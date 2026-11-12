@@ -1,4 +1,4 @@
-"""Mutations for screentrace.inc's transfer / port-status hook (26.11.89; .88 without the error-log and port lines):
+"""Mutations for screentrace.inc's transfer hook (the function tables' control, bulk and interrupt entries):
     venv/bin/python -I tools/mutate.py tools/mutations/ctl.py --base BASE --version 26.11.26-dev1 \\
         --define TIMING --define PROFILE --define USBTRACE --define SCREEN --mode timing,profile,usbtrace,screen"""
 F = 'driver/screentrace.inc'
@@ -15,11 +15,11 @@ MUTATIONS = [
     ('not drawn as it starts', F, '        push    edx                             ; (the entry: arguments now at [esp+44])\n        call    .draw',
      '        push    edx                             ; (the entry: arguments now at [esp+44])\n        nop'),
     ('device port not recorded', F, '        mov     ah, [ecx + 9]', '        mov     ah, [ecx + 8]'),
-    ('bulk shown as control', F, 'st_kinds:       db      0x31, 0x11, 0x30, 0x10, 0x32', 'st_kinds:       db      0x31, 0x11, 0x30, 0x10, 0x31'),
+    ('bulk shown as control', F, 'st_kinds:       db      0x31, 0x11, 0x32', 'st_kinds:       db      0x31, 0x11, 0x31'),
     ('install: fill target not checked', F, '        cmp     eax, [edx + 4]\n        jne     .tno', '        cmp     eax, [edx + 4]\n        nop\n        nop'),
     ('install: stub address written one byte early', F, '        pop     dword [esi + eax + 3]', '        pop     dword [esi + eax + 2]'),
     ('install: EHCI and UHCI control swapped', F, '        dd      0x7401, 0x6ee4, 0x25, st_ctl_e - st_blob', '        dd      0x7401, 0x6ee4, 0x25, st_ctl_u - st_blob'),
-    ('install: only 7 tables checked', F, '        cmp     ecx, 8\n        jb      .tc', '        cmp     ecx, 7\n        jb      .tc'),
+    ('install: only 5 tables checked', F, '        cmp     ecx, 6\n        jb      .tc', '        cmp     ecx, 5\n        jb      .tc'),
     ('install: interrupt hooks swapped', F, '        dd      0x740f, 0x72b7, 0x2d, st_int_e - st_blob', '        dd      0x740f, 0x72b7, 0x2d, st_int_u - st_blob'),
     ('EHCI control shown as UHCI control', F, 'st_kinds:       db      0x31, 0x11', 'st_kinds:       db      0x11, 0x11'),
 ]

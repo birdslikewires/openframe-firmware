@@ -4,7 +4,7 @@
 ;
 ; AMI's USB stack does its work in SMM (USBRT, file 04EAAAA1-29A1-11D7-8838-00500473D4EB): one copy
 ; is loaded as a normal driver, which loads a second into SMRAM; the SMM one runs everything.
-; Measured on an OF1 (development builds 26.11.93-95: SMM entries timed from outside, the SMM copy
+; Measured on an OF1 (development builds 26.11.25-dev1 to -dev3: SMM entries timed from outside, the SMM copy
 ; read and then changed as it loaded, while SMRAM is still open):
 ;   A  Before a mass-storage device's first command USBRT always waits 500 ms (FixedDelay at RVA
 ;      0x56cb, in the identify step), and it does that twice per drive (as the device is
@@ -86,29 +86,6 @@ urt_patch_image:
         mov     edx, 18
         call    .cmp
         jne     .bc
-%ifdef STARTUNIT
-        ; EXPERIMENT: instead of waiting, wake the drive: identify's push 0x8235 / call FixedDelay
-        ; becomes push esi (the device) / call StartUnit (START STOP UNIT, start; 10 s timeout),
-        ; same length, same pop after it. Only if StartUnit is the stock function.
-        lea     eax, [edi + (urt_sig_start - .here)]
-        push    eax
-        lea     eax, [esi + URT_START_RVA]
-        push    eax
-        call    mmc_sig_match
-        add     esp, 8
-        test    eax, eax
-        jz      .wait
-        mov     dword [esi + 0x56c4], 0x90909090    ; nop x4 (the old push's imm32)
-        mov     byte [esi + 0x56c3], 0x56           ; push esi
-        mov     dword [esi + 0x56cc], URT_START_RVA - 0x56d0   ; call StartUnit
-        cmp     byte [esi + 0x56c3], 0x56
-        jne     .bc
-        cmp     dword [esi + 0x56cc], URT_START_RVA - 0x56d0
-        jne     .bc
-        or      ebx, 1
-        jmp     .bc
-.wait:
-%endif
         mov     dword [esi + 0x56c4], 0x29a
         cmp     dword [esi + 0x56c4], 0x29a
         jne     .bc
@@ -372,8 +349,5 @@ urt_g_sig:      db      0xc7, 0x43, 0x08, 0x80, 0x82, 0x08, 0x00 ; mov dword [eb
                 db      0xc7, 0x40, 0x08, 0x80, 0x80, 0x00, 0x80 ; mov dword [eax+8], 0x80008080 (OUT)
                 db      0xc7, 0x40, 0x08, 0x80, 0x81, 0x00, 0x80
                 db      0xc7, 0x40, 0x08, 0x80, 0x80, 0x00, 0x80
-%ifdef STARTUNIT
-%include "usbrt_sig.inc"
-%endif
 urt_sig_c:      db      0x8a, 0x81, 0x43, 0x0e, 0x00, 0x00, 0xfe, 0xc0, 0xb2, 0x0a, 0xf6, 0xea
                 db      0x88, 0x81, 0xe3, 0x0d, 0x00, 0x00, 0xc3 ; mov al, [ecx+0xe43]; inc al; mov dl, 10; imul dl; mov [ecx+0xde3], al; ret

@@ -58,7 +58,7 @@ def main():
     ap.add_argument('--version', required=True)
     ap.add_argument('--date', default='11/11/2026')
     ap.add_argument('--define', action='append', default=[])
-    ap.add_argument('--mode', default='', help='emu_platform modes, comma-separated: timing, profile, usbtrace, screen, startunit')
+    ap.add_argument('--mode', default='', help='emu_platform modes, comma-separated: timing, profile, usbtrace, screen')
     ap.add_argument('-j', type=int, default=os.cpu_count())
     a = ap.parse_args()
     muts = runpy.run_path(a.mutations)['MUTATIONS']

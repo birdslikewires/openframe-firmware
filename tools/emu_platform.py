@@ -94,8 +94,8 @@ F_RVA, F_SPACE = 0x9ed0, 0xb0                 # ...and usbrt.inc's F stub has th
 RC16_CDB = bytes.fromhex('9e10' + '00' * 8 + '00000020' + '0000')
 G_SITES = ((0x6f95, 'c74308808208' '00'), (0x6fc4, 'c74008808100' '80'), (0x6fcd, 'c74008808000' '80'),
            (0x6ffa, 'c74008808100' '80'), (0x7003, 'c74008808000' '80'))
-G_FAKE = USB_AREA + 0x33000                   # the screen build's gUsbData (status byte, error log, timeout)
-TABLE_FILLS = ((0x7401, 0x6ee4, 0x25), (0x2765, 0x20a7, 0x25), (0x73ec, 0x639e, 0x19), (0x2750, 0x151b, 0x19),
+G_FAKE = USB_AREA + 0x33000                   # the fake gUsbData: transfer status byte, command parameters
+TABLE_FILLS = ((0x7401, 0x6ee4, 0x25), (0x2765, 0x20a7, 0x25),
                (0x7408, 0x70b2, 0x29), (0x276c, 0x26c1, 0x29), (0x740f, 0x72b7, 0x2d), (0x2773, 0x2329, 0x2d))
 SAVE_FB = 0x09000000                          # what the screen showed while a fake transfer ran (one ring line)
 GOP_INST = USB_AREA + 0x31000                 # +0x0c Mode; Mode at +0x100 (+8 Info, +0x10 base); Info at +0x200
@@ -208,7 +208,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         gma=True, gma_decode=True, gma_bar=GMA_MMIO, fp=GOP_FP, nb_stage=True, nb_value=NB_DPLL, nb_signals=1,
         app_dpll=NB_DPLL, nb_img='before', nb_variant='stock', li_fails=False, timing=False,
         mmc_img='after', mmc_variant='stock', profile=False, tm_ticks=70, usbtrace=False, uhcd_variant='stock', usbrt_variant='stock', usbrt_img='after', screen=False, screen_variant='stock',
-        fake_tsc_hi=0, startunit=False):
+        fake_tsc_hi=0):
     """gma: the Poulsbo graphics device at 00:02.0 (8086:8108), its memory decode and BAR0.
     The GOP has set pipe B's PLL (fp, GOP_DPLL). nb_stage: after the entry, the boot manager's
     stage signal, on which NBDXE writes nb_value into DPLL_B and then the stage notifies run
@@ -314,14 +314,13 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     rt[0x4c61:0x4c69] = bytes.fromhex('576a01e8a9ddffff')               # REQUEST SENSE: push edi; push 1; call +0x2a12
     rt[0x4c69:0x4c71] = bytes.fromhex('595f' 'b8020402' '00c3')        # ...pop ecx; pop edi; return sense 2/04/02
     rt[0x2a12:0x2a18] = b'\xb8' + struct.pack('<I', USB_AREA + 0x3a000) + b'\xc3'   # (+0x2a12 returns a buffer)
-    # StartUnit (+0x4e84), the real bytes, its relocated dwords at a fake gUsbData pointer; what it calls
+    # StartUnit (+0x4e84), the real bytes (E's 10 s at +0x4eba is inside it), its relocated dwords at
+    # a fake gUsbData pointer; what it calls
     su = bytearray.fromhex('578b7c2408f6474520740433c05fc3566a01e877dbffff8bf085f6597507b8ff000000eb48c6061bc6460401'
                            'e8d7f2ffffa1f098001066c780e40d00001027a1f098001089b0e60d0000a1f098001057c680ea0d00000c'
                            'e8cefaffff6a0156e805dcffff57e873fdffff83c4105e5fc3')
     for off in (50, 64, 75):
         su[off:off + 4] = struct.pack('<I', USB_AREA + 0x7200)
-    if usbrt_variant == 'start_changed':
-        su[0x2b] ^= 1                                             # (the 0x1b becomes 0x1a)
     rt[0x4e84:0x4ef4] = su
     # F: READ CAPACITY's command and its call into the dispatcher; the parameter-clearing function
     # (its relocated dword per copy, below); G: the five control-transfer tokens
@@ -355,8 +354,6 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         rt[site:site + 3] = bytes([0xc7, 0x40, slot])
     rt[0x6ee4:0x6eeb] = bytes.fromhex('0f318b44241cc3')              # EHCI control: rdtsc (time passes); return wLength
     rt[0x20a7:0x20af] = bytes.fromhex('0f318b44241c40c3')            # UHCI control: ... wLength + 1
-    rt[0x639e:0x63a4] = bytes.fromhex('b809000000c3')                # EHCI port status: 9
-    rt[0x151b:0x1522] = bytes.fromhex('90b807000000c3')              # UHCI port status: 7 (nop first: tables_changed's +1 lands on the mov)
     # EHCI bulk: rdtsc; status byte := 2 (a bulk timeout); return its length (argument 5). UHCI bulk:
     # status byte := 4; length + 1
     for a_, f_ in ((0x70b2, b'\x0f\x31\xc6\x05' + struct.pack('<I', G_FAKE + 0xe14) + b'\x02\x8b\x44\x24\x14\xc3'),
@@ -395,10 +392,6 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         fake_tsc = {'t': 0}
         g_ = bytearray(0xe40)
         g_[0xe14] = 0x04                                          # control stall
-        g_[0x70] = 11                                             # 11 errors logged: 0x100 .. 0x10a
-        for i_ in range(11):
-            struct.pack_into('<H', g_, 0x10 + 2 * i_, 0x100 + i_)
-        struct.pack_into('<H', g_, 0xe12, 20000)
         mu.mem_write(G_FAKE, bytes(g_))
         def slow_hook(uc, addr, size, _):                         # the fake control transfers' rdtsc: 0x3000000 ticks pass
             fake_tsc['t'] += 0x3000000
@@ -967,7 +960,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 at = code + 0x500 + 0x20 * k
                 mu.mem_write(at, b'\x68\xde\x00\x00\x00\xb8' + struct.pack('<I', live[-1] + 0x4c61) + b'\xff\xd0\x83\xc4\x04\xc3')
                 sc['sense'].append((live[-1], call(at, [], 'REQUEST SENSE')))
-            sc['ctl'], sc['rhs'] = [], []                          # through the (maybe patched) function tables
+            sc['ctl'] = []                                         # through the (maybe patched) function tables
             # (kind: 0 control, 2 bulk, 3 interrupt; UHCI?; address; port; arguments 3, 4, 5, 7)
             # every kind is on the screen at one of the two snapshots (the 5th's start, the 7th's start)
             xfers = [(0, 0, 0x10, 4, 0x0680, 0, 0x0100, 8), (0, 1, 3, 2, 0x0680, 0, 0x0200, 0x20), (2, 0, 5, 4, 0x80, 0x1234, 0x200, 0),
@@ -981,11 +974,6 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 mu.mem_write(at, b''.join(b'\x68' + struct.pack('<I', v) for v in (a7, USB_AREA + 0x36000, a5, a4, a3, dev, USB_AREA + 0x37000)) +
                              b'\xa1' + struct.pack('<I', live[-1] + site + 3) + b'\xff\xd0\x83\xc4\x1c\xc3')
                 sc['ctl'].append((live[-1], kind, u, addr, port, a3, a4, a5, a7, call(at, [], 'transfer')))
-            for k, (u, port) in enumerate(((0, 3), (1, 1))):
-                at = code + 0xc00 + 0x40 * k
-                mu.mem_write(at, b'\x6a\x00' * 5 + b'\x6a' + bytes([port]) + b'\x68' + struct.pack('<I', USB_AREA + 0x37000) +
-                             b'\xa1' + struct.pack('<I', live[-1] + (0x2750 if u else 0x73ec) + 3) + b'\xff\xd0\x83\xc4\x1c\xc3')
-                sc['rhs'].append((live[-1], u, port, call(at, [], 'port status')))
             sc['saved_line'] = bytes(mu.mem_read(SAVE_FB, 16 * 800 * 4))
             sc['saved_ring'] = bytes(mu.mem_read(SAVE_FB + 0x10000, 88 * 800 * 4))
             sc['fb_before_rtb'] = bytes(mu.mem_read(FB, FB_W * FB_H * 4))
@@ -1113,7 +1101,6 @@ def main():
     first_fail = '--first-fail' in sys.argv                       # stop at the first failing scenario (mutation runs)
     only = sys.argv[sys.argv.index('--only') + 1] if '--only' in sys.argv else None   # run just the matching scenarios
     screen = '--screen' in sys.argv                               # ... and -DSCREEN
-    startunit = '--startunit' in sys.argv                         # ... and -DSTARTUNIT (experiment)
     usbtrace = '--usbtrace' in sys.argv or screen                 # ... and -DUSBTRACE
     profile = '--profile' in sys.argv or usbtrace                 # ... with -DPROFILE as well
     timing = '--timing' in sys.argv or profile                    # the -DTIMING development build
@@ -1228,7 +1215,6 @@ def main():
         ('the same code under another file GUID: USBRT left alone', dxe, dict(store=lm(CARD), usbrt_variant='guid'), 0, True, MAC, True),
         ('USBRT image smaller than the sites: left alone', dxe, dict(store=lm(CARD), usbrt_variant='small'), 0, True, MAC, True),
         ('USBRT with no FilePath: left alone', dxe, dict(store=lm(CARD), usbrt_variant='nopath'), 0, True, MAC, True),
-        ('USBRT\'s StartUnit not stock: identify keeps its (10 ms) wait', dxe, dict(store=lm(CARD), usbrt_variant='start_changed'), 0, True, MAC, True),
         ('USBRT\'s reset arguments not stock: the reset left as it is, the rest changed', dxe, dict(store=lm(CARD), usbrt_variant='d_changed'), 0, True, MAC, True),
         ('one of USBRT\'s four timeouts not stock: none of them changed', dxe, dict(store=lm(CARD), usbrt_variant='e_changed'), 0, True, MAC, True),
         ('READ CAPACITY\'s dispatcher call not stock: no READ CAPACITY(16) stub', dxe, dict(store=lm(CARD), usbrt_variant='f_changed'), 0, True, MAC, True),
@@ -1267,7 +1253,7 @@ def main():
         if kw.get('nb_variant') == 'value':
             want_pclk = 'value'
         r = run(img, timing=timing, profile=profile and img is dxe, usbtrace=usbtrace and img is dxe, screen=screen and img is dxe,
-                startunit=startunit, **kw)
+                **kw)
         p = list(r['errors'])
         tv = r['tm_var']
         if timing and img is dxe and want_ev:                      # ReadyToBoot ran: the records published
@@ -1343,9 +1329,6 @@ def main():
                     want_ret = {0: a7 + u, 2: a5 + u, 3: 0x11 if u else 0x33}[kind]
                     if ret_ != want_ret:
                         p.append('transfer (kind %d) returned %s, not %#x' % (kind, ret_, want_ret))
-                for b_, u, port, ret_ in sc.get('rhs', []):
-                    if ret_ != (7 if u else 9):
-                        p.append('port status returned %s' % ret_)
                 for k_, b_ in enumerate([USB_AREA + 0x10000, USB_AREA + 0x20000]):
                     m_ = sc['rt_end'][k_]
                     if b_ in hooked:
@@ -1383,10 +1366,9 @@ def main():
                     render(exp, 280, 8, len(T_), 4)
                 smm = kw.get('fake_tsc_hi', 0) < 0x5d and drawable
                 fdh = [(b_, ret_, n_) for b_, ret_, n_ in sc.get('fd', []) if b_ in hooked]
-                if fdh and smm:                                   # (identify's wait, where it still waits, counts too)
+                if fdh and smm:                                   # (identify's wait counts too)
                     b_, ret_, n_ = fdh[-1]
-                    waited = sum(1 for k_, op, _, _ in (r.get('ident') or []) if op != 0x1b and
-                                 [USB_AREA + 0x10000, USB_AREA + 0x20000][k_] == b_)
+                    waited = sum(1 for k_, *_ in (r.get('ident') or []) if [USB_AREA + 0x10000, USB_AREA + 0x20000][k_] == b_)
                     render(exp, 8, 32, (ret_ - b_) & 0xfffff, 5)
                     render(exp, 88, 32, n_, 5)
                     render(exp, 184, 32, sum(1 for x in fdh if x[0] == b_) + waited, 6)
@@ -1409,11 +1391,9 @@ def main():
                 sn = [(b_, v or 0) for b_, v in sc.get('sense', []) if b_ in hooked]
                 if sv != 'sense_changed' and any(v != 0x20402 for _, v in sc.get('sense', [])):
                     p.append('REQUEST SENSE returned %s' % [hex(v) if v is not None else None for _, v in sc.get('sense', [])])
-                woke_hooked = sum(1 for k_, op, _, _ in (r.get('ident') or []) if op == 0x1b and
-                                  [USB_AREA + 0x10000, USB_AREA + 0x20000][k_] == (sn[-1][0] if sn else None))
-                if sn and smm:                                    # (StartUnit's own REQUEST SENSE counts too)
+                if sn and smm:
                     render(exp, 8, 104, sn[-1][1], 6)
-                    render(exp, 120, 104, len(sn) + woke_hooked, 6)
+                    render(exp, 120, 104, len(sn), 6)
                 ct = [x for x in sc.get('ctl', []) if x[0] in tabled]
                 FIELDS = ((8, 4), (88, 4), (168, 4), (248, 4), (328, 4), (408, 4), (488, 4), (568, 4))
                 # the status byte as each transfer starts and ends (the bulk fakes set it: EHCI 2, UHCI 4)
@@ -1440,7 +1420,7 @@ def main():
                             render(d, x, y, v, nd)
                 if ct and smm:                                    # lines 6-9: the last 4 transfers; 10: errors; 11: port status
                     draw_ring(exp, ring_at(len(ct), False), (128, 152, 176, 200))
-                    # (the error-log and port-status lines, y=224 and 248, are gone from 26.11.88: nothing there)
+                    # (nothing is drawn below the ring)
                     # while the 5th ran: all four ring lines; while the 7th (last) ran: the bottom line
                     for snap, n_, ys, row0 in (('saved_ring', 5, (128, 152, 176, 200), 128), ('saved_line', 7, (200,), 200)):
                         mid = {}
@@ -1508,11 +1488,7 @@ def main():
             wa = urt_ok and readable and uv != 'a_changed'
             wbc = urt_ok and readable and uv not in ('b_changed', 'c_changed')
             want = bytearray(o_)
-            su_ok = startunit and uv != 'start_changed'
-            if wa and su_ok:                                     # identify calls StartUnit instead of waiting
-                want[0x56c3:0x56c8] = b'\x56\x90\x90\x90\x90'
-                want[0x56cc:0x56d0] = struct.pack('<i', 0x4e84 - 0x56d0)
-            elif wa:
+            if wa:
                 want[0x56c4:0x56c8] = (0x29a).to_bytes(4, 'little')
             if wbc:
                 want[0x530f:0x5313] = (0x3415).to_bytes(4, 'little')
@@ -1559,13 +1535,10 @@ def main():
             want8 = {'big': 'ffffffff00000200', 'small': '003fffff00000200', 'fail': 'ffffffff00000200'}[case]
             if data8.hex() != want8:
                 p.append('copy %d %s: USBRT then reads %s, not %s' % (k_, case, data8.hex(), want8))
-        # identify's first step, run: START STOP UNIT (start, 10 s timeout) where StartUnit is called
+        # identify's first step, run: it only waits (A's 10 ms), and sends no command
         for k_, op, start_bit, tmo in r.get('ident', []) or []:
-            woke = urt_ok and not (k_ == 1 and uv == 'closed') and uv != 'a_changed' and startunit and uv != 'start_changed'
-            if woke and (op, start_bit, tmo) != (0x1b, 1, 0x2710 if uv == 'e_changed' else 20000):
-                p.append('copy %d: identify sent %02x/%d, timeout %d, not START UNIT' % (k_, op, start_bit, tmo))
-            if not woke and (op, tmo) != (0, 0):
-                p.append('copy %d: identify sent a command (%02x) although StartUnit is not patched in' % (k_, op))
+            if (op, tmo) != (0, 0):
+                p.append('copy %d: identify\'s first step sent a command (%02x)' % (k_, op))
         # MmcMediaDevice's CE-ATA check (ceata.inc)
         if want_cea == 'patched':
             if r['cea_changed'] != [(CEA_FN, 0x32), (CEA_FN + 1, 0xc0), (CEA_FN + 2, 0xc3)]:

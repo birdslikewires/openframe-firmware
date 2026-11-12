@@ -1,37 +1,38 @@
 ; screentrace.inc: development build only (--define TIMING --define PROFILE --define USBTRACE
 ; --define SCREEN). Shows on the screen, live, what the firmware's USB code is doing, so a boot that
-; hangs there (a 12 TB drive attached) can be read off the panel. Three lines of hex digits above
-; the boot logo (8x8 glyphs drawn 2x: 16 pixels a digit), straight into the framebuffer (safe with
-; interrupts off, which the console isn't):
+; stops there can be read off the panel: lines of hex digits over the boot logo (8x8 glyphs drawn
+; 2x: 16 pixels a digit), straight into the framebuffer (safe with interrupts off, which the console
+; isn't):
 ;   y=8   USB request (DXE, ut_trig): function/subfunction, start, time it took (both TSC >> 20,
 ;         0.79 ms units; the time stays 00000 while a request hasn't returned), how many so far
-;   y=32  USBRT FixedDelay (SMM): caller (RVA in USBRT), its argument (15 us ticks), calls so far
-;   y=56  USBRT mass-storage command (SMM): SCSI opcode, data length, commands so far; then (from
-;         26.11.87) how many READ CAPACITY(16)s usbrt.inc's F stub has sent
-;   y=80  the last 16 SCSI opcodes, oldest first (from 26.11.99)
+;   y=32  USBRT FixedDelay (SMM): caller (RVA in USBRT), its argument (15 us ticks), calls so far;
+;         redrawn for a new caller or every 256th call (each redraw costs ~1 ms, and polling loops
+;         call it every 60 us)
+;   y=56  USBRT mass-storage command (SMM): SCSI opcode, data length, commands so far, and how many
+;         READ CAPACITY(16)s usbrt.inc's F stub has sent
+;   y=80  the last 16 SCSI opcodes, oldest first
 ;   y=104 USBRT's REQUEST SENSE (SMM): the sense code it returned (ASCQ ASC key), how many so far
-;   y=128..200  the last 4 control transfers (setup requests) on either USB controller, oldest
-;         first (from 26.11.96): controller (30 EHCI, 10 UHCI) and USBRT's transfer status byte
-;         (gUsbData+0xe14: 1 bulk stall, 2 bulk timeout, 4 control stall) after it, as 4 digits;
-;         the device's address; wRequest (bRequest bmRequestType), wValue, wIndex, wLength; what
-;         the transfer function returned (bytes, 0 = failed); how long it took (TSC >> 20)
-;   (y=224 showed USBRT's error log in 26.11.96 and .89; dropped in .88 for F's stub's room)
-;   (y=248 showed the last root-port status check in 26.11.96 and .89; also dropped in .88: the
-;   ring shows each transfer's port. The port-status hooks stay, recording only.)
-; The control-transfer and port-status lines come from the controllers' function tables: USBRT
-; fills them when USB starts (long after the hooks go in), from relocated addresses in four
-; instructions, which then point at the blob instead.
-; The SMM lines come from two hooks put into each USBRT copy as it loads (while SMRAM is open):
-; FixedDelay's first instructions jump to a stub, and the call that sends a command block goes
-; to a stub first. The stub (st_blob, position-independent) is copied into USBRT's relocation
-; section, which nothing uses once the image is loaded: only if the image's relocations are
-; already applied (a relocated dword checked) and both hook sites are the stock bytes. The SMM
-; stubs only draw while the framebuffer block (st_fb, in this driver) carries its magic and the
-; TSC says less than about 5 minutes since power-on; ReadyToBoot clears the magic, so after a
-; normal boot they never touch it again (the image is freed later; the hooks stay, inert).
+;   y=128..200  the last 4 transfers on either USB controller, oldest first, each drawn as it
+;         starts (result EEEE) and again when it returns: kind (3x EHCI, 1x UHCI; x1 control,
+;         x2 bulk, x3 interrupt) with USBRT's transfer status byte (gUsbData+0xe14: 1 bulk stall,
+;         2 bulk timeout, 4 control stall) above it; the device's port << 8 | address; then the
+;         arguments: control wRequest (bRequest bmRequestType), wValue, wIndex, wLength; bulk
+;         direction, length, buffer; then what the transfer function returned (bytes; 0 failed)
+;         and how long it took (TSC >> 20)
+; The transfer lines come from the controllers' function tables: USBRT fills them when USB starts
+; (long after the hooks go in) from relocated addresses in six instructions, which then point at
+; the blob instead. The other SMM lines come from three hooks put into each USBRT copy as it loads
+; (while SMRAM is open): FixedDelay's and REQUEST SENSE's first instructions jump to the blob, and
+; the call that sends a command block goes to it first. The blob (st_blob, position-independent)
+; is copied into USBRT's relocation section, which nothing uses once the image is loaded (its last
+; F_SPACE bytes are usbrt.inc's F stub's): only if the image's relocations are already applied (a
+; relocated dword checked) and the hook sites are the stock bytes. The SMM code only draws while
+; the framebuffer block (st_fb, in this driver) carries its magic and the TSC says less than about
+; 5 minutes since power-on; ReadyToBoot clears the magic, so after a normal boot it never touches
+; the screen again (the image is freed later; the hooks stay, inert).
 
 ST_MAGIC        equ     'BLWF'
-ST_AREA         equ     0x9920                  ; USBRT's .reloc section (0x64c bytes)
+ST_AREA         equ     0x9920                  ; USBRT's .reloc section (to the image's end, 0x9f80)
 ST_AREA_LEN     equ     F_RVA - ST_AREA         ; (usbrt.inc's F stub has the rest of the section)
 ST_IMAGE_SIZE   equ     0x9f80
 
@@ -43,12 +44,10 @@ st_nfd:         dd 0                            ; FixedDelay calls
 st_ncbw:        dd 0                            ; command blocks sent
 st_nsense:      dd 0                            ; REQUEST SENSEs
 st_ops:         times 16 db 0                   ; the last 16 opcodes (a ring)
-st_orig:        times 8 dd 0                    ; the real functions, in st_tab's order (patched)
+st_orig:        times 6 dd 0                    ; the real functions, in st_tab's order (patched)
 st_ring:        times 4 * 8 dw 0                ; the last 4 transfers (words): kind | status << 8, port << 8 | address, arguments 3, 5, 4, 7, result, time
 st_fdlast:      dd 0                            ; the FixedDelay caller last drawn
-st_rhs:         dd 0, 0, 0                      ; the last port status check: controller, port, result
-st_nrhs:        dd 0                            ; (st_rhs + 12) port status checks so far
-st_nctl:        dd 0                            ; (st_rhs + 16) transfers so far
+st_nctl:        dd 0                            ; transfers so far
 
 ; st_gate: eax = the framebuffer block if drawing is allowed, else 0. In ebp = a .h label inside
 ; the blob: [ebp + st_fbblk - .h] must be addressable; callers pass the offset in ecx. Clobbers
@@ -237,43 +236,32 @@ st_sense_jmp:
         dd      0
 
 ; The controllers' function tables point here: control transfer (HC, dev, wRequest, wIndex, wValue,
-; buffer, length), root-port status (HC, port), bulk (HC, dev, direction, buffer, length) and
-; interrupt transfers, cdecl. Each pushes which one it is (bit 0: UHCI; bits 1-2: control, port
-; status, bulk, interrupt).
+; buffer, length), bulk (HC, dev, direction, buffer, length) and interrupt transfers, cdecl. Each
+; pushes which one it is (bit 0: UHCI; bits 1-2: control, bulk, interrupt).
 st_ctl_e:
         push    0
         jmp     st_wrap
 st_ctl_u:
         push    1
         jmp     st_wrap
-st_rhs_e:
+st_blk_e:
         push    2
         jmp     st_wrap
-st_rhs_u:
+st_blk_u:
         push    3
         jmp     st_wrap
-st_blk_e:
+st_int_e:
         push    4
         jmp     st_wrap
-st_blk_u:
-        push    5
-        jmp     st_wrap
-st_int_e:
-        push    6
-        jmp     st_wrap
 st_int_u:
-        push    7
+        push    5
 st_wrap:
         pushad                                  ; [esp+32] which, [esp+36] return, [esp+40] arguments
         call    .h
 .h:     pop     ebp
         mov     ecx, [esp + 32]
         movzx   eax, byte [ebp + (st_kinds - .h) + ecx]
-        mov     edx, ecx
-        and     edx, 6
-        cmp     edx, 2
-        je      .port
-        ; a transfer: recorded (and drawn) as it starts, result EEEE, then again when it returns
+        ; recorded (and drawn) as it starts, result EEEE, then again when it returns
         call    .g                              ; gUsbData, if there is one yet: its status byte
         jz      .ns
         mov     ah, [edx + 0xe14]
@@ -318,18 +306,7 @@ st_wrap:
         mov     cl, [edx + 0xe14]               ; the status byte after it
         mov     [ebx + 1], cl
 .end:   call    .draw
-        jmp     .out
-.port:  push    eax                             ; root-port status: shown when it returns
-        call    .orig
-        movzx   esi, ax
-        pop     eax
-        mov     [ebp + (st_rhs - .h)], eax
-        movzx   eax, byte [esp + 44]
-        mov     [ebp + (st_rhs - .h) + 4], eax
-        mov     [ebp + (st_rhs - .h) + 8], esi
-        inc     dword [ebp + (st_nrhs - .h)]
-        call    .draw
-.out:   popad
+        popad
         add     esp, 4
         ret
 ; .orig: calls the real function with the 7 arguments again (not all used by every function) and
@@ -388,7 +365,7 @@ st_wrap:
         cmp     edi, 4
         jb      .line
 .dr:    ret
-st_kinds:       db      0x31, 0x11, 0x30, 0x10, 0x32, 0x12, 0x33, 0x13  ; controller | 1 control, 2 bulk, 3 interrupt
+st_kinds:       db      0x31, 0x11, 0x32, 0x12, 0x33, 0x13  ; controller | 1 control, 2 bulk, 3 interrupt
 st_fields:                                      ; offset in the entry (words), x, digits
         db      0
         dw      8
@@ -431,8 +408,6 @@ st_g_last:      dd 0                            ; ...and what it last recorded
 st_tab:         ; the table fills: instruction RVA, the function it stores, its slot, the stub
         dd      0x7401, 0x6ee4, 0x25, st_ctl_e - st_blob     ; EHCI control transfer
         dd      0x2765, 0x20a7, 0x25, st_ctl_u - st_blob     ; UHCI control transfer
-        dd      0x73ec, 0x639e, 0x19, st_rhs_e - st_blob     ; EHCI root-port status
-        dd      0x2750, 0x151b, 0x19, st_rhs_u - st_blob     ; UHCI root-port status
         dd      0x7408, 0x70b2, 0x29, st_blk_e - st_blob     ; EHCI bulk transfer
         dd      0x276c, 0x26c1, 0x29, st_blk_u - st_blob     ; UHCI bulk transfer
         dd      0x740f, 0x72b7, 0x2d, st_int_e - st_blob     ; EHCI interrupt transfer
@@ -440,7 +415,7 @@ st_tab:         ; the table fills: instruction RVA, the function it stores, its 
 
 ; st_install(base, size): puts the hooks and the blob into a USBRT copy. 1 if done (2 = not
 ; relocated yet, 3 = a site not stock, 4 = not this USBRT: nothing done; 5 = all but the function
-; table hooks, their eight fill instructions not all stock). cdecl, keeps ebx/esi/edi.
+; table hooks, their six fill instructions not all stock). cdecl, keeps ebx/esi/edi.
 st_install:
         push    ebx
         push    esi
@@ -520,7 +495,7 @@ st_install:
         lea     ecx, [esi + 0x4816]
         sub     eax, ecx
         mov     [esi + 0x4812], eax
-        xor     ecx, ecx                        ; the function tables: all eight fills stock, or none changed
+        xor     ecx, ecx                        ; the function tables: all six fills stock, or none changed
 .tc:    mov     edx, ecx
         shl     edx, 4
         lea     edx, [edi + (st_tab - .h) + edx]
@@ -537,7 +512,7 @@ st_install:
         cmp     eax, [edx + 4]
         jne     .tno
         inc     ecx
-        cmp     ecx, 8
+        cmp     ecx, 6
         jb      .tc
         xor     ecx, ecx
 .ts:    mov     edx, ecx
@@ -552,7 +527,7 @@ st_install:
         mov     eax, [edx]
         pop     dword [esi + eax + 3]
         inc     ecx
-        cmp     ecx, 8
+        cmp     ecx, 6
         jb      .ts
         mov     eax, 1
         jmp     .out
