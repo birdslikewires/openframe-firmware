@@ -108,10 +108,11 @@ Exit status: 0 verified (or already there); 1 refused, nothing written (rebootin
 verified (**don't reboot**: run it again, it starts again from step 1). `FH_KO=` points it at an fh.ko
 with `/dev/fhp` if the installed one has none.
 
-Older scripts: `flash-to-block10-26.11.29.sh` moves a chip from 26.11.28 to 26.11.29 (block 10, then
-block 9); `flash-block9-*.sh` (26.11.16-26.11.28) wrote block 9 with the same exit statuses from
-26.11.28; scripts before 26.11.28 only printed `FLASH MISMATCH` and exited 0: check their output, not
-their status.
+Releases reach users through `tools/of-firmware-update` (from stock firmware or any earlier
+release; it writes block 10 the same way). After a release, regenerate its manifest with
+`tools/mkmanifest.py` (every release from 26.11.29 on, plus the stock images) and run
+`tools/test_of_firmware_update.sh` against it. The flash scripts for releases before 26.11.29
+were removed with those releases on 2026-11-13.
 
 ## 7. Flash (only with the owner's OK)
 

@@ -70,10 +70,12 @@ AMI's NVRAM code corrupts the store when that happens ([docs/nvram.md](docs/nvra
 
 Each version's image is a download on this repository's
 [Releases](https://github.com/birdslikewires/openframe-firmware/releases) page (26.11.29 is the
-latest); `releases/MD5SUMS` lists their md5s. The images are not kept in git. Releases from
-26.11.16 to 26.11.28 differ from the previous one in block 9 only; 26.11.29 moves our files to
-block 10 (blocks 9 and 10, once), and later releases differ in block 10 only. The scripts in
-`tools/flash/` write just those blocks, after checking the chip holds the previous release. Flashing
+first and latest); `releases/MD5SUMS` lists their md5s. The images are not kept in git. From
+26.11.29 our files sit alone in block 10 and releases differ in block 10 only.
+`tools/of-firmware-update` brings a unit to a release from stock O2, Verizon or Telstra firmware or
+an earlier release (26.11.29 on), and refuses anything else; `tools/flash/` holds the block-10 script each
+release is tested with. (Releases 26.11.15 to 26.11.28 were withdrawn on 2026-11-13: they were only
+ever on test units. Their record stays in [docs/releases.md](docs/releases.md).) Flashing
 the firmware hub can leave a board that doesn't boot; recovery means swapping the chip, so keep a
 dump of your own chip (`dd if=/dev/fh of=mine.bin bs=64k`) and read [docs/process.md](docs/process.md)
 first.
@@ -85,22 +87,22 @@ first.
 | `driver/` | BlwPlatformDxe (`ucode_late.asm` and includes), BlwMac.efi, BlwMmcFix.efi and MmcTest.efi, the one-off BlwLanMacDel.efi, FvDiag |
 | `tools/` | Image builders, emulators for the driver and apps, NVRAM and firmware-volume decoders, unit scripts |
 | `tools/of-firmware-update` | The updater: brings a unit from any firmware in `tools/firmware-manifest.txt` (releases from 26.11.29 on; stock O2, Verizon, Telstra) to a release, block 10 first, headers last once a unit has the block-10 layout; refuses firmware it doesn't know and saves a dump. `tools/mkmanifest.py` makes the manifest, `tools/test_of_firmware_update.sh` tests it on fake chips |
-| `tools/flash/` | The flash script for each release (block 9 up to 26.11.28; the move to block 10; block 10 from then on) |
+| `tools/flash/` | The block-10 flash script each release is tested with (headers last) |
 | `releases/` | Where release images go when downloaded or built (see its README); their md5s |
 | `docs/` | [process.md](docs/process.md) how releases are made and tested · [releases.md](docs/releases.md) every release · [nvram.md](docs/nvram.md) NVRAM and its rules · [history.md](docs/history.md) the original lab notebook |
 | `logo/` | The bird, as SVG and the rendered splash |
 | `mmtool/` | Module listings of the stock OpenFrame images surveyed |
 | `third_party/` | Intel's microcode file for the Atom Z5xx |
 
-Build the latest release from the one before it (needs `nasm`; see `tools/requirements.txt`):
+Build a release from the one before it (needs `nasm`; see `tools/requirements.txt`). For the next
+one after 26.11.29, with `<new>` its version (or `<new>-devN` for a development build):
 
 ```
 python3 -m venv venv && venv/bin/pip install -r tools/requirements.txt
-curl -fLo releases/of1-blw-26.11.28.bin https://github.com/birdslikewires/openframe-firmware/releases/download/26.11.28/of1-blw-26.11.28.bin
 curl -fLo releases/of1-blw-26.11.29.bin https://github.com/birdslikewires/openframe-firmware/releases/download/26.11.29/of1-blw-26.11.29.bin
-venv/bin/python -I tools/mkbase.py releases/of1-blw-26.11.28.bin 26.11.29 /tmp/base.bin --core-pe /tmp/core.pe --move-to-block10
+venv/bin/python -I tools/mkbase.py releases/of1-blw-26.11.29.bin <new> /tmp/base.bin --core-pe /tmp/core.pe
 venv/bin/python -I tools/build_ucode_driver.py /tmp/base.bin /tmp/out.bin --microcode third_party/intel-ucode/06-1c-02 \
-    --bios-version 26.11.29 --bios-date 11/13/2026 --check-with-core /tmp/core.pe \
-    --previous releases/of1-blw-26.11.28.bin --expect-blocks 9,10
-cmp /tmp/out.bin releases/of1-blw-26.11.29.bin
+    --bios-version <new> --bios-date MM/DD/YYYY --check-with-core /tmp/core.pe \
+    --previous releases/of1-blw-26.11.29.bin --expect-blocks 10
 ```
+The build refuses to write an image unless it differs from the previous release in block 10 alone.
