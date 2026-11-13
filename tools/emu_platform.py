@@ -1177,7 +1177,7 @@ def main():
     usbtrace = '--usbtrace' in sys.argv or screen                 # ... and -DUSBTRACE
     profile = '--profile' in sys.argv or usbtrace                 # ... with -DPROFILE as well
     timing = '--timing' in sys.argv or profile                    # the -DTIMING development build
-    no_cmd0 = '--no-cmd0' in sys.argv                             # a -DMMI_NO_CMD0 build: the CMD0 waits left alone
+    no_cmd0 = '--cmd0' not in sys.argv                            # only a -DMMI_CMD0 build changes the CMD0 waits
     files = [x for i, x in enumerate(sys.argv[1:], 1) if not x.startswith('--') and sys.argv[i - 1] != '--only']
     dxe, app = (open(p, 'rb').read() for p in files[:2])
     Z = bytes(6)

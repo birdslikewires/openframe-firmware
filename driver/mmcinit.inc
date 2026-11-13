@@ -1,26 +1,27 @@
-; mmcinit.inc: two shorter waits in the firmware's start-up of the OF1's internal memory (MMC),
-; changed in memory as the drivers load, like ceata.inc. About 0.4 s per boot in all.
+; mmcinit.inc: a shorter wait in the firmware's start-up of the OF1's internal memory (MMC),
+; changed in memory as the driver loads, like ceata.inc. The kernel starts about 0.1 s sooner
+; (5.24 s against 5.35 s from power-on on an OF1, booting from the internal memory).
 ;
 ; 1. SdHost (89C24DFA-A105-4E8D-AFE6-0BA7D40972AE, Intel EDK), SendCommand. After writing a
 ;    command it reads the error and normal interrupt status, and while the command (and any
 ;    data) isn't done it stalls 1000 us and counts one off the caller's timeout (ms). Commands
 ;    take microseconds, but the first read comes before that, so nearly every command paid a
-;    whole millisecond: about 360 ms per boot on an OF1. The loop now stalls 4 us a pass, and
-;    counts passes in a spare byte (the status word's upper byte, which the 16-bit reads leave
-;    alone and nothing tests), taking a millisecond off the timeout every 256 passes: no timeout
-;    is shorter than before. The two 'done' branches go straight to the response read, past
-;    the counter check that can only fail there for a timeout of 0. Checked against the stock
-;    loop under emulation (tools/emu_mmcinit.py).
+;    whole millisecond. The whole wait (0x4f6-0x54b) becomes a call of sdh_wait (sdh_wait.inc):
+;    10 us polls, no timeout shorter than before, and once the command is done a wait for the
+;    controller to free its command and data lines, which nothing in the stock driver waits for.
+;    -DMMI_INPLACE builds the in-place loop of 26.11.27-dev1 to -dev3 instead. Checked against
+;    the stock loop under emulation (tools/emu_mmcinit.py).
 ;
-; 2. MmcMediaDevice (DD223EF8-6D1B-490A-A53E-BA86FAAEB778): 50 ms after each CMD0 (GO_IDLE),
-;    once on the SD path and once on the MMC path: now 1 ms, as Linux waits (mmc_go_idle). The
-;    card's real start-up time is spent in the CMD1 polls that follow (5000 x 1 ms allowed).
+; 2. Only with -DMMI_CMD0 (a development build): MmcMediaDevice
+;    (DD223EF8-6D1B-490A-A53E-BA86FAAEB778) waits 1 ms, not 50, after each CMD0 (GO_IDLE), as
+;    Linux does (mmc_go_idle). Measured on an OF1 (26.11.27-dev5 against -dev4) it made no
+;    difference to when the kernel starts, so releases leave it alone.
 ;
 ; Only the exact stock code is changed (mmcinit_sig.inc, generated and checked by
 ; tools/mmcinit_sig.py), and only once per image.
 
 ; UINT32 sdh_patch_image(EFI_LOADED_IMAGE_PROTOCOL *Li): 1 if this is the stock SdHost and its
-; SendCommand wait now polls every 4 us. Keeps ebx, esi, edi.
+; SendCommand wait now goes through sdh_wait. Keeps ebx, esi, edi.
 sdh_patch_image:
 %ifdef MMI_CMD0_ONLY
         mov     eax, 1                          ; development build: SdHost left as it is
@@ -124,8 +125,8 @@ sdh_patch_image:
 ; UINT32 mmw_patch_image(EFI_LOADED_IMAGE_PROTOCOL *Li): 1 if this is the stock MmcMediaDevice
 ; and both waits after CMD0 are now 1 ms. Keeps ebx, esi, edi.
 mmw_patch_image:
-%ifdef MMI_NO_CMD0
-        mov     eax, 1                          ; development build: the CMD0 waits left as they are
+%ifndef MMI_CMD0
+        mov     eax, 1                          ; the CMD0 waits left as they are (see the top)
         ret
 %endif
         push    ebx
