@@ -3,7 +3,9 @@
 BirdsLikeWires releases for the OpenFrame 1, newest last. **26.11.15 to 26.11.28 were withdrawn on
 2026-11-13** (their images, tags and flash scripts removed): they were only ever on test units,
 which are updated by hand. Their entries stay below as the record; 26.11.29 is the first published
-release. Each is built on the one before
+release, taken off GitHub Releases when 26.11.30 came out (2026-11-13: only the latest is offered; its
+md5 stays in `releases/MD5SUMS` and its blocks in the updater's manifest, so a unit on it still updates,
+and it still builds byte for byte from the stock O2 image). Each is built on the one before
 (`tools/mkbase.py`). From 26.11.16 to 26.11.28 each differs from the one before in block 9 only;
 26.11.29 moves the version marker and BlwPlatformDxe to block 10 (blocks 9 and 10 change, once), and
 from then on releases differ in block 10 only. The images are on the
