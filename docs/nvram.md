@@ -52,8 +52,11 @@ All under `EC87D643-…`:
 given, `0x8` the stored MAC is a card's, `0x10` already stored (nothing written), `0x20` written,
 `0x40` SetVariable failed, `0x80` blocks 1-15 locked down, `0x100` lock-down didn't stick (nothing
 written), `0x200` read back and usable, `0x400` SMBIOS filled, `0x1000` no NIC, `0x2000` MAC0
-written and verified, `0x4000` MAC0 read back wrong. A normal boot reads `0x2619`; a boot that
-stored a new MAC `0x26a9`.
+written and verified, `0x4000` MAC0 read back wrong, `0x8000` not BirdsLikeWires firmware (the
+system table's FirmwareVendor isn't exactly "BirdsLikeWires"): nothing locked, written or applied.
+A normal boot reads `0x2619`; a boot that stored a new MAC `0x26a9`; stock firmware `0x8000`.
+Before that check (2026-11-13) a stick whose boot.nsh was written on a BirdsLikeWires unit, booted
+on a stock unit, locked the stock unit's flash down and stored the first unit's MAC in its NVRAM.
 
 BlwPlatformDxe only ever reads NVRAM: `BlwMac` (for the LAN MAC, serial number and UUID) and
 `MonotonicCounter` (for the SMBIOS boot count).

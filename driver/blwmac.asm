@@ -14,6 +14,12 @@
 ;     there's no card. It goes into the NIC as it is and becomes the UUID, but not a serial
 ;     number, since it isn't the hardware's.
 ;
+; 0. Does nothing unless this is BirdsLikeWires firmware (the system table's FirmwareVendor is
+;    exactly "BirdsLikeWires", as on every release from 26.11.18): no lock-down, no NVRAM write,
+;    no NIC or SMBIOS change, only the status variable (step 4, RAM only) with F_FOREIGN_FW. A
+;    stick's boot.nsh written on a BirdsLikeWires unit can be run on stock firmware: before this
+;    check that locked the stock unit's flash down and stored the other unit's MAC in its NVRAM
+;    (2026-11-13), which BirdsLikeWires firmware would then have used once flashed.
 ; 1. Finds the MAC (xx:xx:xx:xx:xx:xx or with '-') in the command line: LoadedImage->LoadOptions,
 ;    else the EDK1 shell's argv. Only the first is used. It must be unicast and not all zero.
 ; 2. If NVRAM variable BlwMac (under AMI's existing GUID EC87D643, NV+BS+RT, 6 bytes) already
@@ -50,6 +56,7 @@ F_SMBIOS_DONE   equ 0x0400          ; SMBIOS UUID (and for a card, serial number
 F_NIC_MISSING   equ 0x1000          ; no 10ec:8168 behind 00:1c.0, or no I/O BAR
 F_NIC_DONE      equ 0x2000          ; MAC0 written and read back correctly
 F_NIC_VERIFY    equ 0x4000          ; MAC0 read back wrong
+F_FOREIGN_FW    equ 0x8000          ; not BirdsLikeWires firmware: nothing done
 
 FWH_LOCK        equ 0xFFB00002      ; block-lock register of block 0; block n is + n * 0x10000
 NV_SIZE         equ 6               ; BlwMac: one MAC
@@ -78,6 +85,20 @@ entry:
         rep stosd
         call    .here
 .here:  pop     ebx                             ; ebx = PIC base
+
+; 0. only on BirdsLikeWires firmware
+        mov     eax, [ebp + 12]                 ; SystemTable
+        mov     esi, [eax + 0x18]               ; ->FirmwareVendor (CHAR16 *)
+        test    esi, esi
+        jz      .foreign
+        lea     edi, [ebx + (vendor_blw - entry.here)]
+        mov     ecx, VENDOR_LEN                 ; characters, with the terminating 0
+        repe cmpsw
+        je      .ours
+.foreign:
+        or      dword [ebp + L_STATUS], F_FOREIGN_FW
+        jmp     .report
+.ours:
 
 ; 1. the MAC on the command line
         mov     edi, F_ARG_LOADOPT
@@ -443,3 +464,6 @@ name_blwmac:
         dw      __utf16__('BlwMac'), 0
 name_status:
         dw      __utf16__('BlwMacStatus'), 0
+vendor_blw:
+        dw      __utf16__('BirdsLikeWires'), 0
+VENDOR_LEN      equ     ($ - vendor_blw) / 2

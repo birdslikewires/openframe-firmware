@@ -35,7 +35,7 @@ NIC_IO = 0xE000
 
 F = dict(ARG_LOADOPT=0x1, ARG_SHELLIF=0x2, ARG_NONE=0x4, HW_MAC=0x8, NV_SAME=0x10, NV_WRITTEN=0x20,
          NV_FAILED=0x40, LOCKDOWN_OK=0x80, LOCKDOWN_BAD=0x100, NV_READ_OK=0x200, SMBIOS_DONE=0x400,
-         NIC_MISSING=0x1000, NIC_DONE=0x2000, NIC_VERIFY=0x4000)
+         NIC_MISSING=0x1000, NIC_DONE=0x2000, NIC_VERIFY=0x4000, FOREIGN_FW=0x8000)
 
 
 def flags_str(v):
@@ -46,7 +46,7 @@ SMB = DATA + 0x4000              # SMBIOS entry point; the structure table follo
 
 
 def run(pe, loadopts=None, argv=None, store=None, lock_ignores=False, nic_present=True,
-        setvar_fails=False, nic_mac_readonly=False, smbios=None):
+        setvar_fails=False, nic_mac_readonly=False, smbios=None, vendor='BirdsLikeWires'):
     store = dict(store or {})
     errors, events = [], []
     mu = Uc(UC_ARCH_X86, UC_MODE_32)
@@ -76,6 +76,9 @@ def run(pe, loadopts=None, argv=None, store=None, lock_ignores=False, nic_presen
         mu.mem_write(addr, b)
         return addr + len(b)
     nxt = DATA + 0x1000
+    if vendor is not None:                                          # ST->FirmwareVendor
+        mu.mem_write(ST + 0x18, struct.pack('<I', nxt))
+        nxt = wstr(nxt, vendor)
     if loadopts is not None:
         lo = nxt
         nxt = wstr(lo, loadopts)
@@ -356,6 +359,21 @@ def main():
          LO | S | R | HW | SM | F['NIC_MISSING'], None, None, filled(CARD)),
         ('MAC0 does not take the write', dict(loadopts=cl, store=lm(CARD), nic_mac_readonly=True, smbios=NEW),
          LO | S | R | HW | SM | F['NIC_VERIFY'], None, None, filled(CARD)),
+        # Only on BirdsLikeWires firmware: elsewhere nothing locked, written or applied
+        ('stock O2 firmware (American Megatrends): nothing done', dict(loadopts=cl, vendor='American Megatrends'),
+         F['FOREIGN_FW'], None, None, 'none'),
+        ('stock firmware, a BlwMac already stored: not applied', dict(loadopts=cl, store=lm(CARD2), vendor='American Megatrends'),
+         F['FOREIGN_FW'], None, None, 'none'),
+        ('stock firmware with an SMBIOS table: left alone', dict(loadopts=cl, smbios=NEW, vendor='American Megatrends'),
+         F['FOREIGN_FW'], None, None, 'same'),
+        ('no FirmwareVendor at all: nothing done', dict(loadopts=cl, smbios=NEW, vendor=None),
+         F['FOREIGN_FW'], None, None, 'same'),
+        ('vendor "BirdsLike" (a prefix): nothing done', dict(loadopts=cl, smbios=NEW, vendor='BirdsLike'),
+         F['FOREIGN_FW'], None, None, 'same'),
+        ('vendor "BirdsLikeWires2" (longer): nothing done', dict(loadopts=cl, smbios=NEW, vendor='BirdsLikeWires2'),
+         F['FOREIGN_FW'], None, None, 'same'),
+        ('vendor "birdslikewires" (case): nothing done', dict(loadopts=cl, smbios=NEW, vendor='birdslikewires'),
+         F['FOREIGN_FW'], None, None, 'same'),
     ]
     bad = 0
     for name, kw, want, want_nv, want_mac, want_t1 in cases:
@@ -395,7 +413,7 @@ def main():
             probs.append('status variable %d bytes, expected 24' % len(st[1]))
         elif st:                            # the stored MAC and the LAN MAC made from it, if usable
             nv = r['store'].get(('BlwMac', BLW), (0, b''))[1]
-            ok = len(nv) == 6 and not nv[0] & 1 and any(nv)
+            ok = len(nv) == 6 and not nv[0] & 1 and any(nv) and not want & F['FOREIGN_FW']
             want_m = nv if ok else Z
             want_l = (nv if nv[0] & 2 else b'\x02' + nv[1:]) if ok else Z
             if (st[1][8:14], st[1][14:20]) != (want_m, want_l):
