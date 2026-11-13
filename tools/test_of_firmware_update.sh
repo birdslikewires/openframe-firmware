@@ -66,7 +66,7 @@ if [ -f $D/dev-block10.bin ]; then
 fi
 cp $OF_FW_IMAGE $(dirname $F)/img.bin; printf 'X' | dd of=$(dirname $F)/img.bin bs=1 seek=$((5 * 65536)) conv=notrunc status=none
 start $D/o2-stock.bin; run "an image whose blocks aren't in the manifest: refused" 1 same OF_FW_IMAGE=$(dirname $F)/img.bin
-md5sum $OF_FW_IMAGE | sed 's/^./0/' > $(dirname $F)/img2.bin.md5; cp $OF_FW_IMAGE $(dirname $F)/img2.bin
+md5sum $OF_FW_IMAGE | sed 's/^0/1/;t;s/^./0/' > $(dirname $F)/img2.bin.md5; cp $OF_FW_IMAGE $(dirname $F)/img2.bin   # (first digit changed)
 start $D/o2-stock.bin; run "an image that doesn't match its .md5: refused" 1 same OF_FW_IMAGE=$(dirname $F)/img2.bin
 
 rm -rf $(dirname $F) /tmp/of-firmware-update.*

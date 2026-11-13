@@ -440,3 +440,8 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
   kernel command line) and the kernel starts from it, SSH after 25 s; with the stick's `startup.nsh` renamed the
   internal memory is fs0 and the shell unchanged (the summary over the SMBIOS boot count, `2100E-0-00`); with no stick
   SqueezePlay starts as before.
+  Then **26.11.30 itself** (from dev6, block 10 headers last, verified; block 0 unchanged): with the stick's
+  `startup.nsh` the stick is fs0 (`map`), SSH after 25 s, DMI 26.11.30 11/13/2026, BootCount back to the real count.
+  `tools/test_of_firmware_update.sh` against 26.11.30 on the unit: all passed, including stock O2, Verizon and Telstra to
+  26.11.30 and 26.11.29 to 26.11.30 with power cuts after each step (its .md5-mismatch case now changes the first
+  digit whatever it is: 26.11.30's md5 starts with 0, which the old test turned into itself).
