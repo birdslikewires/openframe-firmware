@@ -115,7 +115,7 @@ their status.
 
 ## 7. Flash (only with the owner's OK)
 
-The unit needs the `fh` module (in openframe-kernel's `fh/` since 2026-11-13). OpenFrame kernels
+The unit needs the `fh` module (openframe-kernel's `fh/`). OpenFrame kernels
 built after 2026-11-10 include it, with `/dev/fhp` (needed by block-10 updates) from the first build
 after 2026-11-13; for another kernel build it out of tree against that kernel (its README), or point
 the scripts at a built copy with `FH_KO`. `fh` only reads unless it's loaded with `writable=1`, and even then refuses to change
