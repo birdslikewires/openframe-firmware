@@ -157,7 +157,10 @@ pushed commits, test-unit dumps and scripts carry those numbers. They are, in or
 | 26.11.88 | 26.11.26-dev8 | `usbrt.inc` F (READ CAPACITY(16)), G (CErr = 3) |
 | 26.11.87 | 26.11.26-dev9 | F's count on the screen: F fired, but its command lost its opcode |
 | - | 26.11.26-dev10 | `usbrt.inc` H (the command-block builder's clear) |
-| - | 26.11.27-dev1 | `mmcinit.inc`: SdHost's command wait polls every 4 us; MmcMediaDevice waits 1 ms, not 50, after CMD0 |
+| - | 26.11.27-dev1 | `mmcinit.inc`: SdHost's command wait polls every 4 us; MmcMediaDevice waits 1 ms, not 50, after CMD0 (its GRUB fallbacks were of-bootnsh's, fixed in openframe-linux of-bootnsh v26.11.8) |
+| - | 26.11.27-dev2 | `-DMMI_CMD0_ONLY`: just the CMD0 waits (no measurable gain on its one direct boot) |
+| - | 26.11.27-dev3 | `-DMMI_INPLACE`, 64 us polls (built, not flashed) |
+| - | 26.11.27-dev4 | `-DMMI_NO_CMD0`: SendCommand's wait replaced by the driver's `sdh_wait` (10 us polls, then waits for Command Inhibit (CMD/DAT) to clear, capped): kernel start 5.24 s vs 5.35 s |
 
 ```
 venv/bin/python -I tools/build_ucode_driver.py /tmp/base.bin /tmp/of1-blw-26.11.26-dev1-timing.bin \

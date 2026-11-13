@@ -22,6 +22,10 @@
 ; UINT32 sdh_patch_image(EFI_LOADED_IMAGE_PROTOCOL *Li): 1 if this is the stock SdHost and its
 ; SendCommand wait now polls every 4 us. Keeps ebx, esi, edi.
 sdh_patch_image:
+%ifdef MMI_CMD0_ONLY
+        mov     eax, 1                          ; development build: SdHost left as it is
+        ret
+%endif
         push    ebx
         push    esi
         push    edi
@@ -44,6 +48,7 @@ sdh_patch_image:
         add     esp, 8
         test    eax, eax
         jz      .no
+%ifdef MMI_INPLACE
         push    esi                             ; the loop's new bytes, then the two branches
         push    edi
         lea     edi, [esi + SDH_NEW_RVA]
@@ -70,6 +75,44 @@ sdh_patch_image:
         jne     .no
         cmp     byte [esi + SDH_BR2_RVA], SDH_BR2_NEW
         jne     .no
+%else
+        ; The glue in place of the whole wait: a call of sdh_wait (sdh_wait.inc), with SdHost's own
+        ; gBS pointer (the relocated operand at SDH_GBS_RVA, read before it is overwritten).
+        push    dword [esi + SDH_GBS_RVA]
+        push    esi
+        push    edi
+        lea     edi, [esi + SDH_GLUE_RVA]
+        mov     esi, [esp]                      ; .here
+        lea     esi, [esi + (sdh_glue - .here)]
+        mov     ecx, SDH_GLUE_LEN
+        cld
+        rep     movsb
+        pop     edi
+        pop     esi
+        pop     eax
+        mov     [esi + SDH_GLUE_RVA + SDH_GLUE_GBS], eax
+        lea     eax, [edi + (sdh_wait - .here)]
+        lea     ecx, [esi + SDH_GLUE_RVA + SDH_GLUE_CALL + 4]
+        sub     eax, ecx
+        mov     [esi + SDH_GLUE_RVA + SDH_GLUE_CALL], eax
+        push    esi                             ; check it landed: the template's fixed bytes...
+        push    edi
+        lea     edi, [esi + SDH_GLUE_RVA + SDH_GLUE_CALL + 4]
+        mov     esi, [esp]
+        lea     esi, [esi + (sdh_glue - .here) + SDH_GLUE_CALL + 4]
+        mov     ecx, SDH_GLUE_LEN - SDH_GLUE_CALL - 4
+        repe    cmpsb
+        pop     edi
+        pop     esi
+        jne     .no
+        cmp     byte [esi + SDH_GLUE_RVA], 0xa1 ; ...and the two filled in
+        jne     .no
+        lea     eax, [edi + (sdh_wait - .here)]
+        lea     ecx, [esi + SDH_GLUE_RVA + SDH_GLUE_CALL + 4]
+        add     ecx, [esi + SDH_GLUE_RVA + SDH_GLUE_CALL]
+        cmp     eax, ecx
+        jne     .no
+%endif
         mov     eax, 1
         jmp     .out
 .no:    xor     eax, eax
@@ -81,6 +124,10 @@ sdh_patch_image:
 ; UINT32 mmw_patch_image(EFI_LOADED_IMAGE_PROTOCOL *Li): 1 if this is the stock MmcMediaDevice
 ; and both waits after CMD0 are now 1 ms. Keeps ebx, esi, edi.
 mmw_patch_image:
+%ifdef MMI_NO_CMD0
+        mov     eax, 1                          ; development build: the CMD0 waits left as they are
+        ret
+%endif
         push    ebx
         push    esi
         push    edi
@@ -162,3 +209,4 @@ sdh_guid:                                       ; 89C24DFA-A105-4E8D-AFE6-0BA7D4
         db      0xaf, 0xe6, 0x0b, 0xa7, 0xd4, 0x09, 0x72, 0xae
 
 %include "mmcinit_sig.inc"
+%include "sdh_wait.inc"

@@ -85,6 +85,19 @@ SDH_FILE = G('89c24dfa-a105-4e8d-afe6-0ba7d40972ae')
 SDH_IMG = 0x64000000              # SdHost's loaded image (its SendCommand wait at +0x4f0-0x5a0)
 SDH_SIZE = 0xbea
 SDH_SIG = 0x4f0
+
+
+def _assemble_wait():
+    import os, subprocess, tempfile
+    drv = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'driver')
+    with tempfile.TemporaryDirectory() as d:
+        src, out = os.path.join(d, 'w.asm'), os.path.join(d, 'w.bin')
+        open(src, 'w').write('bits 32\norg 0\n%include "sdh_wait.inc"\n')
+        subprocess.run(['nasm', '-f', 'bin', '-w+error', '-I', drv + '/', '-o', out, src], check=True)
+        return open(out, 'rb').read()
+
+
+SDH_WAIT = _assemble_wait()       # sdh_wait as the driver carries it (its sdw_sick flag 0)
 # The USB trace build (-DUSBTRACE): SmmControl, UHCD and USBRT, all below 512 MB (the build only
 # follows pointers there).
 SMMC_GUID = G('8d12e231-c667-4fd1-98f2-2449a7e7b2e5')
@@ -1137,9 +1150,16 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     cea_changed = [(i, mmc_now[i]) for i in range(0x34c0) if mmc_now[i] != mmc_orig[i] and i not in mmw_bytes]
     mmw_changed = [(i, mmc_now[i]) for i in range(0x34c0) if mmc_now[i] != mmc_orig[i] and i in mmw_bytes]
     sdh_now = bytes(mu.mem_read(SDH_IMG, SDH_SIZE))
+    sdh_target = None                                             # what the glue's call reaches (mmcinit.inc)
+    if sdh_now[0x4f6] == 0xa1 and sdh_now[0x4fd] == 0xe8:
+        try:
+            t_ = SDH_IMG + 0x4f6 + 12 + struct.unpack_from('<i', sdh_now, 0x4f6 + 8)[0]
+            sdh_target = bytes(mu.mem_read(t_, len(SDH_WAIT)))
+        except Exception:
+            sdh_target = b''
     sdh_changed = [(i, sdh_now[i]) for i in range(SDH_SIZE) if sdh_now[i] != sdh_orig[i]]
     rt_now = [bytes(mu.mem_read(a, 0x9f80)) for a in rt_copies]
-    return dict(ident=tm_var.get('ident'), rcap=tm_var.get('rcap'), rt_orig=rt_orig, rt_now=rt_now, cea_changed=cea_changed, mmw_changed=mmw_changed, sdh_changed=sdh_changed, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
+    return dict(ident=tm_var.get('ident'), rcap=tm_var.get('rcap'), rt_orig=rt_orig, rt_now=rt_now, cea_changed=cea_changed, mmw_changed=mmw_changed, sdh_changed=sdh_changed, sdh_target=sdh_target, sdh_orig=sdh_orig, sdh_now=sdh_now, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
                 mmc_ev=mmc_ev, nb_ev=nb_ev, evs=evs, mmio_writes=mmio_writes, dpll=final,
                 pp_final=struct.unpack('<I', mu.mem_read(GMA_MMIO + 0x61204, 4))[0] if gma else None,
                 nb_after_notify=nb_bad.get('after_notify'), wrapped=wrapped, entry_bio=entry_bio, late_bio=late_bio, in_image=in_image,
@@ -1157,6 +1177,7 @@ def main():
     usbtrace = '--usbtrace' in sys.argv or screen                 # ... and -DUSBTRACE
     profile = '--profile' in sys.argv or usbtrace                 # ... with -DPROFILE as well
     timing = '--timing' in sys.argv or profile                    # the -DTIMING development build
+    no_cmd0 = '--no-cmd0' in sys.argv                             # a -DMMI_NO_CMD0 build: the CMD0 waits left alone
     files = [x for i, x in enumerate(sys.argv[1:], 1) if not x.startswith('--') and sys.argv[i - 1] != '--only']
     dxe, app = (open(p, 'rb').read() for p in files[:2])
     Z = bytes(6)
@@ -1316,7 +1337,7 @@ def main():
         mmw_patchable = (mmc_img != 'none' and kw.get('mmc_variant', 'stock') in ('stock', 'code', 'done') and
                          kw.get('mmw_variant', 'stock') == 'stock' and not kw.get('li_fails') and
                          (mmc_img == 'before' or not (kw.get('register_fails') or kw.get('create_event_fails'))))
-        want_mmw = kw.pop('want_mmw', 'patched' if img is dxe and want_ev and mmw_patchable else 'unpatched')
+        want_mmw = kw.pop('want_mmw', 'patched' if img is dxe and want_ev and mmw_patchable and not no_cmd0 else 'unpatched')
         sdh_img = kw.get('sdh_img', 'after')
         sdh_patchable = (sdh_img != 'none' and kw.get('sdh_variant', 'stock') == 'stock' and not kw.get('li_fails') and
                          (sdh_img == 'before' or not (kw.get('register_fails') or kw.get('create_event_fails'))))
@@ -1629,11 +1650,18 @@ def main():
         elif r['mmw_changed']:
             p.append('MmcMediaDevice waits changed at %s' % r['mmw_changed'][:6])
         if want_sdh == 'patched':
-            new = inc_bytes('mmcinit_sig.inc', 'sdh_new')
-            stock = sig_code('mmcinit_sig.inc', 'sdh_sig')[0x536 - SDH_SIG:0x536 - SDH_SIG + len(new)]
-            want_s = sorted([(0x52a, 0x59), (0x530, 0x53)] + [(0x536 + k, b) for k, b in enumerate(new) if b != stock[k]])
+            # The glue (mmcinit.inc): the template, SdHost's own gBS operand (from 0x532), and a call
+            # whose target holds exactly sdh_wait (sdh_wait.inc, assembled alone).
+            glue = bytearray(inc_bytes('mmcinit_sig.inc', 'sdh_glue'))
+            glue[1:5] = r['sdh_orig'][0x532:0x536]
+            glue[8:12] = r['sdh_now'][0x4f6 + 8:0x4f6 + 12]
+            want_img = bytearray(r['sdh_orig'])
+            want_img[0x4f6:0x4f6 + len(glue)] = glue
+            want_s = [(i, want_img[i]) for i in range(SDH_SIZE) if want_img[i] != r['sdh_orig'][i]]
             if r['sdh_changed'] != want_s:
                 p.append('SdHost changed %s, expected %s' % (r['sdh_changed'][:8], want_s[:8]))
+            elif r['sdh_target'] != SDH_WAIT:
+                p.append('the glue\'s call does not reach sdh_wait')
         elif r['sdh_changed']:
             p.append('SdHost changed at %s' % r['sdh_changed'][:6])
         if not timing and want_nbp == 'patched' and want_cea == 'patched' and kw.get('nb_img', 'before') == 'before' and \

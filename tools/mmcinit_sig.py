@@ -48,6 +48,14 @@ MMW_SITES = (0x170b, 0x187d)
 MMW_SIG = ((0x16f4, 0x1720), (0x1869, 0x1895))
 MMW_NEW_US = 1000
 
+# SdHost's new poll: POLL_US per pass, PASSES passes per millisecond of the caller's timeout
+# (PASSES * POLL_US >= 1000, so no timeout is shorter; PASSES divides 256: the byte counter
+# drops by 256 / PASSES a pass). 26.11.27-dev1 polled every 4 us (256 passes) and broke the
+# MMC's large reads and writes on hardware: the stock driver never waits for the controller's
+# command/data inhibit before the next command, and its 1 ms stall had covered that.
+POLL_US = 64
+PASSES = 16
+
 
 def pe_of(fw, guid):
     pe = pefile.PE(data=find_pe(fw, guid))
@@ -116,10 +124,14 @@ def sdhost(fw):
                 if t in (0x547, 0x531) and i.address not in SDH_BR + (0x524,):
                     raise SystemExit('0x%x also jumps to 0x%x' % (i.address, t))
 
-    new = bytes([0x6a, 0x04])                               # push 4
+    assert 256 % PASSES == 0 and PASSES * POLL_US >= 1000 and POLL_US < 128
+    new = bytes([0x6a, POLL_US])                            # push POLL_US
     new += bytes.fromhex('ff9088000000')                    # call [eax + 0x88]   (Stall)
     new += bytes([0x59])                                    # pop ecx
-    new += bytes.fromhex('fe4dfe')                          # dec byte [ebp - 2]
+    if PASSES == 256:
+        new += bytes.fromhex('fe4dfe')                      # dec byte [ebp - 2]
+    else:
+        new += bytes([0x80, 0x6d, 0xfe, 256 // PASSES])     # sub byte [ebp - 2], 256 / PASSES
     a = SDH_NEW + len(new)
     new += bytes([0x75, rel8(a, SDH_LOOP)])                 # jne loop
     new += bytes.fromhex('ff4d24')                          # dec dword [ebp + 0x24]
@@ -128,7 +140,16 @@ def sdhost(fw):
     new += b'\x90' * (SDH_NEW_END - SDH_NEW - len(new))     # nop: falls into the timeout path
     assert len(new) == SDH_NEW_END - SDH_NEW
     br = [rel8(b, SDH_DONE) for b in SDH_BR]
-    return dict(sig=runs(mem, relocs, *SDH_SIG), new=new, br=br, size=len(mem))
+    # The glue (from 26.11.27-dev4): the whole wait, 0x4f6-0x54b, becomes a call of the driver's
+    # sdh_wait(frame, BS), with SdHost's own gBS pointer (the relocated operand at 0x532, copied in
+    # at run time), then SdHost's own done (0x584), timeout (0x54c) and error (0x558) paths.
+    glue = bytearray(bytes.fromhex('a100000000' '50' '55' 'e800000000' '83c408' '85c0'))
+    for op, target in ((b'\x0f\x84', SDH_DONE), (b'\x0f\x88', 0x54c), (b'\xe9', 0x558)):
+        at = SDH_LOOP + len(glue) + len(op) + 4
+        glue += op + struct.pack('<i', target - at)
+    assert mem[0x558:0x55a] == bytes.fromhex('84c3'), 'error path does not start test al, bl'
+    glue += b'\xcc' * (SDH_NEW_END - SDH_LOOP - len(glue))      # int3: nothing jumps in here
+    return dict(sig=runs(mem, relocs, *SDH_SIG), new=new, br=br, glue=bytes(glue), size=len(mem))
 
 
 def mmcmedia(fw):
@@ -186,14 +207,22 @@ def main():
         f.write('MMW_NEW_US      equ     %d\n' % MMW_NEW_US)
         f.write('sdh_sig:\n')
         emit_runs(f, s['sig'])
+        f.write('SDH_GLUE_RVA    equ     0x%x\n' % SDH_LOOP)
+        f.write('SDH_GLUE_LEN    equ     %d\n' % len(s['glue']))
+        f.write('SDH_GLUE_GBS    equ     1               ; its gBS operand (copied from SdHost at 0x532)\n')
+        f.write('SDH_GLUE_CALL   equ     8               ; its call rel32, from SDH_GLUE_RVA + 12\n')
+        f.write('SDH_GBS_RVA     equ     0x532\n')
+        f.write('sdh_glue:\n')
+        for i in range(0, len(s['glue']), 16):
+            f.write('        db      ' + ', '.join('0x%02x' % x for x in s['glue'][i:i + 16]) + '\n')
         f.write('sdh_new:\n')
         f.write('        db      ' + ', '.join('0x%02x' % x for x in s['new']) + '\n')
         f.write('mmw_sig1:\n')
         emit_runs(f, w['sig'][0][1])
         f.write('mmw_sig2:\n')
         emit_runs(f, w['sig'][1][1])
-    print('SdHost loop 0x%x-0x%x: %d new bytes at 0x%x, done branches -> 0x%x; MmcMediaDevice 50 ms at 0x%x, 0x%x -> %d us'
-          % (SDH_LOOP, SDH_NEW_END, len(s['new']), SDH_NEW, SDH_DONE, MMW_SITES[0], MMW_SITES[1], MMW_NEW_US))
+    print('SdHost loop 0x%x-0x%x: %d new bytes at 0x%x (poll %d us, %d passes per ms), done branches -> 0x%x; MmcMediaDevice 50 ms at 0x%x, 0x%x -> %d us'
+          % (SDH_LOOP, SDH_NEW_END, len(s['new']), SDH_NEW, POLL_US, PASSES, SDH_DONE, MMW_SITES[0], MMW_SITES[1], MMW_NEW_US))
 
 
 if __name__ == '__main__':
