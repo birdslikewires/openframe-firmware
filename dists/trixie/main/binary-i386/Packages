@@ -1,0 +1,19 @@
+Package: openframe-firmware
+Version: 26.11.29-3
+Architecture: all
+Maintainer: OpenFrame Project <noreply@openbeak.net>
+Depends: bash, coreutils, kmod, python3, systemd
+Filename: pool/trixie/openframe-firmware_26.11.29-3_all.deb
+Size: 582664
+MD5sum: 3f95702d55d85c07e7e96878057e00f6
+SHA1: b0bf809bcfa010d41da8a416c5e78defccfb3f47
+SHA256: 42fe0442af1adfdda1326a777d0e292ffdc7b986e59d55bd0d51a9b55005ba81
+Section: admin
+Priority: optional
+Homepage: https://github.com/birdslikewires/openframe-firmware
+Description: BirdsLikeWires firmware for the OpenFrame 1 (26.11.29)
+ The OpenFrame 1 EFI firmware release 26.11.29, and of-firmware-update, which brings
+ the chip to it from stock O2, Verizon or Telstra firmware or an earlier
+ release at the next boot (of-firmware.service). Firmware it does not
+ recognise is left alone.
+

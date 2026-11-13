@@ -1,0 +1,24 @@
+Architectures: all i386
+Codename: trixie
+Components: main
+Date: Fri, 13 Nov 2026 17:18:55 +0000
+Description: OpenFrame firmware packages
+Label: OpenFrame Firmware
+Origin: OpenFrame
+Suite: trixie
+MD5Sum:
+ f3c82a6da93ebe690cb827e818de304e              195 Release
+ 5667496f39fb3db31e0471f79e386591              822 main/binary-i386/Packages
+ bafa631904906d71c93cda08a0e696cb              547 main/binary-i386/Packages.gz
+SHA1:
+ de54a32ee6399af38ffe54dba83193e0847df792              195 Release
+ 6fa71bd97499c9a0a2f82d061742d1694baf1b26              822 main/binary-i386/Packages
+ 98c28a9dc4b132f649ca8625e7ec1b9f2941c724              547 main/binary-i386/Packages.gz
+SHA256:
+ 3c6aa75c286320e2baf592a61f1e6e1d5cb56c61c6cf104ae50f53b42cc4e6c6              195 Release
+ a2ac6e561d3cb7014f8dad124820833f38b2c23e9ac1deb0f6755a23f07e7767              822 main/binary-i386/Packages
+ 67ca99e95119ab4942c01388b4399098c5a19d4c9bf86ce53a479a6e8d16711a              547 main/binary-i386/Packages.gz
+SHA512:
+ 5a02ca586062bbf860b4e69f4ce6eb643096a5b076138ea112dced16352c7ed991456c256a7d085c668d15f74b1f2c6e0e98f1726ec0373887c550fa9e5715d2              195 Release
+ d2767f2f51974b094d1b2d73f9f937b3e1ad1ea0f02f1b38c6693d88a83a85e0de0c998be412c7239a7fa2d784a82b590e9bb3a90a63de6fd103a24604ac0278              822 main/binary-i386/Packages
+ 000a1997c0785ad0f82b98e1557228cdfbaa644375f5690c33226cbe1d954031b16e8336a495d68a71b12c5c5efdc4188cd577e651c2370ed019a3c894a4d7de              547 main/binary-i386/Packages.gz
