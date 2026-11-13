@@ -46,6 +46,11 @@
 ; 9. USB: the firmware's USB code (USBRT, in SMM) waits 500 ms before a drive's first command,
 ;    twice per drive, and 1 s between "not ready yet" retries (usbrt.inc). From 26.11.26 both of
 ;    its copies are changed as they load: 10 ms, and 200 ms with five times the tries.
+; 10. Internal memory, once more: the SD host driver stalls 1 ms after nearly every command. From
+;    26.11.28 its wait goes through sdh_wait, which polls every 10 us and then waits for the
+;    controller to free its lines (mmcinit.inc, sdh_wait.inc): the kernel starts ~0.1 s sooner.
+; 11. Shell numbering: the MMC is connected at the boot manager's first stage, before USB has any
+;    disk, so it is always the shell's fs0 (mmc_pin.inc), from 26.11.28.
 ;
 ; Position-independent: data is reached through call/pop, so no relocations are needed.
 ; Assembled with `nasm -f bin`; build_ucode_driver.py wraps it in a PE32 image and an FFS
@@ -164,6 +169,9 @@ entry:
         call    notify_on
         lea     eax, [edi + (pclk_nb_guid - entry.here)]
         lea     ecx, [edi + (panel_notify - entry.here)]
+        call    notify_on
+        lea     eax, [edi + (pclk_nb_guid - entry.here)]   ; the same stage: the MMC connected
+        lea     ecx, [edi + (mmc_pin_notify - entry.here)] ; before any USB disk (mmc_pin.inc)
         call    notify_on
         mov     eax, [ebp + 12]                 ; NBDXE (writes the GOP's clock itself) and
         push    dword [eax + 0x3c]              ; MmcMediaDevice (no CE-ATA probe): patch them now
@@ -771,6 +779,7 @@ mac_ok: xor     eax, eax
 %include "panel_clock.inc"
 %include "ceata.inc"
 %include "mmcinit.inc"
+%include "mmc_pin.inc"
 %include "usbrt.inc"
 %include "img_patch.inc"
 %ifdef TIMING

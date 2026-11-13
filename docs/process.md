@@ -162,6 +162,7 @@ pushed commits, test-unit dumps and scripts carry those numbers. They are, in or
 | - | 26.11.27-dev3 | `-DMMI_INPLACE`, 64 us polls (built, not flashed) |
 | - | 26.11.27-dev4 | the CMD0 waits left alone: SendCommand's wait replaced by the driver's `sdh_wait` (10 us polls, then waits for Command Inhibit (CMD/DAT) to clear, capped): kernel start 5.24 s vs 5.35 s |
 | - | 26.11.27-dev5 | dev4 + the CMD0 waits (`-DMMI_CMD0` since): 5.24 s, no gain, so not in releases |
+| - | 26.11.27-dev6 | dev4 + `mmc_pin.inc` (MMC connected at the first BDS stage: always fs0); a TIMING build showed the MMC's file system at 2.34 s, the stick's at 4.08 s; kernel start 5.24-5.25 s |
 
 ```
 venv/bin/python -I tools/build_ucode_driver.py /tmp/base.bin /tmp/of1-blw-26.11.26-dev1-timing.bin \

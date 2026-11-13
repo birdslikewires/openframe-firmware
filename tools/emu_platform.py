@@ -67,9 +67,15 @@ JUNK = bytes.fromhex('b8fcffffffff')
 BS_OK = {0x28: 'GetMemoryMap', 0x2c: 'AllocatePool', 0x30: 'FreePool', 0x6c: 'InstallConfigurationTable',
          0xac: 'LocateProtocol', 0xb8: 'CalculateCrc32', 0xc4: 'CreateEventEx', 0x34: 'CreateEvent',
          0x44: 'CloseEvent', 0x58: 'HandleProtocol', 0x60: 'RegisterProtocolNotify', 0xa8: 'LocateHandleBuffer',
-         0x88: 'Stall', 0x64: 'LocateHandle'}
+         0x88: 'Stall', 0x64: 'LocateHandle', 0x90: 'ConnectController'}
 BLOCKIO = G('964e5b21-6459-11d2-8e39-00a0c969723b')
 NB_STAGE = G('ef9a3971-c1a0-4a93-bd40-5aa165f2dc3a')   # the boot-manager stage NBDXE's clock write waits for
+PCIIO_GUID = G('4cf5b200-68b8-4ca5-9eec-b23e3f50029a')
+PCI_READ_STUB = STUBS + 0x40      # every fake PciIo's Pci.Read (mmc_pin.inc)
+PCIIO_AREA = STUBS + 0x2800       # the fake PciIo instances, 0x80 apart
+# The OF1's PCI functions, as (bus, dev, fn, class dword at 0x08): graphics, three SD hosts (08/05), USB, the NIC.
+OF1_PCI = ((0, 0x02, 0, 0x03000007), (0, 0x1e, 0, 0x08050101), (0, 0x1e, 1, 0x08050101), (0, 0x1e, 2, 0x08050101),
+           (0, 0x1d, 7, 0x0c032002), (1, 0x00, 0, 0x02000006))
 GMA_MMIO = 0xd0100000             # the graphics device's BAR0 (registers)
 GOP_DPLL, NB_DPLL, GOP_FP = 0xd8100003, 0xd8027203, 0x00021005
 LOADED_IMAGE = G('5b1b31a1-9562-11d2-8e3f-00a0c969723b')
@@ -240,7 +246,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         bio=(), bio_late=(), create_event_fails=False, register_fails=False,
         gma=True, gma_decode=True, gma_bar=GMA_MMIO, fp=GOP_FP, nb_stage=True, nb_value=NB_DPLL, nb_signals=1,
         app_dpll=NB_DPLL, nb_img='before', nb_variant='stock', li_fails=False, timing=False,
-        mmc_img='after', mmc_variant='stock', mmw_variant='stock', sdh_img='after', sdh_variant='stock', profile=False, tm_ticks=70, usbtrace=False, uhcd_variant='stock', usbrt_variant='stock', usbrt_img='after', screen=False, screen_variant='stock',
+        mmc_img='after', mmc_variant='stock', mmw_variant='stock', sdh_img='after', sdh_variant='stock', pin_variant='of1', profile=False, tm_ticks=70, usbtrace=False, uhcd_variant='stock', usbrt_variant='stock', usbrt_img='after', screen=False, screen_variant='stock',
         fake_tsc_hi=0):
     """gma: the Poulsbo graphics device at 00:02.0 (8086:8108), its memory decode and BAR0.
     The GOP has set pipe B's PLL (fp, GOP_DPLL). nb_stage: after the entry, the boot manager's
@@ -527,6 +533,13 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         mu.mem_write(RT + off, struct.pack('<I', RT_STUB + off))
     mu.mem_write(MP + 8, struct.pack('<I', STUBS + 0x10))     # StartupAllAPs
     mu.mem_write(STUBS, b'\xc3' * 0x3000)
+    pci_devs = [] if pin_variant == 'none' else [d for d in OF1_PCI if not (pin_variant == 'no_sd' and d[3] >> 16 == 0x0805)]
+    if pin_variant == 'other_class':                              # an 08/05 function with another class code
+        pci_devs = [(b_, d_, f_, (0x08800001 if c_ >> 16 == 0x0805 else c_)) for b_, d_, f_, c_ in pci_devs]
+    for i_, _ in enumerate(pci_devs):
+        mu.mem_write(PCIIO_AREA + 0x80 * i_, b'\0' * 0x80)
+        mu.mem_write(PCIIO_AREA + 0x80 * i_ + 0x18, struct.pack('<I', PCI_READ_STUB))
+    pin = dict(stage=0, conns=[])
     pool = {'next': POOL + 4}
     ev = {}
     cpu = dict(rev=cpu_rev, msr8b=cpu_rev << 32, ap=None, phase='entry')
@@ -558,6 +571,17 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         ret = lambda v: uc.reg_write(UC_X86_REG_EAX, v)
         if addr == STUBS + 0x10:                                   # MP->StartupAllAPs
             cpu['ap'] = (a[1], a[5])
+            return ret(0)
+        if addr == PCI_READ_STUB:                                  # PciIo->Pci.Read(This, Width, Offset, Count, Buf)
+            i_ = (a[0] - PCIIO_AREA) // 0x80
+            if not (0 <= i_ < len(pci_devs)) or (a[0] - PCIIO_AREA) % 0x80:
+                errors.append('Pci.Read on %#x' % a[0])
+                return ret(0x80000002)
+            if (a[1], a[2], a[3]) != (2, 0x08, 1):
+                errors.append('Pci.Read width %d offset %#x count %d' % (a[1], a[2], a[3]))
+            if pin_variant == 'read_fails':
+                return ret(0x80000007)
+            uc.mem_write(a[4], struct.pack('<I', pci_devs[i_][3]))
             return ret(0)
         if addr == SMMC_TRIG:                                      # SmmControl->Trigger, the real one
             tm_var.setdefault('trig_calls', []).append(tuple(a[:5]))
@@ -665,12 +689,16 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 else:
                     evs[a[0]]['closed'] = True
                 return ret(0)
+            if off == 0x90:                                        # ConnectController(h, drivers, path, recursive)
+                pin['conns'].append((a[0], a[1], a[2], a[3], pin['stage']))
+                return ret(0)
             if off == 0xa8:                                        # LocateHandleBuffer(ByProtocol, guid, 0, &n, &buf)
                 g = bytes(uc.mem_read(a[1], 16))
-                if a[0] != 2 or g not in (BLOCKIO, LOADED_IMAGE):
-                    errors.append('LocateHandleBuffer other than ByProtocol BlockIo/LoadedImage')
+                if a[0] != 2 or g not in (BLOCKIO, LOADED_IMAGE, PCIIO_GUID):
+                    errors.append('LocateHandleBuffer other than ByProtocol BlockIo/LoadedImage/PciIo')
                     return ret(0x80000002)
                 hs = ([0xB10000 + i for i in range(len(bios))] if g == BLOCKIO
+                      else ([] if pin_variant == 'locate_fails' else [0xB40000 + i for i in range(len(pci_devs))]) if g == PCIIO_GUID
                       else [] if li_fails else [0xB20000 + i for i in range(len(images))])
                 if not hs:
                     return ret(0x8000000E)
@@ -690,6 +718,9 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                     return ret(0)
                 if g == LOADED_IMAGE and 0 <= a[0] - 0xB20000 < len(images):
                     uc.mem_write(a[2], struct.pack('<I', images[a[0] - 0xB20000]))
+                    return ret(0)
+                if g == PCIIO_GUID and 0 <= a[0] - 0xB40000 < len(pci_devs):
+                    uc.mem_write(a[2], struct.pack('<I', PCIIO_AREA + 0x80 * (a[0] - 0xB40000)))
                     return ret(0)
                 errors.append('HandleProtocol on %#x' % a[0])
                 return ret(0x80000003)
@@ -1083,6 +1114,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             v = rd(NB_IMG + NB_IMM) if nb_img != 'none' else nb_value
             nb_wrote.append(v)
             mu.mem_write(GMA_MMIO + 0x6018, struct.pack('<I', v))
+            pin['stage'] += 1
             notify(NB_STAGE, 'NB-stage notify')
         nb_bad['after_notify'] = rd(GMA_MMIO + 0x6018)
         nb_bad['wrote'] = nb_wrote
@@ -1159,7 +1191,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             sdh_target = b''
     sdh_changed = [(i, sdh_now[i]) for i in range(SDH_SIZE) if sdh_now[i] != sdh_orig[i]]
     rt_now = [bytes(mu.mem_read(a, 0x9f80)) for a in rt_copies]
-    return dict(ident=tm_var.get('ident'), rcap=tm_var.get('rcap'), rt_orig=rt_orig, rt_now=rt_now, cea_changed=cea_changed, mmw_changed=mmw_changed, sdh_changed=sdh_changed, sdh_target=sdh_target, sdh_orig=sdh_orig, sdh_now=sdh_now, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
+    return dict(ident=tm_var.get('ident'), rcap=tm_var.get('rcap'), rt_orig=rt_orig, rt_now=rt_now, pin_conns=pin['conns'], pin_devs=pci_devs, cea_changed=cea_changed, mmw_changed=mmw_changed, sdh_changed=sdh_changed, sdh_target=sdh_target, sdh_orig=sdh_orig, sdh_now=sdh_now, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
                 mmc_ev=mmc_ev, nb_ev=nb_ev, evs=evs, mmio_writes=mmio_writes, dpll=final,
                 pp_final=struct.unpack('<I', mu.mem_read(GMA_MMIO + 0x61204, 4))[0] if gma else None,
                 nb_after_notify=nb_bad.get('after_notify'), wrapped=wrapped, entry_bio=entry_bio, late_bio=late_bio, in_image=in_image,
@@ -1290,6 +1322,13 @@ def main():
         ('MmcMediaDevice check already skipped: left as it is', dxe, dict(store=lm(CARD), mmc_variant='done'), 0, True, MAC, True),
         ('MmcMediaDevice before the driver, NBDXE changed: MMC patched, NBDXE left alone', dxe, dict(store=lm(CARD), mmc_img='before', nb_variant='code', want_nbp='unpatched', want_pclk='notify'), 0, True, MAC, True),
         ('LoadedImage notify not registered: MmcMediaDevice loading later is left alone', dxe, dict(nb_img='none', store=lm(CARD), register_fails=True, want_mmc_ev='closed', want_pclk='rtb'), 0, True, MAC, True),
+        # mmc_pin.inc: the SD host controllers connected at the first stage signal
+        ('MMC pin: no PCI functions at all: nothing connected', dxe, dict(store=lm(CARD), pin_variant='none'), 0, True, MAC, True),
+        ('MMC pin: no SD host controller: nothing connected', dxe, dict(store=lm(CARD), pin_variant='no_sd'), 0, True, MAC, True),
+        ('MMC pin: class 08 but not subclass 05: nothing connected', dxe, dict(store=lm(CARD), pin_variant='other_class'), 0, True, MAC, True),
+        ('MMC pin: Pci.Read fails: nothing connected, pool freed', dxe, dict(store=lm(CARD), pin_variant='read_fails'), 0, True, MAC, True),
+        ('MMC pin: LocateHandleBuffer(PciIo) fails: nothing connected', dxe, dict(store=lm(CARD), pin_variant='locate_fails'), 0, True, MAC, True),
+        ('MMC pin: stage signalled twice: connected once', dxe, dict(nb_img='none', store=lm(CARD), nb_signals=2), 0, True, MAC, True),
         ('USB trace build: another UHCD layout, requests not decoded', dxe, dict(store=lm(CARD), uhcd_variant='other'), 0, True, MAC, True),
         # USBRT (usbrt.inc): both copies load after the driver in every scenario (as on an OF1).
         ('USBRT: both copies get the shorter waits as they load', dxe, dict(store=lm(CARD)), 0, True, MAC, True),
@@ -1642,6 +1681,15 @@ def main():
                 p.append('MmcMediaDevice changed at %s, expected its CE-ATA check to start xor al, al; ret' % r['cea_changed'][:6])
         elif r['cea_changed']:
             p.append('MmcMediaDevice changed at %s' % r['cea_changed'][:6])
+        # The MMC pinned to fs0 (mmc_pin.inc): at the first stage signal, every SD host controller
+        # (class 08/05) connected recursively, once, and nothing else; never in an app build or without
+        # the stage notify.
+        stage_seen = img is dxe and want_ev and kw.get('gma', True) and kw.get('nb_stage', True) and not kw.get('register_fails') \
+            and not kw.get('create_event_fails')
+        want_conns = [(0xB40000 + i_, 0, 0, 1, 1) for i_, d_ in enumerate(r['pin_devs']) if d_[3] >> 16 == 0x0805] \
+            if stage_seen and kw.get('pin_variant', 'of1') not in ('read_fails', 'locate_fails') else []
+        if r['pin_conns'] != want_conns:
+            p.append('ConnectController calls %s, expected %s' % (r['pin_conns'], want_conns))
         # MmcMediaDevice's waits after CMD0 and SdHost's command wait (mmcinit.inc)
         want_w = [(a + k, b) for a in MMW_SITES for k, b in enumerate(struct.pack('<I', 1000)) if b != struct.pack('<I', 50000)[k]]
         if want_mmw == 'patched':
