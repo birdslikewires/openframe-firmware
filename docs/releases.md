@@ -33,6 +33,7 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
 | 26.11.27 | Boots with a USB drive attached that the stock firmware hung on (a 4 TB disk in an ASMedia caddy): five fixes to the firmware's USB code |
 | 26.11.28 | The kernel starts ~0.1 s sooner from the internal memory (SdHost's command wait); the internal memory is always the shell's fs0 |
 | 26.11.29 | Safer updates: the version marker and BlwPlatformDxe move to block 10, alone, so later updates never erase stock code and a power cut during one leaves a unit that boots |
+| 26.11.30 | A USB drive with `startup.nsh` is the shell's fs0, ahead of the internal memory: it boots itself, whatever is on the internal memory |
 
 ## Releases (2026-11-08)
 
@@ -409,3 +410,33 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
   319, microcode 0x217, panel 60 Hz, kernel start 5.60 s, fsck clean; blocks 1-15 `ff693ddc…`; NVRAM diff = one 14-byte
   MonotonicCounter record; lock registers 01. **Before an end user needs a block-10 update**, the kernel package must
   ship an fh with `/dev/fhp` (openframe-firmware `0745fbc` on); the move from 26.11.28 needs only plain fh.
+
+- **26.11.30 (OF1)**, `of1-blw-26.11.30.bin` (md5 `0f93094d…`), block 10 only vs 26.11.29. **A USB drive with boot
+  files is the source of truth.** Found testing the openframe-linux image on the unknown Joggler (SqueezePlay on its
+  internal memory): the stick's `boot.nsh` ran the internal memory's `grub.efi` and SqueezePlay started. The shell looks
+  for `startup.nsh`, and for any file named without a volume, along its path (`.`, then each device's `\efi\tools`,
+  `\efi\boot` and root, in device order; the current directory is unset at start-up), and its "consistent mapping"
+  sorts devices (`map`, comparison at RVA 0xB7C5 of the shell, FV file C57AD6B7) with any device whose path has a USB or
+  SCSI node after every other. So with a file system on the internal memory, a stick was never fs0: the internal
+  memory's `startup.nsh` decided whether the stick got a turn (`mmc_pin.inc` in 26.11.28 only made that certain; before
+  it a stick was fs0 when the internal memory came up too late for the shell's mapping). **Now**, at ReadyToBoot
+  BlwPlatformDxe opens `\startup.nsh` (read-only) on every file system on a USB disk; if one has it, the shell's sort
+  is turned round for this boot: as the shell loads (LoadedImage notify; at once if already loaded) and only if its FV
+  file GUID, ImageSize and all 120 bytes of the comparison are the stock ones, the two 7-byte sequences that set the
+  key's "later" bit for USB/SCSI (`neg; sbb; and 2`) become `test; sete; add`, setting it for every other device, read
+  back after. USB drives then sort first: the drive is fs0, its `startup.nsh` runs, its files are found first. No such
+  drive and nothing is touched. `driver/usb_first.inc`; `tools/emu_usbfirst.py` runs it against fake disks and the real
+  shell decompressed from 26.11.29 (after which the shell's own comparison must order USB first, or the shell be
+  unchanged byte for byte), 26 scenarios in the release and timing builds, 28 mutations all caught
+  (`tools/mutations/usb_first.py`); `emu_platform.py` 124/124. Three earlier attempts, development builds only, are in
+  process.md's table: reconnecting the internal memory's partitions (DisconnectController returns success and leaves
+  them), moving the drive in the core's handle list, then in SimpleFileSystem's list of instances (both took, read
+  back, and changed nothing: the shell sorts). Hashes: block 10 `f113e646…`, blocks 1-9 and 11-15 `d11b766a…`, blocks
+  1-15 `3217da93…`; builds byte for byte from the stock O2 image (`build_patched.py --block10`). Fake-chip suite for
+  `flash-block10-26.11.30.sh` (from 26.11.29) passed, including power cuts after each step.
+  On hardware (the unknown Joggler, SqueezePlay on its internal memory, a stick with the openframe-linux image; every
+  boot a clean shutdown and a power cut by the plug), 26.11.30-dev6 (the same code, timing build): with the stick's
+  `startup.nsh` the stick is fs0 (the shell's own `map`, written to the stick), its `startup.nsh` runs (a marker on the
+  kernel command line) and the kernel starts from it, SSH after 25 s; with the stick's `startup.nsh` renamed the
+  internal memory is fs0 and the shell unchanged (the summary over the SMBIOS boot count, `2100E-0-00`); with no stick
+  SqueezePlay starts as before.

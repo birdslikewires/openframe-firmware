@@ -71,6 +71,7 @@ BS_OK = {0x28: 'GetMemoryMap', 0x2c: 'AllocatePool', 0x30: 'FreePool', 0x6c: 'In
 BLOCKIO = G('964e5b21-6459-11d2-8e39-00a0c969723b')
 NB_STAGE = G('ef9a3971-c1a0-4a93-bd40-5aa165f2dc3a')   # the boot-manager stage NBDXE's clock write waits for
 PCIIO_GUID = G('4cf5b200-68b8-4ca5-9eec-b23e3f50029a')
+SFS_GUID = G('964e5b22-6459-11d2-8e39-00a0c969723b')   # usb_first.inc (tested on its own: emu_usbfirst.py)
 PCI_READ_STUB = STUBS + 0x40      # every fake PciIo's Pci.Read (mmc_pin.inc)
 PCIIO_AREA = STUBS + 0x2800       # the fake PciIo instances, 0x80 apart
 # The OF1's PCI functions, as (bus, dev, fn, class dword at 0x08): graphics, three SD hosts (08/05), USB, the NIC.
@@ -694,6 +695,9 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 return ret(0)
             if off == 0xa8:                                        # LocateHandleBuffer(ByProtocol, guid, 0, &n, &buf)
                 g = bytes(uc.mem_read(a[1], 16))
+                if a[0] == 2 and g == SFS_GUID:                    # no file systems here
+                    events.append('LocateHandleBuffer(SimpleFileSystem)')
+                    return ret(0x8000000E)
                 if a[0] != 2 or g not in (BLOCKIO, LOADED_IMAGE, PCIIO_GUID):
                     errors.append('LocateHandleBuffer other than ByProtocol BlockIo/LoadedImage/PciIo')
                     return ret(0x80000002)
@@ -1394,6 +1398,12 @@ def main():
             d = tv.get('data', b'')
             recs = [(d[i:i + 4], struct.unpack_from('<I', d, i + 4)[0]) for i in range(0, len(d) - 7, 8)]
             tags = [t for t, _ in recs]
+            # usb_first.inc's records follow ReadyToBoot's (here: no file systems, UE0E), ending UFSn
+            last = max([i for i, t in enumerate(tags) if t == b'RTB '] or [-1])
+            uf = tags[last + 1:] if last >= 0 else []
+            if uf and (not uf[-1].startswith(b'UFS') or not all(t[:1] in (b'U', b'N') for t in uf)):
+                p.append('records after ReadyToBoot not usb_first\'s: %s' % uf)
+            tags = tags[:last + 1] if uf else tags
             if not tv.get('n') or len(d) % 8 or not recs:         # once per ReadyToBoot; the last has all
                 p.append('BlwBootTimes written %s times, %d bytes' % (tv.get('n'), len(d)))
             elif tags[0] != b'ENTR' or tags[-1] != b'RTB ' or b'ENTE' not in tags:
@@ -1819,6 +1829,8 @@ def main():
                 fixed = raw[:12] + raw[14:21] + raw[23:]
                 if fixed != struct.pack('<BBHHHHH', 17, 0x1B, 4, 3, 0xFFFE, 64, 64) + bytes([0x0B, 0, 1, 0, 0x13, 0x80, 0, 0, 0, 0, 0]) or ss != ['Onboard']:
                     p.append('Type 17 fixed fields %s %s' % (raw.hex(), ss))
+            if timing and img is dxe and want_ev and want_count:
+                want_count = 'BootCount: x00---0-00'        # usb_first.inc's summary (no file systems here)
             if 11 in d and d[11][1] != [want_count]:
                 p.append('Type 11 %s, expected %r' % (d[11][1], want_count))
             if img is dxe and r['entry_smbios'] and [ss for t, _, _, ss in r['entry_smbios']['structs'] if t == 11] != [[PLACEHOLDER]]:

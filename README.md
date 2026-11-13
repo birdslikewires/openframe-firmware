@@ -54,7 +54,13 @@ block 10, so updates write that block only and never erase stock code.
     (`driver/mmc_pin.inc`);
   - from 26.11.29, lives alone in block 10 with the version marker: an update erases and rewrites
     only that block, headers last, so a power cut during one leaves a unit that boots (without our
-    changes until the update is run again).
+    changes until the update is run again);
+  - from 26.11.30, a USB drive with boot files is the source of truth: if a FAT volume on a USB
+    drive has `\startup.nsh`, the shell makes it fs0, ahead of the internal memory, so its own
+    `startup.nsh` runs and its files are found first, whatever is on the internal memory. The
+    shell's device-naming sort always put USB drives after the internal memory; for that boot it
+    is turned round, in memory as the shell loads (14 bytes of its code, only where they are the
+    stock ones). A USB drive without `startup.nsh` changes nothing (`driver/usb_first.inc`).
 - **BlwMac.efi** (`driver/blwmac.asm`) runs from `boot.nsh` and keeps that MAC in NVRAM, writing
   only when it changes. openframe-linux ships it and feeds it the right MAC.
 - **BlwMmcFix.efi** (`driver/blwmmcfix.asm`) is the same MMC workaround as a shell app, for

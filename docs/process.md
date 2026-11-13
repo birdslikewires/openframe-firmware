@@ -199,6 +199,12 @@ some pushed commits, test-unit dumps and scripts carry those numbers. They are, 
 | - | 26.11.27-dev4 | the CMD0 waits left alone: SendCommand's wait replaced by the driver's `sdh_wait` (10 us polls, then waits for Command Inhibit (CMD/DAT) to clear, capped): kernel start 5.24 s vs 5.35 s |
 | - | 26.11.27-dev5 | dev4 + the CMD0 waits (`-DMMI_CMD0` since): 5.24 s, no gain, so not in releases |
 | - | 26.11.27-dev6 | dev4 + `mmc_pin.inc` (MMC connected at the first BDS stage: always fs0); a TIMING build showed the MMC's file system at 2.34 s, the stick's at 4.08 s; kernel start 5.24-5.25 s |
+| - | 26.11.30-dev1 | `usb_first.inc`, first try: the internal memory's partitions disconnected and connected again after a USB drive with `startup.nsh` (no change on hardware) |
+| - | 26.11.30-dev2 | dev1, TIMING with `usb_first`'s records (unreadable: this kernel has no efivarfs) |
+| - | 26.11.30-dev3 | dev2 + its summary over the SMBIOS boot count: everything ran and returned success, nothing changed (DisconnectController leaves the partitions) |
+| - | 26.11.30-dev4 | the drive moved in the core's handle list (read back first; the shell's numbering unchanged) |
+| - | 26.11.30-dev5 | the drive moved in SimpleFileSystem's list of instances (read back first; unchanged: the shell sorts its mapping) |
+| - | 26.11.30-dev6 | the shell's mapping sort turned round in memory: the stick is fs0 (became 26.11.30) |
 
 ```
 venv/bin/python -I tools/build_ucode_driver.py /tmp/base.bin /tmp/of1-blw-26.11.26-dev1-timing.bin \
@@ -209,4 +215,8 @@ venv/bin/python -I tools/emu_platform.py /tmp/tdxe.efi /tmp/tapp.efi --timing
 #   cp /sys/firmware/efi/efivars/BlwBootTimes-ec87d643-eba4-4bb5-a1e5-3f3e36b20da9 /tmp/bt
 venv/bin/python -I tools/boot_times.py /tmp/bt /tmp/of1-blw-26.11.26-dev1-timing.bin
 ```
-A release build without `--define` is unchanged by any of this (byte for byte).
+A release build without `--define` is unchanged by any of this (byte for byte). OpenFrame kernels are
+built without efivarfs, so BlwBootTimes can't be read on them; the TIMING build also writes a 10-character
+summary of `usb_first.inc` over the SMBIOS Type 11 boot count, which can (`sudo cat
+/sys/firmware/dmi/tables/DMI | tr -c '[:print:]' '\n' | grep BootCount`; usb_first.inc says what each
+character means).

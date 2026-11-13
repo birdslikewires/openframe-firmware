@@ -52,6 +52,9 @@
 ;    controller to free its lines (mmcinit.inc, sdh_wait.inc): the kernel starts ~0.1 s sooner.
 ; 11. Shell numbering: the MMC is connected at the boot manager's first stage, before USB has any
 ;    disk, so it is always the shell's fs0 (mmc_pin.inc), from 26.11.28.
+; 12. ...unless a USB drive has boot files: from 26.11.30, at ReadyToBoot, if a file system on a USB
+;    disk has \startup.nsh, it is moved to the front of the core's list of file systems, so the
+;    drive is the shell's fs0 and its startup.nsh and files come first (usb_first.inc).
 ;
 ; Position-independent: data is reached through call/pop, so no relocations are needed.
 ; Assembled with `nasm -f bin`; build_ucode_driver.py wraps it in a PE32 image and an FFS
@@ -540,7 +543,11 @@ rtb_notify:
         push    dword [eax + 0x3c]              ; BootServices
         call    mmc_fix_install                 ; any MMC BlockIo the notify didn't see
         call    panel_clock                     ; in case the panel-clock notify ran too early
+        call    usb_first                       ; a USB drive with startup.nsh: the shell's fs0
 %ifdef TIMING
+        shl     eax, 24                         ; development build: 'UFSn', n disks reconnected
+        add     eax, 'UFS0'
+        call    tm_rec
         push    dword [esp + 4]                 ; development build: hand the records over
         call    tm_publish
 %ifdef USBTRACE
@@ -781,6 +788,7 @@ mac_ok: xor     eax, eax
 %include "ceata.inc"
 %include "mmcinit.inc"
 %include "mmc_pin.inc"
+%include "usb_first.inc"
 %include "usbrt.inc"
 %include "img_patch.inc"
 %ifdef TIMING
