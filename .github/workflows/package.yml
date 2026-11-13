@@ -1,0 +1,193 @@
+name: package-build-publish
+run-name: package build and publish
+
+# Builds the openframe-firmware package from the latest GitHub Release's image and publishes it
+# to the apt repository on the repo branch (firmware.openbeak.net). The package carries the
+# image, of-firmware-update and its manifest, and of-firmware.service, which updates the chip at
+# the next boot. It is built from the published image itself, checked against releases/MD5SUMS,
+# and only after of-firmware-update has passed its fake-chip tests against it.
+
+on:
+  release:
+    types: [published]
+  push:
+    branches: [main]
+    paths:
+      - 'tools/of-firmware-update'
+      - 'tools/firmware-manifest.txt'
+      - 'tools/test_of_firmware_update.sh'
+      - 'package/**'
+      - 'releases/MD5SUMS'
+      - '.github/workflows/package.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-package
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0    # the package revision counts commits since the release
+
+      - name: Install tools
+        run: sudo apt-get install -y apt-utils dpkg-dev
+
+      # Version: the release, then a revision counting the commits since its tag that changed
+      # what the package holds (26.11.29-1, -2, ...).
+      - name: Fetch the release image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=$(gh release view --repo "${{ github.repository }}" --json tagName -q .tagName)
+          gh release download "${TAG}" --repo "${{ github.repository }}" -p "of1-blw-${TAG}.bin" -D work
+          IMG="work/of1-blw-${TAG}.bin"
+          WANT=$(awk -v f="of1-blw-${TAG}.bin" '$2 == f { print $1 }' releases/MD5SUMS)
+          GOT=$(md5sum "${IMG}" | cut -d' ' -f1)
+          [ -n "${WANT}" ] && [ "${WANT}" = "${GOT}" ] || { echo "${IMG}: md5 ${GOT}, releases/MD5SUMS says '${WANT}'"; exit 1; }
+          git fetch --tags --quiet
+          REV=$(( $(git rev-list --count "${TAG}..HEAD" -- tools/of-firmware-update tools/firmware-manifest.txt package) + 1 ))
+          echo "TAG=${TAG}" >> $GITHUB_ENV
+          echo "IMG=${IMG}" >> $GITHUB_ENV
+          echo "VERSION=${TAG}-${REV}" >> $GITHUB_ENV
+          echo "Release ${TAG} (md5 ${GOT}), package version ${TAG}-${REV}"
+
+      # The updater against fake chips: from each stock firmware (the openbeak.net collection,
+      # checked against its md5s) to this release, with power cuts and failing writes.
+      - name: Test of-firmware-update
+        run: |
+          T=work/test; mkdir -p "${T}"
+          cp tools/of-firmware-update tools/firmware-manifest.txt tools/mkmanifest.py "${T}/"
+          cp "${IMG}" "${T}/of1-blw-${TAG}.bin"
+          E=https://openbeak.net/openframe/firmware/efi
+          get() { curl -fsSL --retry 3 -o "${T}/$2" "$E/$1"; echo "$3  ${T}/$2" | md5sum -c --quiet; }
+          get of1_efi_o2.img o2-stock.bin eeb32d85e8b8c63ccc00429e083a88b8
+          get of1_efi_openpeak_verizon.img verizon.bin dbfeeb9e7e943ee0c46986995d4b383c
+          get of1_efi_telstra.img telstra.bin 8903c18f882cbde3b98c793f7e827a40
+          get untested/op1.rom op1.rom 7fde2784f48486570e7c5927c2a9b71e
+          sudo bash tools/test_of_firmware_update.sh "${T}" "${TAG}"
+
+      - name: Build the package
+        run: |
+          PKG="work/openframe-firmware_${VERSION}_all"
+          L="${PKG}/usr/lib/openframe-firmware"
+          mkdir -p "${PKG}/DEBIAN" "${L}" "${PKG}/usr/local/sbin" "${PKG}/usr/lib/systemd/system"
+          install -m 644 "${IMG}" "${L}/of1-blw.bin"
+          (cd "${L}" && md5sum of1-blw.bin > of1-blw.bin.md5 && chmod 644 of1-blw.bin.md5)
+          install -m 644 tools/firmware-manifest.txt "${L}/manifest.txt"
+          install -m 755 package/of-firmware-boot "${L}/of-firmware-boot"
+          install -m 755 tools/of-firmware-update "${PKG}/usr/local/sbin/of-firmware-update"
+          install -m 644 package/of-firmware.service "${PKG}/usr/lib/systemd/system/of-firmware.service"
+          install -m 755 package/postinst package/prerm "${PKG}/DEBIAN/"
+          find "${PKG}" -type d -exec chmod 755 {} +
+          printf 'Package: openframe-firmware\nVersion: %s\nArchitecture: all\nSection: admin\nPriority: optional\nMaintainer: OpenFrame Project <noreply@openbeak.net>\nDepends: bash, coreutils, kmod, python3, systemd\nHomepage: https://github.com/birdslikewires/openframe-firmware\nDescription: BirdsLikeWires firmware for the OpenFrame 1 (%s)\n The OpenFrame 1 EFI firmware release %s, and of-firmware-update, which brings\n the chip to it from stock O2, Verizon or Telstra firmware or an earlier\n release at the next boot (of-firmware.service). Firmware it does not\n recognise is left alone.\n' \
+            "${VERSION}" "${TAG}" "${TAG}" > "${PKG}/DEBIAN/control"
+          dpkg-deb --build --root-owner-group "${PKG}"
+          dpkg-deb --info "${PKG}.deb" | sed -n '1,20p'
+          dpkg-deb --contents "${PKG}.deb"
+          echo "DEB=${PKG}.deb" >> $GITHUB_ENV
+
+      - name: Ensure repo branch exists
+        run: |
+          git fetch origin repo:refs/remotes/origin/repo 2>/dev/null || {
+            git checkout --orphan repo-init && git rm -rfq . &&
+            echo firmware.openbeak.net > CNAME && git add CNAME &&
+            git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" \
+              commit -qm "apt repository" && git push origin repo-init:repo && git checkout -q "${GITHUB_SHA}"; }
+
+      - name: Checkout repo branch
+        uses: actions/checkout@v7
+        with:
+          ref: repo
+          path: apt-repo
+
+      # Every OpenFrame apt repository is signed with one key; anything else stops here.
+      - name: Import GPG signing key
+        env:
+          KEY: ${{ secrets.APT_SIGNING_KEY_OPENFRAME }}
+        run: |
+          echo "${KEY}" | gpg --batch --import
+          FPR=$(gpg --batch --with-colons --list-secret-keys | awk -F: '/^sec/ { s = 1; next } s && /^fpr/ { print $10; s = 0 }')
+          [ "${FPR}" = 179C4F02E55F4096D690F3BFED801B683FCE8553 ] || { echo "Signing key ${FPR} is not the OpenFrame apt key"; exit 1; }
+          echo "GPG_KEY_ID=${FPR}" >> $GITHUB_ENV
+
+      - name: Update apt repository
+        run: |
+          codename=trixie
+          mkdir -p "apt-repo/pool/${codename}" "apt-repo/dists/${codename}/main/binary-i386"
+          rm -f "apt-repo/pool/${codename}/"openframe-firmware_*.deb
+          cp "${DEB}" "apt-repo/pool/${codename}/"
+          cd apt-repo
+          dpkg-scanpackages "pool/${codename}" > "dists/${codename}/main/binary-i386/Packages"
+          gzip -kf "dists/${codename}/main/binary-i386/Packages"
+          apt-ftparchive \
+            -o APT::FTPArchive::Release::Origin="OpenFrame" \
+            -o APT::FTPArchive::Release::Label="OpenFrame Firmware" \
+            -o APT::FTPArchive::Release::Suite="${codename}" \
+            -o APT::FTPArchive::Release::Codename="${codename}" \
+            -o APT::FTPArchive::Release::Architectures="all i386" \
+            -o APT::FTPArchive::Release::Components="main" \
+            -o APT::FTPArchive::Release::Description="OpenFrame firmware packages" \
+            release "dists/${codename}" > "dists/${codename}/Release"
+          gpg --batch --yes --local-user "${GPG_KEY_ID}!" \
+            --detach-sign --armor -o "dists/${codename}/Release.gpg" "dists/${codename}/Release"
+          gpg --batch --yes --local-user "${GPG_KEY_ID}!" \
+            --clearsign -o "dists/${codename}/InRelease" "dists/${codename}/Release"
+          gpg --export "${GPG_KEY_ID}" > key.gpg
+          echo firmware.openbeak.net > CNAME
+
+      - name: Generate directory listing
+        run: |
+          cd apt-repo
+          {
+            printf '<!DOCTYPE html>\n<html>\n'
+            printf '<head><title>Index of /</title></head>\n'
+            printf '<body>\n<h1>Index of /</h1><hr><pre>'
+
+            human_size() {
+              local size=$1
+              if [ "$size" -ge 1073741824 ]; then
+                echo "$((size / 1073741824))G"
+              elif [ "$size" -ge 1048576 ]; then
+                echo "$((size / 1048576))M"
+              elif [ "$size" -ge 1024 ]; then
+                echo "$((size / 1024))K"
+              else
+                echo "$size"
+              fi
+            }
+
+            for f in pool/*/*.deb; do
+              [ -f "$f" ] || continue
+              fname=$(basename "$f")
+              fsize=$(stat -c '%s' "$f")
+              fdate=$(date -d "@$(stat -c '%Y' "$f")" '+%d-%b-%Y %H:%M')
+              hsize=$(human_size "$fsize")
+              namelen=${#fname}
+              padlen=$((51 - namelen))
+              [ ${padlen} -lt 1 ] && padlen=1
+              padding=$(printf '%*s' ${padlen} '')
+              printf '\n<a href="%s">%s</a>%s%s  %8s' \
+                "${f}" "${fname}" "${padding}" "${fdate}" "${hsize}"
+            done
+
+            printf '\n</pre><hr></body>\n</html>\n'
+          } > index.html
+
+      - name: Push apt repository
+        run: |
+          cd apt-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && echo "No changes to commit" || \
+            git commit -m "apt: openframe-firmware ${VERSION} ($(git -C .. rev-parse --short HEAD))"
+          git push origin repo

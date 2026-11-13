@@ -1,0 +1,15 @@
+#!/bin/sh
+
+# openframe-firmware prerm: on removal, stop updating the firmware at boot. The firmware on the
+# chip stays as it is.
+
+set -e
+
+case "$1" in
+	remove|purge)
+		systemctl disable --quiet of-firmware.service 2>/dev/null || true
+		rm -f /var/lib/openframe-firmware/pending /var/lib/openframe-firmware/lock-reboot
+	;;
+esac
+
+exit 0

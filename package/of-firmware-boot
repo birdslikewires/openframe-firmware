@@ -1,0 +1,75 @@
+#!/bin/bash
+
+## of-firmware-boot v26.11.1 (13th November 2026)
+##  Run at boot by of-firmware.service while a firmware update is pending (the package's
+##  postinst marks one). Before the login prompt, provisioning or any interface starts, it
+##  brings the firmware to the packaged release with of-firmware-update, telling the person
+##  at the screen not to switch off, and restarts on the new firmware. Firmware it doesn't
+##  recognise is left alone (a dump is kept in /var/lib/openframe-firmware) and the boot
+##  carries on. If a write won't verify, it keeps trying and never lets the boot carry on:
+##  switching off then could leave a unit that won't start.
+
+PENDING=/var/lib/openframe-firmware/pending
+LOCKREBOOT=/var/lib/openframe-firmware/lock-reboot
+UPDATE=/usr/local/sbin/of-firmware-update
+TTY=/dev/tty1
+
+log() { echo "of-firmware-boot: $*"; }
+screen() {
+	# Plymouth's splash would hide the console: leave it and show the text.
+	command -v plymouth >/dev/null && plymouth --ping 2>/dev/null && plymouth quit 2>/dev/null
+	[ -w $TTY ] && { printf '\033c'; printf '%s\n' "$@"; } > $TTY
+	log "$*"
+}
+
+[ -f $PENDING ] || exit 0
+
+$UPDATE --check; rc=$?
+case $rc in
+	0) log "the firmware is up to date"; rm -f $PENDING $LOCKREBOOT; exit 0 ;;
+	3) log "firmware not recognised: left alone"; rm -f $PENDING $LOCKREBOOT; exit 0 ;;
+	5) ;;
+	*) log "could not check the firmware (exit $rc): will try at the next boot"; exit 0 ;;
+esac
+
+NOTICE=("" "  Updating the firmware." "" "  Please don't switch off or unplug the OpenFrame." \
+	"  This takes less than a minute, then it restarts by itself." "")
+tries=0
+while :; do
+	screen "${NOTICE[@]}"
+	tries=$((tries + 1))
+	$UPDATE 2>&1 | tee -a $TTY; rc=${PIPESTATUS[0]}
+	case $rc in
+		0)
+			rm -f $PENDING $LOCKREBOOT
+			screen "" "  The firmware is up to date. Restarting..." ""
+			sleep 3
+			systemctl reboot
+			exit 0 ;;
+		4)
+			# Flash locked until the next reset (BlwMac.efi stored a MAC this boot). Once.
+			if [ -f $LOCKREBOOT ]; then
+				rm -f $LOCKREBOOT
+				log "flash still locked after a restart: will try at the next boot"
+				exit 0
+			fi
+			touch $LOCKREBOOT
+			screen "" "  Restarting to update the firmware..." ""
+			sleep 2
+			systemctl reboot
+			exit 0 ;;
+		3)
+			rm -f $PENDING $LOCKREBOOT
+			log "firmware not recognised: left alone"
+			exit 0 ;;
+		1)
+			log "update refused, nothing written (see above): will try at the next boot"
+			exit 0 ;;
+		*)
+			# 2: a write didn't verify. Never carry on booting: keep trying.
+			screen "" "  The firmware update has not finished." "" \
+				"  DO NOT SWITCH OFF OR UNPLUG THE OPENFRAME." \
+				"  Trying again (attempt $((tries + 1)))..." ""
+			[ $tries -lt 3 ] && sleep 5 || sleep 60 ;;
+	esac
+done

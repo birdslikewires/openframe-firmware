@@ -3,8 +3,8 @@
 # firmware, with interrupted and failing writes. Run as root on a Linux box (GNU dd), with:
 #   D/ of-firmware-update, firmware-manifest.txt, mkmanifest.py, of1-blw-TARGET.bin,
 #      o2-stock.bin, verizon.bin, telstra.bin, op1.rom (from openbeak.net/openframe/firmware/efi/),
-#      old-release.bin (any earlier BirdsLikeWires release: not in the manifest, so refused),
-#   and optionally a block-10 development build as dev-block10.bin
+#   and optionally old-release.bin (any earlier BirdsLikeWires release: not in the manifest, so
+#   refused) and a block-10 development build as dev-block10.bin
 #     sudo bash test_of_firmware_update.sh D TARGET-VERSION
 # Prints one line per case; exits non-zero if any case fails.
 set -u
@@ -27,11 +27,13 @@ run() {
 start() { cp "$1" $F; }
 
 for s in o2-stock verizon telstra; do start $D/$s.bin; run "$s -> $V" 0 target; done
-start $D/old-release.bin; run "an earlier release (not in the manifest): refused" 3 same
+[ -f $D/old-release.bin ] && { start $D/old-release.bin; run "an earlier release (not in the manifest): refused" 3 same; }
 start $OF_FW_IMAGE; run "$V -> $V: nothing to do" 0 same
-OLDV=$(grep -aoE 'BirdsLikeWires OpenFrame EFI [0-9.]+ \(OF1\)' $D/old-release.bin | head -1 | awk '{print $4}')
-python3 -I $D/mkmanifest.py $(dirname $F)/old-manifest.txt $OLDV=$D/old-release.bin $V=$OF_FW_IMAGE >/dev/null
-start $OF_FW_IMAGE; run "$V with an older image ($OLDV): left alone" 0 same OF_FW_IMAGE=$D/old-release.bin OF_FW_MANIFEST=$(dirname $F)/old-manifest.txt
+if [ -f $D/old-release.bin ]; then
+	OLDV=$(grep -aoE 'BirdsLikeWires OpenFrame EFI [0-9.]+ \(OF1\)' $D/old-release.bin | head -1 | awk '{print $4}')
+	python3 -I $D/mkmanifest.py $(dirname $F)/old-manifest.txt $OLDV=$D/old-release.bin $V=$OF_FW_IMAGE >/dev/null
+	start $OF_FW_IMAGE; run "$V with an older image ($OLDV): left alone" 0 same OF_FW_IMAGE=$D/old-release.bin OF_FW_MANIFEST=$(dirname $F)/old-manifest.txt
+fi
 [ -f $D/dev-block10.bin ] && { start $D/dev-block10.bin; run "block-10 dev build -> $V (headers last)" 0 target; }
 
 start $D/op1.rom; run "op1: boot block differs, refused" 3 same

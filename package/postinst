@@ -1,0 +1,18 @@
+#!/bin/sh
+
+# openframe-firmware postinst
+#  Marks a firmware update as pending and enables of-firmware.service, which does it at the
+#  next boot, before anything else starts (of-firmware-boot). Nothing is flashed here: apt
+#  can run at any time, perhaps unattended, and the flash wants a quiet unit and a screen.
+
+set -e
+
+case "$1" in
+	configure)
+		mkdir -p /var/lib/openframe-firmware
+		touch /var/lib/openframe-firmware/pending
+		systemctl enable --quiet of-firmware.service 2>/dev/null || true
+	;;
+esac
+
+exit 0

@@ -1,0 +1,19 @@
+[Unit]
+Description=OpenFrame firmware update
+Documentation=https://github.com/birdslikewires/openframe-firmware
+# Only while an update is pending (the openframe-firmware package marks one).
+ConditionPathExists=/var/lib/openframe-firmware/pending
+# Before the login prompt, first-boot provisioning (of-provision runs after
+# getty@tty1) and any interface: the flash comes first.
+Before=getty@tty1.service of-provision.service display-manager.service systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/openframe-firmware/of-firmware-boot
+# A flash that won't verify keeps trying and never times out (of-firmware-boot).
+TimeoutStartSec=infinity
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
