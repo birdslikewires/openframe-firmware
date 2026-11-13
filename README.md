@@ -43,7 +43,12 @@ boot block are the stock ones.
     an ASMedia caddy): the same USB code now sends a real Bulk-Only reset, gives transfers 20 s,
     asks READ CAPACITY(16) for drives over 2 TiB (and no longer wipes the opcode of a 16-byte
     command), and stops retrying a device that answers with garbage after three tries
-    (`driver/usbrt.inc`).
+    (`driver/usbrt.inc`);
+  - from 26.11.28, starts the kernel about 0.1 s sooner from the internal memory: the stock SD
+    host driver stalled 1 ms after nearly every command; its wait now polls every 10 us and then
+    waits for the controller to be free, as Linux does (`driver/mmcinit.inc`, `driver/sdh_wait.inc`);
+    and the internal memory is always the shell's fs0, connected before USB has any drive
+    (`driver/mmc_pin.inc`).
 - **BlwMac.efi** (`driver/blwmac.asm`) runs from `boot.nsh` and keeps that MAC in NVRAM, writing
   only when it changes. openframe-linux ships it and feeds it the right MAC.
 - **BlwMmcFix.efi** (`driver/blwmmcfix.asm`) is the same MMC workaround as a shell app, for
@@ -58,7 +63,7 @@ AMI's NVRAM code corrupts the store when that happens ([docs/nvram.md](docs/nvra
 ## Using a release
 
 Each version's image is a download on this repository's
-[Releases](https://github.com/birdslikewires/openframe-firmware/releases) page (26.11.27 is the
+[Releases](https://github.com/birdslikewires/openframe-firmware/releases) page (26.11.28 is the
 latest); `releases/MD5SUMS` lists their md5s. The images are not kept in git. Releases from
 26.11.16 on differ from the previous one in block 9 only, and the scripts in
 `tools/flash/` write just that block, after checking the chip holds the previous release. Flashing

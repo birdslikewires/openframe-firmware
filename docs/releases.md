@@ -327,3 +327,41 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
   the kernel's ExitBootServices racing the firmware's USB driver); the shell's direct start works with the caddy
   unpowered. **Still not fixed:** a drive that can't be read over USB 2 at all (the 12 TB above) still keeps the unit
   waiting a long time at the boot logo.
+- **26.11.28 (OF1)**, `of1-blw-26.11.28.bin` (md5 `d0453018…`), block 9 only vs 26.11.27. **The kernel starts about
+  0.1 s sooner from the internal memory, and the internal memory is always the shell's fs0.** Two changes:
+  **SdHost's command wait** (`driver/mmcinit.inc`, `driver/sdh_wait.inc`): the stock SD host driver stalled 1 ms before
+  re-reading the status of nearly every command (they take microseconds), and never waited for the controller to be free
+  before the next one. Its wait (RVA 0x4f6-0x54b) now calls `sdh_wait` in BlwPlatformDxe: 10 us polls, no timeout shorter
+  than before, and once a command is done a wait for the controller's Command Inhibit (CMD) and (DAT) to clear, as Linux
+  does, capped at 20 ms; after the first time a line stays busy to the cap (a failing chip), the cap is 1 ms for the rest
+  of the boot. Only where SdHost is stock (signatures from `tools/mmcinit_sig.py`). Kernel start from the internal memory
+  (the TSC at the kernel's start, cold boots run back to back): **5.240-5.245 s against 5.348-5.353 s** on 26.11.27.
+  Shorter waits after CMD0 (26.11.27-dev2, -dev5) made no measurable difference and are left out (`-DMMI_CMD0`).
+  **The internal memory always fs0** (`driver/mmc_pin.inc`): the shell numbers file systems in the order they're made,
+  and `startup.nsh`/`boot.nsh` name volumes by number; up to 26.11.24 a USB stick came first, since then the internal
+  memory by luck. At the boot manager's first stage signal (EF9A3971, about 1.99 s) BlwPlatformDxe now connects every SD
+  host controller (PCI class 08/05), so the internal memory's partitions and file system exist before USB has a device
+  (TIMING build: its file system at 2.34 s, the first USB device at 3.87 s, a stick's file system at 4.08 s). No cost.
+  `tools/emu_platform.py`: 124 scenarios (fake PCI functions: exactly the SD hosts connected, once, at the stage signal;
+  SdHost changed byte for byte, its call reaching `sdh_wait` as assembled alone), all builds 124/124;
+  `tools/emu_mmcinit.py`: 46 cases (the stock loop against the new wait: the same exits, never a shorter timeout; the
+  settle, one line busy, the cap and its drop, dead chips: no response, no status, a data timeout); mutations caught
+  (the call glue 3, `sdh_wait` 4, the MMC pin 4). 26.11.28 is 26.11.27-dev6 with only its version changed (the same
+  source built with dev6's version reproduces dev6 byte for byte). Flash script `tools/flash/flash-block9-26.11.28.sh`
+  (pre-check: blocks 1-15 = 26.11.27 `6e687d87…`; after: `ea652704…`; block 9 `bd74f39e…`).
+  On hardware, as 26.11.27-dev6: the test unit from its internal memory, 7 of 7 cold boots straight to the kernel (5.24-
+  5.25 s); 8 of 8 with the 4 TB caddy asleep at power-on (kernel 17.50-17.60 s, the drive's spin-up); with a stick in, the
+  stick boots (fs1). The "unknown Joggler" went from stock O2 firmware straight to it (blocks 5-9, written from Linux,
+  2026-11-13): BirdsLikeWires firmware, panel at 60 Hz (on stock firmware it showed a white screen), its own serial number
+  and UUID from its second boot. **Flashed 2026-11-13** on the unknown Joggler with the release script itself (from
+  26.11.27-dev6 back to 26.11.27, then 26.11.27 to 26.11.28; lock registers 01): fh programmed + verified 0x90000,
+  read-backs `f47c6bcd…`, block 0 unchanged; dump `firmware/efi-dumps/of1-unknown-20261113-26.11.28-postflash.bin`. Cold
+  boot by the plug, from the stick: plug-on to SSH 23 s, kernel through the plain `vmlinuz` line; `EFI v2.0 by
+  BirdsLikeWires`, DMI 26.11.28 11/13/2026, slots 1/1, its own serial/UUID, BootCount 314, 0x217 (both threads),
+  BlwMacStatus 0x2619, lock registers 01, NVRAM diff = one 14-byte MonotonicCounter record, panel 60 Hz, fsck clean, no
+  failed units.
+  **Correction to 26.11.27's known behaviour:** the occasional start through GRUB with a USB drive attached wasn't the
+  firmware. openframe-linux's `of-bootnsh` took a development build's version (`-devN`) for unknown firmware and wrote a
+  `boot.nsh` whose `BlwMmcFix.efi` line fails on firmware that already fixes the MMC driver, so later boots went to GRUB;
+  the 26.11.27 case was the first boot after flashing it over 26.11.26-dev10. Fixed in `of-bootnsh` v26.11.8
+  (openframe-linux `11f932a`). With the caddy attached the shell's direct start works: 8 of 8.
