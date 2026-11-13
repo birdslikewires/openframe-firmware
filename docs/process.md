@@ -87,10 +87,18 @@ image to `releases/MD5SUMS`.
 
 ## 6. Stage the flash script
 
-Copy `tools/flash/flash-block9-<prev>.sh` to `flash-block9-<new>.sh` and change the image name, the
-four hashes (image; blocks 1-15 before = the previous release; after = the new one; block 9) and
-the version labels. Diff the two: nothing else may differ. The script refuses to flash unless the
-chip holds exactly the previous release, writes block 9 only, then reads the whole chip back twice.
+Copy `tools/flash/flash-block9-<prev>.sh` to `flash-block9-<new>.sh` and change the version labels
+(`NEW`, `OLD`, the header) and the hashes: the image's md5; `OUT9`, the md5 of blocks 1-8 and 10-15
+(the same in both releases: check it is); `OLD9` and `NEW9`, block 9 of each. Diff the two: nothing
+else may differ. Test it on a fake chip (`FH=/tmp/fake.bin`, a copy of the previous release, as root)
+including `FLASH_TEST_FAULT=1` (repaired on a retry) and `=5` (exit 2).
+
+The script (from 26.11.28) refuses unless blocks 1-8 and 10-15 are the previous release's, checks
+the lock registers and the kernel's panel fix first, writes block 9 only, and reads the whole chip
+back twice, writing again up to three times. Exit status: 0 verified (or already there); 1 refused
+or nothing written (the chip is as it was: rebooting is safe); 2 not verified after three writes
+(**don't reboot**: run it again, it rewrites a torn block 9). Scripts before 26.11.28 only printed
+`FLASH MISMATCH` and exited 0: check their output, not their status.
 
 ## 7. Flash (only with the owner's OK)
 
@@ -102,10 +110,10 @@ NVRAM or the boot block without `unprotect=1`; the flash script loads it with `w
 ```
 scp releases/of1-blw-<new>.bin tools/flash/flash-block9-<new>.sh tools/lockregs.py of@unit:/tmp/
 sudo python3 /tmp/lockregs.py          # all 01, or reboot first
-sudo bash /tmp/flash-block9-<new>.sh   # must end "FLASH VERIFIED"; keeps /tmp/post1.bin
+sudo bash /tmp/flash-block9-<new>.sh   # exit 0 and "FLASH VERIFIED"; prints where it kept its dumps
 ```
-Keep the post-flash dump and a copy of block 0 (`head -c 65536 /tmp/post1.bin`) for the NVRAM
-diff after the boot.
+Keep the post-flash dump (`post1.bin` in the directory it names) and a copy of its block 0
+(`head -c 65536 …/post1.bin`) for the NVRAM diff after the boot.
 
 ## 8. Cold boot
 
