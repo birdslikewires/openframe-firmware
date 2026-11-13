@@ -15,7 +15,13 @@ Changes, each optional except the shell fix:
   3. CPU microcode (17088572..., raw file): an entry with the same signature and
      platform flags is replaced in place by a newer one of the same size.
   4. A version marker: a RAW FFS file (GUID MARKER_GUID) holding an ASCII string,
-     appended after the last file in FV_MAIN. The firmware ignores RAW files.
+     appended after the last file in FV_MAIN. The firmware ignores RAW files. With
+     --block10 (the layout from 26.11.29) a RAW spacer of FF bytes first fills the
+     rest of block 9, so the marker starts block 10 at 0xA0000; build_ucode_driver.py
+     then puts BlwPlatformDxe after it. This builds a release from the stock O2 image
+     with no earlier release needed: stock O2 + the bird (--logo, --pos 274,199) +
+     --block10 + the release's marker text, then build_ucode_driver.py, reproduces
+     26.11.29 byte for byte.
 
 Only FV_MAIN (0x10000-0xCFFFF) changes. NVRAM, NCB and boot block are copied from
 the base image untouched. Every FFS header/data checksum is recomputed and checked.
@@ -265,6 +271,8 @@ def main():
     ap.add_argument('--pos', help='splash x,y (default: centred on 800x480)')
     ap.add_argument('--microcode', help='Intel microcode file containing a newer entry for this CPU')
     ap.add_argument('--version', help='version marker text')
+    ap.add_argument('--block10', action='store_true', help='spacer to 0xA0000, then the marker there (needs --version)')
+    ap.add_argument('--core-pe', help='also write the DXE core PE32 here (for build_ucode_driver.py --check-with-core)')
     ap.add_argument('--allow-large-splash', action='store_true', help='allow a splash over 16,800 px, the largest proven on this IEGD build (Verizon OF1, 300x56)')
     a = ap.parse_args()
 
@@ -290,10 +298,26 @@ def main():
         pos = tuple(int(v) for v in a.pos.split(',')) if a.pos else None
         later = [f for f in files if f[0] > g_off]
         notes.append(patch_gop(img, g_off, g_size, a.logo, pos, fv_end, later, a.allow_large_splash))
+    if a.block10 and not a.version:
+        fail('--block10 needs --version')
     if a.version:
         new_files, _ = fv_files(img)
         last_off, _, last_size = new_files[-1]
-        notes.append(add_marker(img, last_off + last_size, fv_end, a.version))
+        if a.block10:
+            if last_off + last_size > BLOCK10:
+                fail('--block10: the last file ends past 0x%x' % BLOCK10)
+            notes.append(add_spacer(img, last_off + last_size, BLOCK10))
+            notes.append(add_marker(img, BLOCK10, fv_end, a.version))
+            if fv_files(img)[0][-1][0] != BLOCK10:
+                fail('--block10: the marker is not at 0x%x' % BLOCK10)
+        else:
+            notes.append(add_marker(img, last_off + last_size, fv_end, a.version))
+    if a.core_pe:
+        core = [(o, g, s) for o, g, s in fv_files(img)[0] if img[o + 18] == 0x05]
+        if len(core) != 1:
+            fail('expected one DXE core file, found %d' % len(core))
+        stream, _ = decompress_file(img, core[0][0], core[0][2])
+        open(a.core_pe, 'wb').write(bytes(stream[pe_offset(stream):]))
 
     # Re-walk the volume and check everything
     new_files, _ = fv_files(img)

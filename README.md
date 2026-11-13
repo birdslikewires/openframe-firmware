@@ -106,3 +106,16 @@ venv/bin/python -I tools/build_ucode_driver.py /tmp/base.bin /tmp/out.bin --micr
     --previous releases/of1-blw-26.11.29.bin --expect-blocks 10
 ```
 The build refuses to write an image unless it differs from the previous release in block 10 alone.
+
+Or build a release from the stock O2 firmware, with no earlier release at all (the stock image is
+[of1_efi_o2.img](https://openbeak.net/openframe/firmware/efi/of1_efi_o2.img), md5
+`eeb32d85e8b8c63ccc00429e083a88b8`). This reproduces 26.11.29 byte for byte:
+
+```
+venv/bin/python -I tools/build_patched.py of1_efi_o2.img /tmp/base.bin \
+    --logo logo/logo-blw-pecking-bird-204x82.png --pos 274,199 --block10 \
+    --version 'BirdsLikeWires OpenFrame EFI 26.11.29 (OF1)' --core-pe /tmp/core.pe
+venv/bin/python -I tools/build_ucode_driver.py /tmp/base.bin /tmp/out.bin --microcode third_party/intel-ucode/06-1c-02 \
+    --bios-version 26.11.29 --bios-date 11/13/2026 --check-with-core /tmp/core.pe
+cmp /tmp/out.bin releases/of1-blw-26.11.29.bin
+```

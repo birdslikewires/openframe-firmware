@@ -86,7 +86,9 @@ the new driver, checks the firmware's own decompressor accepts it, and refuses t
 unless the blocks that differ from the previous release are exactly `--expect-blocks`. From 26.11.29
 our files are alone in block 10, so a release changes block 10 only. (26.11.29 itself was the one
 move: `mkbase.py --move-to-block10` and `--expect-blocks 9,10`; up to 26.11.28 it was block 9.)
-Run `tools/emu_platform.py` on the driver (`--pe`, `--app`). Record the md5 of the image, of blocks
+Run `tools/emu_platform.py` on the driver (`--pe`, `--app`). Then build the same release from
+the stock O2 image (`tools/build_patched.py --block10`, as in the README) and check it comes out
+byte for byte the same: the chain of releases must never depend on a binary only we hold. Record the md5 of the image, of blocks
 1-15 and of block 10, check blocks 1-9 and 11-15 are still `d11b766a…`, and add the image to
 `releases/MD5SUMS`.
 
