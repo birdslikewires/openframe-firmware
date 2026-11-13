@@ -4,8 +4,10 @@ BirdsLikeWires firmware for the OpenPeak OpenFrame 1 (and the O2 Joggler): the s
 EFI firmware with a few careful additions, the tools that build and test it, and the record of how
 it was done.
 
-Releases are 1 MB images for the board's socketed SST 49LF008A firmware hub, written with `fh`
-(in `fh/`), a kernel module that gives a running OpenFrame a `/dev/fh` for the chip. Only the
+Releases are 1 MB images for the board's socketed SST 49LF008A firmware hub, written with `fh`, a
+kernel module that gives a running OpenFrame a `/dev/fh` for the chip (it lived in `fh/` here and
+is now in [openframe-kernel](https://github.com/birdslikewires/openframe-kernel/tree/main/fh), whose
+kernel packages ship it). Only the
 OpenFrame 1 is supported so far; nothing here has been tried on an OpenFrame 2.
 
 This repository was `fh` until 2026-11; its history carries on here.
@@ -80,7 +82,7 @@ first.
 
 | Path | What |
 |---|---|
-| `fh/` | The firmware hub kernel module: reads and writes the chip through `/dev/fh`, and programs without erasing through `/dev/fhp` |
+| `fh/` | A pointer: the firmware hub kernel module (`/dev/fh`, `/dev/fhp`) moved to openframe-kernel on 2026-11-13 |
 | `driver/` | BlwPlatformDxe (`ucode_late.asm` and includes), BlwMac.efi, BlwMmcFix.efi and MmcTest.efi, the one-off BlwLanMacDel.efi, FvDiag |
 | `tools/` | Image builders, emulators for the driver and apps, NVRAM and firmware-volume decoders, unit scripts |
 | `tools/flash/` | The flash script for each release (block 9 up to 26.11.28; the move to block 10; block 10 from then on) |
