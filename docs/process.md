@@ -11,12 +11,14 @@ openframe-linux stick, reachable over SSH (`tools/of.sh`), with a smart plug for
 - **Never create an NVRAM variable under a vendor GUID the store doesn't already have.** AMI's
   NVRAM code half-writes the store when it adds a GUID (see [nvram.md](nvram.md)). Our variables
   use AMI's own `EC87D643-…` GUID.
-- **One change per release**, and one release per flash. 26.11.1 changed three things at once,
-  didn't boot, and took a chip swap to find which ([history.md](history.md)).
+- **One change per release**, and one release per flash, unless each change has first been tested
+  on its own as a development build (26.11.27's five USB fixes, 26.11.28's two MMC changes).
+  26.11.1 changed three things at once, didn't boot, and took a chip swap to find which
+  ([history.md](history.md)).
 - **After any boot in which our apps wrote NVRAM, reboot before flashing.** `BlwMac.efi` locks
   flash blocks 1-15 down before it writes, and lock-down only clears at reset; a flash then fails
   with `fwhub_unlock error … lock=0x03` (harmlessly: nothing is written).
-- **Shut down cleanly before cutting power** (ext2 root, FAT `/boot`): `sync`, `systemctl
+- **Shut down cleanly before cutting power** (ext4 root, FAT `/boot`): `sync`, `systemctl
   poweroff`, wait until the unit stops answering ping and then ten seconds more, then switch off.
 
 ## 1. Set up
@@ -43,6 +45,8 @@ venv/bin/python -I tools/build_ucode_driver.py <base> /tmp/t.bin --microcode thi
 venv/bin/python -I tools/emu_platform.py /tmp/dxe.efi /tmp/app.efi       # BlwPlatformDxe
 venv/bin/python -I tools/build_blwmac_app.py /tmp/BlwMac.efi
 venv/bin/python -I tools/emu_blwmac.py /tmp/BlwMac.efi                   # BlwMac.efi
+venv/bin/python -I tools/emu_mmcinit.py releases/of1-blw-<prev>.bin driver/mmcinit_sig.inc  # SdHost's wait
+venv/bin/python -I tools/emu_mmcfix.py <firmware.bin> <BlwMmcFix.efi> <MmcTest.efi>     # BlwMmcFix.efi
 ```
 
 The emulators run the real code under Unicorn against a fake firmware and fail on anything the
@@ -51,7 +55,9 @@ leaked pool, an MSR read on the wrong CPU, writes to the flash...). Add a scenar
 behaviour and every way its input can be odd.
 
 Then **mutation-test**: break each new check on purpose (flip a comparison, drop a call), rebuild,
-and confirm some scenario fails. A check no scenario notices isn't tested. Restore the source.
+and confirm some scenario fails. A check no scenario notices isn't tested. Keep the mutations as a
+file in `tools/mutations/` and run them with `tools/mutate.py` (each in its own copy of the tree, so
+the source is never touched), so they can be run again after later changes.
 
 ## 4. Check the SMBIOS table with the real dmidecode
 
@@ -104,7 +110,7 @@ diff after the boot.
 ## 8. Cold boot
 
 Clean shutdown, power off, ten seconds, power on (`tools/timeboot.sh` does this and times it).
-The unit should answer ping about 30 s after power-on.
+The unit should answer ping about 25 s after power-on (more with a USB drive that has to spin up).
 
 ## 9. Check
 

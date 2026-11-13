@@ -89,10 +89,10 @@ Build the latest release from the one before it (needs `nasm`; see `tools/requir
 
 ```
 python3 -m venv venv && venv/bin/pip install -r tools/requirements.txt
-curl -fLo releases/of1-blw-26.11.20.bin https://github.com/birdslikewires/openframe-firmware/releases/download/26.11.20/of1-blw-26.11.20.bin
-curl -fLo releases/of1-blw-26.11.21.bin https://github.com/birdslikewires/openframe-firmware/releases/download/26.11.21/of1-blw-26.11.21.bin
-venv/bin/python -I tools/mkbase.py releases/of1-blw-26.11.20.bin 26.11.21 /tmp/base.bin --core-pe /tmp/core.pe
+curl -fLo releases/of1-blw-26.11.27.bin https://github.com/birdslikewires/openframe-firmware/releases/download/26.11.27/of1-blw-26.11.27.bin
+curl -fLo releases/of1-blw-26.11.28.bin https://github.com/birdslikewires/openframe-firmware/releases/download/26.11.28/of1-blw-26.11.28.bin
+venv/bin/python -I tools/mkbase.py releases/of1-blw-26.11.27.bin 26.11.28 /tmp/base.bin --core-pe /tmp/core.pe
 venv/bin/python -I tools/build_ucode_driver.py /tmp/base.bin /tmp/out.bin --microcode third_party/intel-ucode/06-1c-02 \
-    --bios-version 26.11.21 --bios-date 11/09/2026 --check-with-core /tmp/core.pe
-cmp /tmp/out.bin releases/of1-blw-26.11.21.bin
+    --bios-version 26.11.28 --bios-date 11/13/2026 --check-with-core /tmp/core.pe
+cmp /tmp/out.bin releases/of1-blw-26.11.28.bin
 ```

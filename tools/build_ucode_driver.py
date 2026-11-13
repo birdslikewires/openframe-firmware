@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-Build the BlwUcodeLate DXE driver (driver/ucode_late.asm) and append it to FV_MAIN.
+Build the BlwPlatformDxe DXE driver (driver/ucode_late.asm; BlwUcodeLate until 26.11.16) and append
+it to FV_MAIN.
 
   build_ucode_driver.py <base.bin> <out.bin> --microcode intel-ucode-06-1c-02 [--pe out.efi]
 
 1. Picks the microcode entry for the base image's own CPU signature and platform flags
    (taken from the base's microcode file) that is newer than the base's entry.
 2. Assembles the driver with nasm (-f bin), embedding that entry 16-byte aligned.
-3. Wraps it in a minimal PE32 (IA32, EFI boot service driver, one RWX section at RVA 0x200,
+3. Wraps it in a minimal PE32 (IA32, EFI boot service driver, one section at RVA 0x200 marked
+   code/read/execute (0x60000020): the driver also writes its own flags there, which this 2008
+   firmware allows (it sets no page protection),
    image base 0x10000000, a one-entry no-op base relocation block).
 4. Wraps that in an FFS file packaged like the stock DXE drivers: type DRIVER, a DXE_DEPEX section
-   (PUSH MP Services GUID, END), then a Tiano COMPRESSION section holding PE32 and UI "BlwUcodeLate",
+   (PUSH MP Services GUID, END), then a Tiano COMPRESSION section holding PE32 and UI "BlwPlatformDxe",
    data checksum attribute. (--raw-sections gives the uncompressed packaging of v10/v11, which the
    firmware did not dispatch.) Appended after the last file in
    FV_MAIN, 8-byte aligned, all checksums set and re-checked.

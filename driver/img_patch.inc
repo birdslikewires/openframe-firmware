@@ -4,8 +4,9 @@
 ;   - NBDXE: the panel clock value it writes (panel_clock.inc, nb_patch_image), from 26.11.24;
 ;   - MmcMediaDevice: its CE-ATA check answers "no" at once (ceata.inc, cea_patch_image), from
 ;     26.11.25;
-;   - SdHost's command wait polls every 4 us, and MmcMediaDevice waits 1 ms, not 50, after CMD0
-;     (mmcinit.inc, sdh_patch_image and mmw_patch_image), from 26.11.28;
+;   - SdHost: its command wait calls sdh_wait (10 us polls, then a wait for the controller to be
+;     free) (mmcinit.inc, sdh_patch_image), from 26.11.28; MmcMediaDevice's waits after CMD0 only
+;     with -DMMI_CMD0, a development build (mmw_patch_image; otherwise it does nothing);
 ;   - USBRT, both copies (the SMM one while SMRAM is still open): two shorter waits and more
 ;     tries (usbrt.inc, urt_patch_image), from 26.11.26.
 ; NBDXE is loaded before this driver, so it is patched at the entry; the others after, so

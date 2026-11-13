@@ -25,6 +25,8 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
 | 26.11.24 | No screen twitch at boot: the north-bridge driver is changed in memory to write the 60 Hz clock itself |
 | 26.11.25 | Boots 2.8 s faster: the MMC/SD driver no longer probes the internal memory for a CE-ATA disk |
 | 26.11.26 | Boots up to 1 s faster with a USB drive attached: shorter fixed waits in the firmware's USB code |
+| 26.11.27 | Boots with a USB drive attached that the stock firmware hung on (a 4 TB disk in an ASMedia caddy): five fixes to the firmware's USB code |
+| 26.11.28 | The kernel starts ~0.1 s sooner from the internal memory (SdHost's command wait); the internal memory is always the shell's fs0 |
 
 ## Releases (2026-11-08)
 
@@ -325,7 +327,9 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
   shell's direct start of the kernel (the EFI stub line in `boot.nsh`) sometimes fails (one boot of two) and the
   `grub` line after it starts the kernel instead (about 3 s later); the unit boots either way. Not yet traced (perhaps
   the kernel's ExitBootServices racing the firmware's USB driver); the shell's direct start works with the caddy
-  unpowered. **Still not fixed:** a drive that can't be read over USB 2 at all (the 12 TB above) still keeps the unit
+  unpowered. *(Explained 2026-11-13, see 26.11.28: not the firmware, the drive or ExitBootServices, but
+  openframe-linux's `of-bootnsh` treating development builds as unknown firmware; with the caddy attached the direct
+  start works 8 of 8.)* **Still not fixed:** a drive that can't be read over USB 2 at all (the 12 TB above) still keeps the unit
   waiting a long time at the boot logo.
 - **26.11.28 (OF1)**, `of1-blw-26.11.28.bin` (md5 `d0453018…`), block 9 only vs 26.11.27. **The kernel starts about
   0.1 s sooner from the internal memory, and the internal memory is always the shell's fs0.** Two changes:
