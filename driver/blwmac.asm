@@ -36,6 +36,13 @@
 ; 4. Records what it did in volatile variable BlwMacStatus (BS+RT, RAM only, 24 bytes): flags,
 ;    the SetVariable status, the MAC stored, the LAN MAC applied, 4 bytes pad. Linux can read it
 ;    with a read-only efivarfs.
+; 5. If it wrote BlwMac and reads back exactly the MAC it was given, it resets the unit at once
+;    (RT->ResetSystem, cold): blocks 1-15 are locked down until a reset, so the boot that stored a
+;    new MAC never reaches an OS, and the next boot starts unlocked with the MAC in NVRAM, applied
+;    by BlwPlatformDxe at ReadyToBoot. A boot that stores nothing (the usual one) carries on. If
+;    the write failed or reads back wrong it carries on too, so a store that keeps failing can't
+;    reset the unit over and over (openframe-linux's of-bootnsh only asks for a store when NVRAM
+;    doesn't hold the unit's MAC, and gives up if the next boot still doesn't).
 ;
 ; Always returns EFI_SUCCESS so boot.nsh carries on. Position-independent; assembled with
 ; `nasm -f bin`, wrapped as a PE32 application by build_blwmac_app.py.
@@ -53,6 +60,7 @@ F_LOCKDOWN_OK   equ 0x0080          ; blocks 1-15 locked down before the write
 F_LOCKDOWN_BAD  equ 0x0100          ; lock-down didn't read back: nothing written
 F_NV_READ_OK    equ 0x0200          ; BlwMac read back from NVRAM and usable
 F_SMBIOS_DONE   equ 0x0400          ; SMBIOS UUID (and for a card, serial number) set
+F_RESET         equ 0x0800          ; stored and read back: resetting (the status is lost with it)
 F_NIC_MISSING   equ 0x1000          ; no 10ec:8168 behind 00:1c.0, or no I/O BAR
 F_NIC_DONE      equ 0x2000          ; MAC0 written and read back correctly
 F_NIC_VERIFY    equ 0x4000          ; MAC0 read back wrong
@@ -197,6 +205,17 @@ entry:
 
 ; 4. say what happened (volatile: RAM only, no flash write)
 .report:
+        test    dword [ebp + L_STATUS], F_NV_WRITTEN    ; 5. stored, and reads back as given?
+        jz      .status
+        test    dword [ebp + L_STATUS], F_NV_READ_OK
+        jz      .status
+        lea     esi, [ebp + L_ARGMAC]
+        lea     edi, [ebp + L_NVMAC]
+        mov     ecx, NV_SIZE
+        repe cmpsb
+        jne     .status
+        or      dword [ebp + L_STATUS], F_RESET
+.status:
         lea     eax, [ebp + L_STATUS]
         push    eax
         push    24
@@ -208,7 +227,17 @@ entry:
         call    rt_setvariable
         add     esp, 20
 
-        xor     eax, eax                        ; EFI_SUCCESS
+        test    dword [ebp + L_STATUS], F_RESET
+        jz      .done
+        push    0                               ; ResetData
+        push    0                               ; DataSize
+        push    0                               ; ResetStatus = EFI_SUCCESS
+        push    0                               ; EfiResetCold
+        mov     eax, [ebp + 12]
+        mov     eax, [eax + 0x38]               ; ->RuntimeServices
+        call    [eax + 0x40]                    ; ResetSystem: doesn't return
+        add     esp, 16
+.done:  xor     eax, eax                        ; EFI_SUCCESS
         pop     edi
         pop     esi
         pop     ebx

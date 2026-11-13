@@ -51,10 +51,12 @@ All under `EC87D643-…`:
 `BlwMacStatus` flags: `0x1` MAC from LoadOptions, `0x2` from the shell's argv, `0x4` no usable MAC
 given, `0x8` the stored MAC is a card's, `0x10` already stored (nothing written), `0x20` written,
 `0x40` SetVariable failed, `0x80` blocks 1-15 locked down, `0x100` lock-down didn't stick (nothing
-written), `0x200` read back and usable, `0x400` SMBIOS filled, `0x1000` no NIC, `0x2000` MAC0
+written), `0x200` read back and usable, `0x400` SMBIOS filled, `0x800` stored and read back: the unit
+is reset at once (so the status is lost with it), `0x1000` no NIC, `0x2000` MAC0
 written and verified, `0x4000` MAC0 read back wrong, `0x8000` not BirdsLikeWires firmware (the
 system table's FirmwareVendor isn't exactly "BirdsLikeWires"): nothing locked, written or applied.
-A normal boot reads `0x2619`; a boot that stored a new MAC `0x26a9`; stock firmware `0x8000`.
+A normal boot reads `0x2619`; a boot that stored a new MAC reset before anything could read
+`0x2ea9`; stock firmware `0x8000`.
 Before that check (2026-11-13) a stick whose boot.nsh was written on a BirdsLikeWires unit, booted
 on a stock unit, locked the stock unit's flash down and stored the first unit's MAC in its NVRAM.
 
@@ -66,5 +68,13 @@ BlwPlatformDxe only ever reads NVRAM: `BlwMac` (for the LAN MAC, serial number a
 BlwMac.efi (and BlwLanMacDel.efi) set write-lock + lock-down on blocks 1-15 through the firmware
 hub's lock registers (`0xFFB00002 + block * 0x10000`) and read them back first; if they don't
 stick, nothing is written. So the firmware itself can't be altered for the rest of that boot,
-whatever AMI's code does. It also means a flash won't work until the next reset
-(`tools/lockregs.py`).
+whatever AMI's code does. Lock-down can't be undone except by a reset, which is the point: a
+write-lock alone, AMI's code could lift. So once BlwMac.efi has stored a MAC and read it back
+exactly, it resets the unit at once (RT->ResetSystem, cold; since 2026-11-13): the boot that wrote
+NVRAM never reaches an OS, and every OS session starts with the flash unlocked, ready for an update.
+Proven on the test Joggler: after the reset the lock registers read 01. A write that fails or
+reads back wrong doesn't reset, so a store that keeps failing can't loop. openframe-linux's
+of-bootnsh only puts the BlwMac.efi line in boot.nsh while NVRAM doesn't hold the unit's MAC (it
+reads it back from the SMBIOS UUID), and reboots for it during boot, so a stick moved between units
+doesn't carry one unit's MAC to the other, and an ordinary boot writes nothing (`tools/lockregs.py`
+shows the registers).

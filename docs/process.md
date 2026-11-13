@@ -18,7 +18,9 @@ openframe-linux stick, reachable over SSH (`tools/of.sh`), with a smart plug for
   ([history.md](history.md)).
 - **After any boot in which our apps wrote NVRAM, reboot before flashing.** `BlwMac.efi` locks
   flash blocks 1-15 down before it writes, and lock-down only clears at reset; a flash then fails
-  with `fwhub_unlock error … lock=0x03` (harmlessly: nothing is written).
+  with `fwhub_unlock error … lock=0x03` (harmlessly: nothing is written). Since 2026-11-13
+  `BlwMac.efi` resets the unit itself straight after a verified store, so this only arises with a
+  test app (BlwLanMacDel.efi) or an older BlwMac.efi.
 - **Shut down cleanly before cutting power** (ext4 root, FAT `/boot`): `sync`, `systemctl
   poweroff`, wait until the unit stops answering ping and then ten seconds more, then switch off.
 

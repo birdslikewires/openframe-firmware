@@ -34,7 +34,7 @@ EXISTING = {uuid.UUID(g).bytes_le for g in (       # the OF1 test unit's GUID st
 NIC_IO = 0xE000
 
 F = dict(ARG_LOADOPT=0x1, ARG_SHELLIF=0x2, ARG_NONE=0x4, HW_MAC=0x8, NV_SAME=0x10, NV_WRITTEN=0x20,
-         NV_FAILED=0x40, LOCKDOWN_OK=0x80, LOCKDOWN_BAD=0x100, NV_READ_OK=0x200, SMBIOS_DONE=0x400,
+         NV_FAILED=0x40, LOCKDOWN_OK=0x80, LOCKDOWN_BAD=0x100, NV_READ_OK=0x200, SMBIOS_DONE=0x400, RESET=0x800,
          NIC_MISSING=0x1000, NIC_DONE=0x2000, NIC_VERIFY=0x4000, FOREIGN_FW=0x8000)
 
 
@@ -46,7 +46,7 @@ SMB = DATA + 0x4000              # SMBIOS entry point; the structure table follo
 
 
 def run(pe, loadopts=None, argv=None, store=None, lock_ignores=False, nic_present=True,
-        setvar_fails=False, nic_mac_readonly=False, smbios=None, vendor='BirdsLikeWires'):
+        setvar_fails=False, nic_mac_readonly=False, smbios=None, vendor='BirdsLikeWires', setvar_lies=False):
     store = dict(store or {})
     errors, events = [], []
     mu = Uc(UC_ARCH_X86, UC_MODE_32)
@@ -66,7 +66,8 @@ def run(pe, loadopts=None, argv=None, store=None, lock_ignores=False, nic_presen
     mu.mem_write(BS + 0x58, struct.pack('<I', STUBS + 0x10))        # HandleProtocol
     mu.mem_write(RT + 0x30, struct.pack('<I', STUBS + 0x20))        # GetVariable
     mu.mem_write(RT + 0x38, struct.pack('<I', STUBS + 0x30))        # SetVariable
-    for s in (0x10, 0x20, 0x30):
+    mu.mem_write(RT + 0x40, struct.pack('<I', STUBS + 0x40))        # ResetSystem
+    for s in (0x10, 0x20, 0x30, 0x40):
         mu.mem_write(STUBS + s, b'\xc3')                              # ret
     mu.mem_write(RET_MAGIC, b'\xf4')                                  # hlt
 
@@ -156,6 +157,9 @@ def run(pe, loadopts=None, argv=None, store=None, lock_ignores=False, nic_presen
             if setvar_fails and a[2] & 1:
                 uc.reg_write(UC_X86_REG_EAX, 0x80000009)
                 return
+            if setvar_lies and a[2] & 1:                            # says success, stores nothing
+                uc.reg_write(UC_X86_REG_EAX, 0)
+                return
             if a[3] == 0:                                           # DataSize 0: delete
                 if (name, g) not in store:
                     uc.reg_write(UC_X86_REG_EAX, 0x8000000E)
@@ -164,6 +168,10 @@ def run(pe, loadopts=None, argv=None, store=None, lock_ignores=False, nic_presen
             else:
                 store[(name, g)] = (a[2], data)
             uc.reg_write(UC_X86_REG_EAX, 0)
+        elif addr == STUBS + 0x40:                                  # ResetSystem(type, status, size, data)
+            events.append('ResetSystem(%d, %#x, %d, %#x)' % tuple(a[:4]))
+            state['reset'] = True
+            uc.emu_stop()                                           # (it doesn't return)
 
     def hook_write(uc, access, addr, size, value, _):
         if FWH_REG <= addr < FWH_REG + 0x100000:
@@ -236,7 +244,7 @@ def run(pe, loadopts=None, argv=None, store=None, lock_ignores=False, nic_presen
         mu.emu_start(LOAD + entry, RET_MAGIC, count=2_000_000)
     except UcError as e:
         errors.append('emulation stopped: %s at eip %#x' % (e, mu.reg_read(UC_X86_REG_EIP)))
-    if mu.reg_read(UC_X86_REG_ESP) != esp + 4:
+    if not state.get('reset') and mu.reg_read(UC_X86_REG_ESP) != esp + 4:
         errors.append('stack unbalanced: esp %#x, expected %#x' % (mu.reg_read(UC_X86_REG_ESP), esp + 4))
     st = store.get(('BlwMacStatus', BLW))
     flags = struct.unpack_from('<I', st[1])[0] if st else None
@@ -247,7 +255,7 @@ def run(pe, loadopts=None, argv=None, store=None, lock_ignores=False, nic_presen
             errors.append('SMBIOS entry point changed')
         table[0x18:0x1c] = smbios[0x18:0x1c]
         table = bytes(table)
-    return dict(eax=mu.reg_read(UC_X86_REG_EAX), flags=flags, status=st, store=store, errors=errors,
+    return dict(eax=mu.reg_read(UC_X86_REG_EAX), reset=state.get('reset', False), flags=flags, status=st, store=store, errors=errors,
                 events=events, nic_mac=bytes(state['mac']), cfg=cfg, smbios=table)
 
 
@@ -300,7 +308,7 @@ def main():
     filled = lambda c: (c.hex().upper(), uuid_of(c))
     uuid_only = lambda m: (None, uuid_of(m))
     UNFILLED = (None, b'\xff' * 16)
-    W, S = F['LOCKDOWN_OK'] | F['NV_WRITTEN'], F['NV_SAME']
+    W, S = F['LOCKDOWN_OK'] | F['NV_WRITTEN'] | F['RESET'], F['NV_SAME']    # a verified store resets
     R, SM, ND, HW = F['NV_READ_OK'], F['SMBIOS_DONE'], F['NIC_DONE'], F['HW_MAC']
     LO, SH = F['ARG_LOADOPT'], F['ARG_SHELLIF']
     def prefilled(c):                       # NEW as the firmware leaves it at ReadyToBoot for card c
@@ -353,8 +361,12 @@ def main():
          LO | W | R | HW | ND, CARD, MAC, 'none'),
         ('lock-down does not stick: nothing written', dict(loadopts=cl, lock_ignores=True, smbios=NEW),
          LO | F['LOCKDOWN_BAD'], None, None, UNFILLED),
-        ('SetVariable fails: NIC untouched', dict(loadopts=cl, setvar_fails=True, smbios=NEW),
+        ('SetVariable fails: NIC untouched, no reset', dict(loadopts=cl, setvar_fails=True, smbios=NEW),
          LO | F['LOCKDOWN_OK'] | F['NV_FAILED'], None, None, UNFILLED),
+        ('SetVariable says success, stores nothing: no reset', dict(loadopts=cl, setvar_lies=True, smbios=NEW),
+         LO | F['LOCKDOWN_OK'] | F['NV_WRITTEN'], 'tried', None, UNFILLED),
+        ('... with an old card stored: it is applied, no reset', dict(loadopts=cl, setvar_lies=True, store=lm(CARD2), smbios=NEW),
+         LO | F['LOCKDOWN_OK'] | F['NV_WRITTEN'] | R | HW | SM | ND, 'tried', b'\x02' + CARD2[1:], filled(CARD2)),
         ('no RTL8168 behind 00:1c.0', dict(loadopts=cl, store=lm(CARD), nic_present=False, smbios=NEW),
          LO | S | R | HW | SM | F['NIC_MISSING'], None, None, filled(CARD)),
         ('MAC0 does not take the write', dict(loadopts=cl, store=lm(CARD), nic_mac_readonly=True, smbios=NEW),
@@ -379,7 +391,7 @@ def main():
     for name, kw, want, want_nv, want_mac, want_t1 in cases:
         r = run(pe, **kw)
         probs = list(r['errors'])
-        if r['eax'] != 0:
+        if r['eax'] != 0 and not r['reset']:          # (a reset doesn't return)
             probs.append('returned %#x' % r['eax'])
         if r['flags'] != want:
             probs.append('flags %s, expected %s' % (flags_str(r['flags'] or 0), flags_str(want)))
@@ -387,7 +399,16 @@ def main():
         if any(e.startswith('SetVariable(BlwLanMac,') for e in r['events']):
             probs.append('old BlwLanMac variable written')
         locks = [e for e in r['events'] if e.startswith('lock[')]
-        if want_nv is not None:
+        resets = [e for e in r['events'] if e.startswith('ResetSystem')]
+        if want & F['RESET']:
+            if resets != ['ResetSystem(0, 0x0, 0, 0x0)'] or r['events'][-1] != resets[0]:
+                probs.append('reset %s, expected one cold reset, last' % resets)
+        elif resets:
+            probs.append('unexpected reset %s' % resets)
+        if want_nv == 'tried':                  # a write attempted (the stub stores nothing)
+            if nv_writes != ['SetVariable(BlwMac, BLW, attr=0x7, %s)' % CARD.hex()]:
+                probs.append('NV writes %s' % nv_writes)
+        elif want_nv is not None:
             if nv_writes != ['SetVariable(BlwMac, BLW, attr=0x7, %s)' % want_nv.hex()]:
                 probs.append('NV writes %s' % nv_writes)
             if locks != ['lock[%d] <- 0x3' % b for b in range(1, 16)]:
