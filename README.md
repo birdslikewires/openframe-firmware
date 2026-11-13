@@ -12,8 +12,9 @@ This repository was `fh` until 2026-11; its history carries on here.
 
 ## What a release changes
 
-Everything is in the main firmware volume (blocks 5–9 differ from stock); NVRAM, the NCB and the
-boot block are the stock ones.
+Everything is in the main firmware volume (blocks 5–10 differ from stock); NVRAM, the NCB and the
+boot block are the stock ones. From 26.11.29 our version marker and BlwPlatformDxe sit alone in
+block 10, so updates write that block only and never erase stock code.
 
 - **The shell's countdown is 0**, so `boot.nsh` runs straight away.
 - **The boot logo** is the BirdsLikeWires pecking bird.
@@ -48,7 +49,10 @@ boot block are the stock ones.
     host driver stalled 1 ms after nearly every command; its wait now polls every 10 us and then
     waits for the controller to be free, as Linux does (`driver/mmcinit.inc`, `driver/sdh_wait.inc`);
     and the internal memory is always the shell's fs0, connected before USB has any drive
-    (`driver/mmc_pin.inc`).
+    (`driver/mmc_pin.inc`);
+  - from 26.11.29, lives alone in block 10 with the version marker: an update erases and rewrites
+    only that block, headers last, so a power cut during one leaves a unit that boots (without our
+    changes until the update is run again).
 - **BlwMac.efi** (`driver/blwmac.asm`) runs from `boot.nsh` and keeps that MAC in NVRAM, writing
   only when it changes. openframe-linux ships it and feeds it the right MAC.
 - **BlwMmcFix.efi** (`driver/blwmmcfix.asm`) is the same MMC workaround as a shell app, for
@@ -63,10 +67,11 @@ AMI's NVRAM code corrupts the store when that happens ([docs/nvram.md](docs/nvra
 ## Using a release
 
 Each version's image is a download on this repository's
-[Releases](https://github.com/birdslikewires/openframe-firmware/releases) page (26.11.28 is the
+[Releases](https://github.com/birdslikewires/openframe-firmware/releases) page (26.11.29 is the
 latest); `releases/MD5SUMS` lists their md5s. The images are not kept in git. Releases from
-26.11.16 on differ from the previous one in block 9 only, and the scripts in
-`tools/flash/` write just that block, after checking the chip holds the previous release. Flashing
+26.11.16 to 26.11.28 differ from the previous one in block 9 only; 26.11.29 moves our files to
+block 10 (blocks 9 and 10, once), and later releases differ in block 10 only. The scripts in
+`tools/flash/` write just those blocks, after checking the chip holds the previous release. Flashing
 the firmware hub can leave a board that doesn't boot; recovery means swapping the chip, so keep a
 dump of your own chip (`dd if=/dev/fh of=mine.bin bs=64k`) and read [docs/process.md](docs/process.md)
 first.
@@ -75,10 +80,10 @@ first.
 
 | Path | What |
 |---|---|
-| `fh/` | The firmware hub kernel module: reads and writes the chip through `/dev/fh` |
+| `fh/` | The firmware hub kernel module: reads and writes the chip through `/dev/fh`, and programs without erasing through `/dev/fhp` |
 | `driver/` | BlwPlatformDxe (`ucode_late.asm` and includes), BlwMac.efi, BlwMmcFix.efi and MmcTest.efi, the one-off BlwLanMacDel.efi, FvDiag |
 | `tools/` | Image builders, emulators for the driver and apps, NVRAM and firmware-volume decoders, unit scripts |
-| `tools/flash/` | The block-9 flash script for each release |
+| `tools/flash/` | The flash script for each release (block 9 up to 26.11.28; the move to block 10; block 10 from then on) |
 | `releases/` | Where release images go when downloaded or built (see its README); their md5s |
 | `docs/` | [process.md](docs/process.md) how releases are made and tested · [releases.md](docs/releases.md) every release · [nvram.md](docs/nvram.md) NVRAM and its rules · [history.md](docs/history.md) the original lab notebook |
 | `logo/` | The bird, as SVG and the rendered splash |
@@ -89,10 +94,11 @@ Build the latest release from the one before it (needs `nasm`; see `tools/requir
 
 ```
 python3 -m venv venv && venv/bin/pip install -r tools/requirements.txt
-curl -fLo releases/of1-blw-26.11.27.bin https://github.com/birdslikewires/openframe-firmware/releases/download/26.11.27/of1-blw-26.11.27.bin
 curl -fLo releases/of1-blw-26.11.28.bin https://github.com/birdslikewires/openframe-firmware/releases/download/26.11.28/of1-blw-26.11.28.bin
-venv/bin/python -I tools/mkbase.py releases/of1-blw-26.11.27.bin 26.11.28 /tmp/base.bin --core-pe /tmp/core.pe
+curl -fLo releases/of1-blw-26.11.29.bin https://github.com/birdslikewires/openframe-firmware/releases/download/26.11.29/of1-blw-26.11.29.bin
+venv/bin/python -I tools/mkbase.py releases/of1-blw-26.11.28.bin 26.11.29 /tmp/base.bin --core-pe /tmp/core.pe --move-to-block10
 venv/bin/python -I tools/build_ucode_driver.py /tmp/base.bin /tmp/out.bin --microcode third_party/intel-ucode/06-1c-02 \
-    --bios-version 26.11.28 --bios-date 11/13/2026 --check-with-core /tmp/core.pe
-cmp /tmp/out.bin releases/of1-blw-26.11.28.bin
+    --bios-version 26.11.29 --bios-date 11/13/2026 --check-with-core /tmp/core.pe \
+    --previous releases/of1-blw-26.11.28.bin --expect-blocks 9,10
+cmp /tmp/out.bin releases/of1-blw-26.11.29.bin
 ```

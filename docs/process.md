@@ -7,7 +7,8 @@ openframe-linux stick, reachable over SSH (`tools/of.sh`), with a smart plug for
 ## The rules
 
 - **Never write NVRAM (block 0) or the boot block (blocks 14-15) with a flash.** Releases change
-  block 9 only. `tools/repair-block0.sh` exists for one emergency and needs a known-good image.
+  block 10 only (block 9 up to 26.11.28; 26.11.29 was the one move, blocks 9 and 10), and only
+  in the order step 6 describes: a power cut at any point must leave a chip that boots. `tools/repair-block0.sh` exists for one emergency and needs a known-good image.
 - **Never create an NVRAM variable under a vendor GUID the store doesn't already have.** AMI's
   NVRAM code half-writes the store when it adds a GUID (see [nvram.md](nvram.md)). Our variables
   use AMI's own `EC87D643-…` GUID.
@@ -78,27 +79,39 @@ download link); check it against `releases/MD5SUMS`.
 venv/bin/python -I tools/mkbase.py releases/of1-blw-<prev>.bin <new> /tmp/base.bin --core-pe /tmp/core.pe
 venv/bin/python -I tools/build_ucode_driver.py /tmp/base.bin releases/of1-blw-<new>.bin \
     --microcode third_party/intel-ucode/06-1c-02 --bios-version <new> --bios-date MM/DD/YYYY \
-    --check-with-core /tmp/core.pe
+    --check-with-core /tmp/core.pe --previous releases/of1-blw-<prev>.bin --expect-blocks 10
 ```
 `mkbase.py` swaps the version marker and removes the old driver; `build_ucode_driver.py` appends
-the new driver and checks the firmware's own decompressor accepts it. Both must report
-"64K blocks changed: [9]". Record the md5 of the image, of blocks 1-15 and of block 9, and add the
-image to `releases/MD5SUMS`.
+the new driver, checks the firmware's own decompressor accepts it, and refuses to write the image
+unless the blocks that differ from the previous release are exactly `--expect-blocks`. From 26.11.29
+our files are alone in block 10, so a release changes block 10 only. (26.11.29 itself was the one
+move: `mkbase.py --move-to-block10` and `--expect-blocks 9,10`; up to 26.11.28 it was block 9.)
+Run `tools/emu_platform.py` on the driver (`--pe`, `--app`). Record the md5 of the image, of blocks
+1-15 and of block 10, check blocks 1-9 and 11-15 are still `d11b766a…`, and add the image to
+`releases/MD5SUMS`.
 
 ## 6. Stage the flash script
 
-Copy `tools/flash/flash-block9-<prev>.sh` to `flash-block9-<new>.sh` and change the version labels
-(`NEW`, `OLD`, the header) and the hashes: the image's md5; `OUT9`, the md5 of blocks 1-8 and 10-15
-(the same in both releases: check it is); `OLD9` and `NEW9`, block 9 of each. Diff the two: nothing
-else may differ. Test it on a fake chip (`FH=/tmp/fake.bin`, a copy of the previous release, as root)
-including `FLASH_TEST_FAULT=1` (repaired on a retry) and `=5` (exit 2).
+Copy `tools/flash/flash-block10-<prev>.sh` to `flash-block10-<new>.sh` and change the version labels
+(`NEW`, `FROM`, the header) and the hashes: the image's md5; `FROM10` and `NEW10`, block 10 of each.
+`OUT10` (blocks 1-9 and 11-15) stays `d11b766a…`. Diff the two: nothing else may differ. Test it on a
+fake chip (`FH=/tmp/fake.bin`, a copy of the previous release, as root) including
+`FLASH_TEST_FAULT=1` (repaired on a retry), `=3` (exit 2, then a re-run completes) and
+`FLASH_TEST_STOP=1` and `=2` (a power cut after each step: a re-run completes).
 
-The script (from 26.11.28) refuses unless blocks 1-8 and 10-15 are the previous release's, checks
-the lock registers and the kernel's panel fix first, writes block 9 only, and reads the whole chip
-back twice, writing again up to three times. Exit status: 0 verified (or already there); 1 refused
-or nothing written (the chip is as it was: rebooting is safe); 2 not verified after three writes
-(**don't reboot**: run it again, it rewrites a torn block 9). Scripts before 26.11.28 only printed
-`FLASH MISMATCH` and exited 0: check their output, not their status.
+The script refuses unless blocks 1-9 and 11-15 are the block-10 layout's, checks the lock registers,
+the kernel's panel fix and that fh has `/dev/fhp`, then writes block 10 in three steps, each read
+back twice: erase and write both files' bodies with both headers blank (the chip then boots like
+stock firmware: the firmware's file list stops at a blank header); the driver's header; the
+marker's header, State byte last (the last two through `/dev/fhp`, programming without an erase).
+Exit status: 0 verified (or already there); 1 refused, nothing written (rebooting is safe); 2 not
+verified (**don't reboot**: run it again, it starts again from step 1). `FH_KO=` points it at an fh.ko
+with `/dev/fhp` if the installed one has none.
+
+Older scripts: `flash-to-block10-26.11.29.sh` moves a chip from 26.11.28 to 26.11.29 (block 10, then
+block 9); `flash-block9-*.sh` (26.11.16-26.11.28) wrote block 9 with the same exit statuses from
+26.11.28; scripts before 26.11.28 only printed `FLASH MISMATCH` and exited 0: check their output, not
+their status.
 
 ## 7. Flash (only with the owner's OK)
 
@@ -108,9 +121,9 @@ kernel build it with `make -C fh` against that kernel, or point the scripts at a
 NVRAM or the boot block without `unprotect=1`; the flash script loads it with `writable=1` only.
 
 ```
-scp releases/of1-blw-<new>.bin tools/flash/flash-block9-<new>.sh tools/lockregs.py of@unit:/tmp/
+scp releases/of1-blw-<new>.bin tools/flash/flash-block10-<new>.sh tools/lockregs.py of@unit:/tmp/
 sudo python3 /tmp/lockregs.py          # all 01, or reboot first
-sudo bash /tmp/flash-block9-<new>.sh   # exit 0 and "FLASH VERIFIED"; prints where it kept its dumps
+sudo bash /tmp/flash-block10-<new>.sh  # exit 0 and "FLASH VERIFIED"; prints where it kept its dumps
 ```
 Keep the post-flash dump (`post1.bin` in the directory it names) and a copy of its block 0
 (`head -c 65536 …/post1.bin`) for the NVRAM diff after the boot.

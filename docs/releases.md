@@ -1,7 +1,9 @@
 # Releases
 
 BirdsLikeWires releases for the OpenFrame 1, newest last. Each is built on the one before
-(`tools/mkbase.py`), and from 26.11.16 on differs from it in block 9 only. The images are on the
+(`tools/mkbase.py`). From 26.11.16 to 26.11.28 each differs from the one before in block 9 only;
+26.11.29 moves the version marker and BlwPlatformDxe to block 10 (blocks 9 and 10 change, once), and
+from then on releases differ in block 10 only. The images are on the
 repository's GitHub Releases page, tagged by version (md5s in `releases/MD5SUMS`); how they were
 made and tested is in [process.md](process.md).
 
@@ -27,6 +29,7 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
 | 26.11.26 | Boots up to 1 s faster with a USB drive attached: shorter fixed waits in the firmware's USB code |
 | 26.11.27 | Boots with a USB drive attached that the stock firmware hung on (a 4 TB disk in an ASMedia caddy): five fixes to the firmware's USB code |
 | 26.11.28 | The kernel starts ~0.1 s sooner from the internal memory (SdHost's command wait); the internal memory is always the shell's fs0 |
+| 26.11.29 | Safer updates: the version marker and BlwPlatformDxe move to block 10, alone, so later updates never erase stock code and a power cut during one leaves a unit that boots |
 
 ## Releases (2026-11-08)
 
@@ -369,3 +372,37 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
   `boot.nsh` whose `BlwMmcFix.efi` line fails on firmware that already fixes the MMC driver, so later boots went to GRUB;
   the 26.11.27 case was the first boot after flashing it over 26.11.26-dev10. Fixed in `of-bootnsh` v26.11.8
   (openframe-linux `11f932a`). With the caddy attached the shell's direct start works: 8 of 8.
+- **26.11.29 (OF1)**, `of1-blw-26.11.29.bin` (md5 `af42bbba…`), blocks 9 and 10 vs 26.11.28. **Safer updates.** No
+  change to what the firmware does (BlwPlatformDxe is the same source as 26.11.28's); the version marker and the driver
+  move from block 9, where they shared the 64 KB erase block with the end of the stock graphics driver (GOP), to block 10,
+  alone. Up to 26.11.28 every update erased block 9: a power cut in that window left the GOP's tail and our files torn,
+  and only a chip swap recovered it. Now block 9 is the GOP's tail plus a RAW spacer file of FF bytes
+  (`8e9d1954-ef62-4aa4-b8e5-88602b186161`, 0x91710-0xA0000, `tools/build_patched.py add_spacer`) and is never written
+  again; block 10 holds the marker (0xA0000) and the driver (0xA0048), blocks 11-12 stay free. Built with
+  `tools/mkbase.py --move-to-block10` (once) and `tools/build_ucode_driver.py --previous 26.11.28 --expect-blocks 9,10`.
+  **How an update works from now on** (`tools/flash/flash-block10-*.sh`): erase block 10 and write both files' bodies
+  with both 24-byte headers left blank (FF); then the driver's header; then the marker's header, State byte last. The
+  last two go through fh's new `/dev/fhp` (program without erase: refuses any bit that would need an erase, programs
+  only the bytes that differ, verifies). The firmware's file list stops at the first blank header, so at every moment the
+  chip boots: with block 10's headers blank it boots like stock firmware, without BlwPlatformDxe. **The move itself**
+  (`tools/flash/flash-to-block10-26.11.29.sh`, from 26.11.28) writes block 10 first (while block 9 is 26.11.28's the
+  file list ends there, so the chip is still a working 26.11.28; if block 10 won't verify it is put back to blank before
+  the script calls a reboot safe), then block 9, the last time any update erases a block holding stock code. Units
+  already on a block-10 development build use `tools/flash/flash-block10-26.11.29.sh`. Both follow 26.11.28's script
+  (exit 0/1/2, three write+verify tries, re-run repairs a torn block, test mode); fake-chip suites 10 and 11 cases, all
+  passed (including power cuts after each step and a half-written marker header). Hashes: blocks 1-8 and 11-15
+  `afa006ad…` (= 26.11.28's), block 9 `98192835…`, block 10 `16450e67…`, blocks 1-9 and 11-15 `d11b766a…` (every
+  block-10 release keeps these), blocks 1-15 `ff693ddc…`. Emulator 124/124 on the release driver; decompressor check
+  passed; 26.11.28 still rebuilds byte for byte.
+  On hardware (the unknown Joggler, 2026-11-13, every boot a clean shutdown and a power cut by the plug, from the stick):
+  26.11.28 to 26.11.28-dev1 (the move, as development builds were then named) with the transition script: blocks 10 then
+  9 verified, block 0 unchanged, boots with the driver running from block 10. **The update's in-between state** (block 10
+  holding the bodies, both headers blank) **boots like stock firmware**: `EFI v2.0 by American Megatrends`, no SMBIOS,
+  the stock 103 Hz panel clock, kernel start 9.55 s. Then 26.11.29-dev1 (transition script, block 10 only: kernel 5.52
+  s), 26.11.29-dev2 (header-last via `/dev/fhp`: 5.53 s), and **26.11.29 flashed with the release script**
+  (`flash-block10-26.11.29.sh` from dev2: erase + bodies, driver header, marker header, each verified; block 0
+  unchanged; read-back `16a450e3…`; dump `firmware/efi-dumps/of1-unknown-20261113-26.11.29-postflash.bin`). Cold boot:
+  SSH after 24 s; `EFI v2.0 by BirdsLikeWires`, DMI 26.11.29 11/13/2026, slots 1/1, its own serial/UUID, BootCount
+  319, microcode 0x217, panel 60 Hz, kernel start 5.60 s, fsck clean; blocks 1-15 `ff693ddc…`; NVRAM diff = one 14-byte
+  MonotonicCounter record; lock registers 01. **Before an end user needs a block-10 update**, the kernel package must
+  ship an fh with `/dev/fhp` (openframe-firmware `0745fbc` on); the move from 26.11.28 needs only plain fh.
