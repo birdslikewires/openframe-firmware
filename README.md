@@ -84,6 +84,7 @@ first.
 |---|---|
 | `driver/` | BlwPlatformDxe (`ucode_late.asm` and includes), BlwMac.efi, BlwMmcFix.efi and MmcTest.efi, the one-off BlwLanMacDel.efi, FvDiag |
 | `tools/` | Image builders, emulators for the driver and apps, NVRAM and firmware-volume decoders, unit scripts |
+| `tools/of-firmware-update` | The updater: brings a unit from any firmware in `tools/firmware-manifest.txt` (releases from 26.11.29 on; stock O2, Verizon, Telstra) to a release, block 10 first, headers last once a unit has the block-10 layout; refuses firmware it doesn't know and saves a dump. `tools/mkmanifest.py` makes the manifest, `tools/test_of_firmware_update.sh` tests it on fake chips |
 | `tools/flash/` | The flash script for each release (block 9 up to 26.11.28; the move to block 10; block 10 from then on) |
 | `releases/` | Where release images go when downloaded or built (see its README); their md5s |
 | `docs/` | [process.md](docs/process.md) how releases are made and tested · [releases.md](docs/releases.md) every release · [nvram.md](docs/nvram.md) NVRAM and its rules · [history.md](docs/history.md) the original lab notebook |

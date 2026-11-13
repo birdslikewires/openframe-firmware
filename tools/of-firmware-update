@@ -1,0 +1,229 @@
+#!/bin/bash
+
+## of-firmware-update v26.11.1 (13th November 2026)
+##  Brings an OpenFrame 1's firmware to the BirdsLikeWires release in $IMG, from any firmware listed
+##  in $MANIFEST (BirdsLikeWires releases from 26.11.29 on, and the stock firmware we know: O2,
+##  Verizon, Telstra). Firmware it doesn't recognise is never written: a dump is saved.
+##
+##  of-firmware-update [--check]
+##    --check  say what would be done and write nothing (exit 0 up to date, 5 update needed).
+##
+##  Exit status:
+##    0  the chip holds the release, verified (or already did, or holds a newer one)
+##    1  refused or nothing written: the chip is as it was, rebooting is safe
+##    2  a write did not verify: DO NOT REBOOT OR POWER OFF; run this again (it carries on)
+##    3  firmware not recognised: nothing written, a dump saved in $DUMPDIR
+##    4  flash blocks are locked until the next reset: reboot, then run this again
+##    5  (--check only) an update is needed
+##
+##  How it writes, so that a power cut leaves the least at risk:
+##    - Never block 0 (NVRAM) or the boot block (14, 15).
+##    - Block 10 (the version marker and BlwPlatformDxe) first. While block 9 is not yet the
+##      release's, the firmware's file list ends in block 9 and never reaches block 10, so the chip
+##      still boots as it was; if block 10 won't verify, it is put back to blank before a reboot is
+##      called safe. Once block 9 is the release's (from 26.11.29 on), block 10 is written headers
+##      last: erase and write both files' bodies with both 24-byte headers blank (the chip then
+##      boots like stock firmware), then the driver's header, then the marker's header, the last
+##      two through /dev/fhp (program without erasing).
+##    - Then any other block that differs, in order. From stock firmware that is blocks 5-9: a
+##      power cut while one of those is being written can leave a unit that won't start. It happens
+##      once per unit; every later update writes block 10 only.
+##
+##  A chip part way through an update (block 10 already the release's) has its other differing
+##  blocks rewritten even if they match nothing in the manifest: they are torn writes.
+##
+##  Settings (environment): OF_FW_IMAGE, OF_FW_MANIFEST, OF_FW_DUMPDIR; FH_KO=/path/to/fh.ko loads
+##  a module that isn't installed. Test mode: FH=/path/to/a/1MB/file works on that file (no module,
+##  no lock registers, /dev/fhp emulated); FLASH_TEST_FAULT_BLOCK=n with FLASH_TEST_FAULT=N corrupts
+##  block n on its first N writes; FLASH_TEST_STOP=n (or 10.1, 10.2 for the header steps) stops
+##  (exit 9) right after that write, as a power cut would. None of these can touch a real chip.
+
+set -u
+IMG=${OF_FW_IMAGE:-/usr/lib/openframe-firmware/of1-blw.bin}
+MANIFEST=${OF_FW_MANIFEST:-/usr/lib/openframe-firmware/manifest.txt}
+DUMPDIR=${OF_FW_DUMPDIR:-/var/lib/openframe-firmware}
+TRIES=3
+CHECK=0
+case "${1:-}" in
+	--check) CHECK=1 ;;
+	"") ;;
+	*) echo "Usage: $0 [--check]"; exit 1 ;;
+esac
+FH=${FH:-/dev/fh}; FHP=${FHP:-/dev/fhp}; TEST=0; [ -f "$FH" ] && { TEST=1; FHP=$FH; }
+W=""
+
+say() { echo "of-firmware-update: $*"; }
+refuse() { [ -n "$W" ] && rm -rf "$W"; say "STOP: $*. Nothing was written; the chip is as it was."; exit 1; }
+failed() { say "FAILED: $*. DO NOT REBOOT OR POWER OFF: the unit may not start."
+	say "Run this again; if it still fails, leave the unit on and get help. Dumps in $W"; exit 2; }
+m() { md5sum "$1" | cut -d' ' -f1; }
+blk() { dd if="$1" bs=64k skip="$2" count="$3" iflag=fullblock status=none; }
+bm() { blk "$1" "$2" 1 | md5sum | cut -d' ' -f1; }
+readchip() { dd if="$FH" bs=64k iflag=fullblock status=none of="$1"; }
+known() { grep -q "^$1 $2 " "$MANIFEST"; }
+label() { awk -v b="$1" -v h="$2" '$1 == b && $2 == h { print $3 }' "$MANIFEST" | head -1; }
+blank() { head -c "$3" /dev/zero | tr '\0' '\377' | dd of="$1" bs=1 seek="$2" conv=notrunc status=none; }
+u24() { od -An -tu1 -j"$2" -N3 "$1" | awk '{print $1 + $2 * 256 + $3 * 65536}'; }
+teststop() { [ $TEST = 1 ] && [ "${FLASH_TEST_STOP:-}" = "$1" ] && { say "TEST: stopped after $1"; exit 9; }; return 0; }
+
+[ "$(id -u)" = 0 ] || refuse "run it as root (sudo)"
+[ -f "$IMG" ] || refuse "no firmware image at $IMG"
+[ -f "$MANIFEST" ] || refuse "no manifest at $MANIFEST"
+W=$(mktemp -d /tmp/of-firmware-update.XXXXXX) || { W=""; refuse "could not make a work directory"; }
+
+# The image: 1 MB, its md5 as shipped beside it, a BirdsLikeWires marker, and every block 1-15
+# listed in the manifest as this release's.
+[ "$(stat -c %s "$IMG")" = 1048576 ] || refuse "$IMG is not 1 MB"
+if [ -f "$IMG.md5" ]; then
+	[ "$(cut -d' ' -f1 "$IMG.md5")" = "$(m "$IMG")" ] || refuse "$IMG does not match $IMG.md5"
+fi
+NEW=$(grep -aoE 'BirdsLikeWires OpenFrame EFI [0-9]+\.[0-9]+\.[0-9]+(-dev[0-9]+)? \(OF1\)' "$IMG" | head -1 | awk '{print $4}')
+[ -n "$NEW" ] || refuse "$IMG has no BirdsLikeWires version marker"
+declare -a T C
+for n in $(seq 1 15); do
+	T[$n]=$(bm "$IMG" $n)
+	[ "$(awk -v b="$n" -v h="${T[$n]}" '$1 == b && $2 == h { print $3 }' "$MANIFEST" | tr ',' '\n' | grep -cx "$NEW")" = 1 ] ||
+		refuse "the manifest does not list block $n of $IMG as $NEW's"
+done
+BLANK=$(head -c 65536 /dev/zero | tr '\0' '\377' | md5sum | cut -d' ' -f1)
+
+if [ $TEST = 0 ]; then
+	[ -e /sys/module/fh ] || modprobe fh 2>/dev/null || { [ -n "${FH_KO:-}" ] && insmod "$FH_KO"; } || refuse "could not load fh"
+	for i in 1 2 3 4 5; do [ -e "$FH" ] && break; sleep 0.2; done
+else
+	say "TEST MODE: working on the file $FH, not the chip"
+fi
+
+for i in 1 2; do readchip "$W/pre$i.bin" || refuse "could not read the chip"; done
+[ "$(m "$W/pre1.bin")" = "$(m "$W/pre2.bin")" ] || refuse "two reads of the chip differ"
+for n in $(seq 1 15); do C[$n]=$(bm "$W/pre1.bin" $n); done
+
+DIFF=""; for n in $(seq 1 15); do [ "${C[$n]}" = "${T[$n]}" ] || DIFF="$DIFF $n"; done
+if [ -z "$DIFF" ]; then say "the firmware is $NEW: nothing to do"; rm -rf "$W"; exit 0; fi
+# Never go backwards: a chip whose own marker says it is newer than this image is left alone.
+CUR=$(dd if="$W/pre1.bin" bs=64k skip=1 count=15 status=none | grep -aoE 'BirdsLikeWires OpenFrame EFI [0-9]+\.[0-9]+\.[0-9]+(-dev[0-9]+)? \(OF1\)' | head -1 | awk '{print $4}')
+if [ -n "$CUR" ] && [ "${CUR%%-*}" != "${NEW%%-*}" ] && [ "$(printf '%s\n%s\n' "${CUR%%-*}" "${NEW%%-*}" | sort -V | tail -1)" = "${CUR%%-*}" ]; then
+	say "the firmware is $CUR, newer than $NEW: left alone"; rm -rf "$W"; exit 0
+fi
+
+unknown() {
+	mkdir -p "$DUMPDIR" 2>/dev/null
+	D="$DUMPDIR/of1-firmware-$(date -u +%Y%m%d)-$(m "$W/pre1.bin" | cut -c1-8).bin"
+	if cp "$W/pre1.bin" "$D" 2>/dev/null; then say "saved a dump of this firmware to $D"; else say "could not save a dump in $DUMPDIR"; fi
+	say "this firmware is not one we know ($*), so it is left alone. Nothing was written."
+	rm -rf "$W"; exit 3
+}
+OURS9=0; [ "${C[9]}" = "${T[9]}" ] && OURS9=1          # block-10 layout: block 10 is ours, whatever it holds
+UNDERWAY=0; [ "${C[10]}" = "${T[10]}" ] && UNDERWAY=1   # block 10 goes first: an update of ours was under way
+DESC=""
+for n in $DIFF; do
+	[ $n -ge 14 ] && unknown "its boot block (block $n) differs from ours"
+	if [ $n = 10 ] && [ $OURS9 = 1 ]; then DESC="$DESC 10:ours"; continue; fi
+	if [ "${C[$n]}" = $BLANK ] && known $n "${C[$n]}"; then DESC="$DESC $n:blank"
+	elif known $n "${C[$n]}"; then DESC="$DESC $n:$(label $n "${C[$n]}" | cut -d, -f1)$(label $n "${C[$n]}" | grep -q , && echo +)"
+	elif [ $UNDERWAY = 1 ]; then DESC="$DESC $n:torn"
+	else unknown "block $n matches no release or stock firmware we have"; fi
+done
+ORDER=""; for n in $DIFF; do [ $n = 10 ] && ORDER="10"; done
+for n in $DIFF; do [ $n = 10 ] || ORDER="$ORDER $n"; done
+ORDER=$(echo $ORDER)
+HDRLAST=0; case " $ORDER " in *" 10 "*) [ $OURS9 = 1 ] && HDRLAST=1 ;; esac
+RISKY=""; for n in $ORDER; do [ $n != 10 ] && RISKY="$RISKY $n"; done
+say "firmware now: blocks that differ from $NEW:$DESC"
+say "plan: write block$( [ $(echo $ORDER | wc -w) -gt 1 ] && echo s) $ORDER$( [ $HDRLAST = 1 ] && echo ' (block 10 headers last)')"
+if [ $CHECK = 1 ]; then rm -rf "$W"; exit 5; fi
+
+if [ $TEST = 0 ]; then
+	KO=$(find /lib/modules/$(uname -r) -name 'gma500_gfx.ko*' | head -1)
+	case "$KO" in *.xz) KCAT=xzcat ;; *.zst) KCAT=zstdcat ;; *.gz) KCAT=zcat ;; *) KCAT=cat ;; esac
+	[ -n "$KO" ] && $KCAT "$KO" | grep -aq "pre-programmed mode is" || refuse "this kernel's gma500 lacks the 60 Hz panel fix: install 6.18.63-4 or later first"
+	LOCKED=$(python3 -c '
+import mmap, os, sys
+f = os.open("/dev/mem", os.O_RDONLY | os.O_SYNC)
+m = mmap.mmap(f, 0x100000, mmap.MAP_SHARED, mmap.PROT_READ, offset=0xFFB00000)
+print(" ".join(b for b in sys.argv[1:] if m[int(b) * 0x10000 + 2] & 2))' $ORDER) || refuse "could not read the lock registers"
+	if [ -n "$LOCKED" ]; then rm -rf "$W"; say "flash blocks $LOCKED are locked down until the next reset: reboot, then run this again"; exit 4; fi
+	# fh must be writable, and have /dev/fhp if block 10 goes headers last: reload it if not.
+	{ [ "$(cat /sys/module/fh/parameters/writable 2>/dev/null)" = Y ] && { [ $HDRLAST = 0 ] || [ -e "$FHP" ]; }; } || {
+		rmmod fh 2>/dev/null
+		if [ -n "${FH_KO:-}" ]; then insmod "$FH_KO" writable=1 || refuse "could not load $FH_KO"
+		else modprobe fh writable=1 || refuse "could not load fh writable"; fi
+		for i in 1 2 3 4 5; do [ -e "$FH" ] && { [ $HDRLAST = 0 ] || [ -e "$FHP" ]; } && break; sleep 0.2; done
+	}
+	[ "$(cat /sys/module/fh/parameters/writable 2>/dev/null)" = Y ] || refuse "fh is not writable"
+	[ $HDRLAST = 0 ] || [ -e "$FHP" ] || refuse "this kernel's fh has no $FHP: update the kernel (6.18.63-5 or later)"
+fi
+
+# put fh|fhp <n> <file>: write the 64 KB file to block n. /dev/fhp is emulated in test mode:
+# refused (nothing written) if any bit would need setting, else ANDed in.
+put() {
+	if [ $TEST = 1 ] && [ "$1" = fhp ]; then
+		python3 - "$FH" "$2" "$3" <<-'EOF'
+		import sys
+		chip, n, new = sys.argv[1], int(sys.argv[2]), open(sys.argv[3], 'rb').read()
+		with open(chip, 'r+b') as f:
+		    f.seek(n * 65536); was = f.read(65536)
+		    if any((w & x) != x for w, x in zip(was, new)): sys.exit("fhp: a bit would need setting; nothing written")
+		    f.seek(n * 65536); f.write(bytes(w & x for w, x in zip(was, new)))
+		EOF
+	else
+		dd if="$3" of="$([ "$1" = fhp ] && echo "$FHP" || echo "$FH")" bs=64k seek="$2" count=1 iflag=fullblock conv=notrunc status=none
+	fi
+}
+fault() { [ $TEST = 1 ] && [ "${FLASH_TEST_FAULT_BLOCK:-}" = "$1" ] && [ "${FLASH_TEST_FAULT:-0}" -ge "$2" ] &&
+	printf '\x5a' | dd of="$FH" bs=1 seek=$(($1 * 65536 + 300)) conv=notrunc status=none; return 0; }
+# verify <n> <md5>: two reads; block n = md5.
+verify() { readchip "$W/r1.bin"; readchip "$W/r2.bin"; [ "$(bm "$W/r1.bin" $1)" = $2 ] && [ "$(bm "$W/r2.bin" $1)" = $2 ]; }
+# erase + program block n, up to $TRIES times. 0 = verified.
+writeblock() {
+	local n=$1 src=$2 want=$3 try
+	for try in $(seq 1 $TRIES); do
+		put fh $n "$src" || say "block $n, try $try: the write failed"
+		fault $n $try
+		verify $n $want && return 0
+		say "block $n, try $try: the read-back does not match"
+	done
+	return 1
+}
+
+for n in $ORDER; do blk "$IMG" $n 1 > "$W/b$n.bin"; done
+for n in $ORDER; do
+	if [ $n = 10 ] && [ $HDRLAST = 1 ]; then
+		MSIZE=$(u24 "$W/b10.bin" 20); DRV=$(( (MSIZE + 7) & ~7 ))
+		[ "$MSIZE" -ge 24 ] && [ $DRV -lt 65512 ] && [ "$(u24 "$W/b10.bin" $((DRV + 20)))" -ge 24 ] || refuse "block 10 of $IMG is not marker + driver"
+		cp "$W/b10.bin" "$W/bodies.bin"; blank "$W/bodies.bin" 0 24; blank "$W/bodies.bin" $DRV 24
+		cp "$W/b10.bin" "$W/drvhdr.bin"; blank "$W/drvhdr.bin" 0 24
+		writeblock 10 "$W/bodies.bin" $(m "$W/bodies.bin") || failed "block 10 (bodies) does not verify after $TRIES tries"
+		say "block 10: bodies written, headers blank (the chip now boots like stock firmware)"
+		teststop 10.1
+		{ put fhp 10 "$W/drvhdr.bin" && verify 10 $(m "$W/drvhdr.bin"); } || failed "block 10's driver header does not verify"
+		say "block 10: driver header written"
+		teststop 10.2
+		{ put fhp 10 "$W/b10.bin" && verify 10 ${T[10]}; } || failed "block 10's marker header does not verify"
+		say "block 10: marker header written"
+	elif [ $n = 10 ]; then
+		if ! writeblock 10 "$W/b10.bin" ${T[10]}; then
+			# Block 9 isn't ours yet, so the file list ends there: blank, block 10 is what this chip
+			# booted with. Only then is a reboot known to be safe.
+			if [ "${C[10]}" = $BLANK ]; then
+				say "block 10 does not verify: putting it back to blank"
+				head -c 65536 /dev/zero | tr '\0' '\377' > "$W/blank.bin"
+				FLASH_TEST_FAULT=${FLASH_TEST_FAULT_BLANK:-0} writeblock 10 "$W/blank.bin" $BLANK && [ "$(bm "$W/r1.bin" 9)" = "${C[9]}" ] &&
+					refuse "block 10 could not be written; it is blank again, as before"
+			fi
+			failed "block 10 does not verify after $TRIES tries"
+		fi
+		say "block 10 written and verified"
+	else
+		writeblock $n "$W/b$n.bin" ${T[$n]} || failed "block $n does not verify after $TRIES tries"
+		say "block $n written and verified"
+	fi
+	teststop $n
+done
+
+for i in 1 2; do readchip "$W/post$i.bin"; done
+[ "$(m "$W/post1.bin")" = "$(m "$W/post2.bin")" ] || failed "two reads of the chip differ after the update"
+for n in $(seq 1 15); do [ "$(bm "$W/post1.bin" $n)" = "${T[$n]}" ] || failed "block $n is not $NEW's after the update"; done
+cmp -s <(head -c 65536 "$W/pre1.bin") <(head -c 65536 "$W/post1.bin") || say "NOTE: block 0 (NVRAM) changed while this ran"
+say "UPDATED: the firmware is $NEW, verified (read-back $(m "$W/post1.bin")); dumps in $W"
+exit 0
