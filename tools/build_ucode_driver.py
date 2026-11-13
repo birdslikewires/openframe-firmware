@@ -171,6 +171,8 @@ def main():
     ap.add_argument('--pe', help='also write the PE32 image here')
     ap.add_argument('--raw-sections', action='store_true', help='PE32 and UI uncompressed (v10/v11 packaging)')
     ap.add_argument('--check-with-core', metavar='CORE_DXE_PE', help='verify the compressed stream with the firmware decompressor')
+    ap.add_argument('--previous', help='the previous release: also report (and with --expect-blocks, enforce) the 64K blocks that differ from it')
+    ap.add_argument('--expect-blocks', help='fail unless exactly these 64K blocks change, e.g. 10 or 9,10 (against --previous if given, else the base)')
     ap.add_argument('--bios-version', required=True, help='SMBIOS BIOS version, e.g. 26.11.16; a development build 26.11.26-dev1')
     ap.add_argument('--bios-date', required=True, help='SMBIOS BIOS release date, MM/DD/YYYY')
     ap.add_argument('--smbios-out', help='also write the SMBIOS entry point + table here (address 0)')
@@ -269,12 +271,17 @@ def main():
     changed = [i for i in range(len(img)) if img[i] != orig[i]]
     if min(changed) < off or max(changed) >= off + size:
         bp.fail('bytes outside the new file changed')
+    ref = open(a.previous, 'rb').read() if a.previous else orig
+    vs = sorted({i // 0x10000 for i in range(len(img)) if img[i] != ref[i]})
+    if a.expect_blocks is not None and vs != sorted(int(x) for x in a.expect_blocks.split(',')):
+        bp.fail('64K blocks changed %s, expected %s: nothing written' % (vs, a.expect_blocks))
     open(a.out, 'wb').write(img)
     print('microcode: sig 0x%x pf 0x%x, firmware keeps 0x%x at reset, driver loads 0x%x late'
           % (sig, pf, rev_old, rev_new))
     print('driver: code %d bytes, PE32 %d bytes, FFS file %d bytes at 0x%x (GUID %s)'
           % (len(code) - len(entry), len(pe), size, off, DRIVER_GUID))
-    print('wrote %s; 64K blocks changed: %s' % (a.out, sorted({i // 0x10000 for i in changed})))
+    print('wrote %s; 64K blocks changed: %s%s' % (a.out, sorted({i // 0x10000 for i in changed}),
+          '; against the previous release: %s' % vs if a.previous else ''))
 
 
 if __name__ == '__main__':

@@ -31,6 +31,8 @@ SHELL_GUID = 'c57ad6b7-0515-40a8-9d21-551652854e37'
 GOP_GUID = '2b13e5f0-e82e-4209-898a-8a53e8570db9'
 UCODE_GUID = '17088572-377f-44ef-8f4e-b09fff46a070'
 MARKER_GUID = 'd1728e0b-d49f-480e-a48d-d0b4ec5768f4'   # BirdsLikeWires version marker
+SPACER_GUID = '8e9d1954-ef62-4aa4-b8e5-88602b186161'   # BirdsLikeWires spacer: fills block 9 after the GOP
+BLOCK10 = 0xA0000                 # from 26.11.29 the marker and BlwPlatformDxe start here
 SHELL_PATCHES = [(0x1856, b'\x6a\x32', b'\x6a\x00'), (0x187E, b'\x6a\x32', b'\x6a\x00')]
 ALIAS_HELP = (0x235E2, 0x2404C)   # ALIAS help text, UTF-16, inside the shell PE
 SPLASH_OFF = 0x1696               # first pixel byte, right after `$ssd`
@@ -234,6 +236,25 @@ def add_marker(img, after, fv_end, text):
     fix_checksums(img, off, size)
     check_file(img, off)
     return 'marker: %r at 0x%x' % (text, off)
+
+
+def add_spacer(img, after, end):
+    """A RAW file (the same kind as the version marker, which the firmware is proven to accept)
+    whose data is all FF, from the first 8-byte boundary after `after` up to `end`, so that the
+    next file starts exactly at `end`. From 26.11.29 it fills block 9 after the GOP, putting the
+    marker and BlwPlatformDxe in block 10, which is then the only block an update writes."""
+    off = (after + 7) & ~7
+    size = end - off
+    if size < 24 or size >= 1 << 24 or end & 7:
+        fail('no room for a spacer from 0x%x to 0x%x' % (off, end))
+    if set(img[off:end]) != {0xff}:
+        fail('spacer space 0x%x-0x%x is not free' % (off, end))
+    hdr = bytearray(uuid.UUID(SPACER_GUID).bytes_le + b'\0\0' + bytes([0x01, 0x00]) +
+                    size.to_bytes(3, 'little') + b'\xf8')   # RAW file, state = valid (erase polarity 1)
+    img[off:off + 24] = hdr
+    fix_checksums(img, off, size)
+    check_file(img, off)
+    return 'spacer: 0x%x-0x%x (%d bytes, RAW, FF data)' % (off, end, size)
 
 
 def main():

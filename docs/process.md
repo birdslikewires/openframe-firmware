@@ -149,11 +149,16 @@ timestamp counter) its own entry, the images already loaded by then (in order), 
 loaded after it, protocols appearing (graphics, BlockIo, file systems, USB, console, PCI), the
 boot manager's stage signals and ReadyToBoot, and leaves them in the volatile variable
 `BlwBootTimes` (BS+RT, no NV bit: nothing reaches the flash). Give a development build the version
-of the release it is built on plus `-devN`, counting up (`26.11.26-dev1`, `-dev2`, ...), so it is
-never mistaken for a release, and never publish it.
+of the release it is working towards plus `-devN`, counting up: after 26.11.28 is released, the
+builds towards the next one are `26.11.29-dev1`, `-dev2`, ... Pass that full version to both
+`mkbase.py` (it goes into the version marker) and `--bios-version`. A `-devN` is never mistaken for a
+release; never publish one. If the work ends up released under a different number, say so in
+releases.md.
 
-Until 2026-11-12 development builds were numbered 26.11.90-99 and then counted down from .89; some
-pushed commits, test-unit dumps and scripts carry those numbers. They are, in order:
+Until 2026-11-13 a development build carried the version of the release it was built ON instead
+(26.11.27-dev1 to -dev6 were the builds that became 26.11.28; the table below keeps those names),
+and until 2026-11-12 development builds were numbered 26.11.90-99 and then counted down from .89;
+some pushed commits, test-unit dumps and scripts carry those numbers. They are, in order:
 
 | then | now | what |
 |---|---|---|
