@@ -63,7 +63,8 @@ venv/bin/python -I tools/emu_platform.py /tmp/dxe.efi /tmp/app.efi       # BlwPl
 venv/bin/python -I tools/build_blwmac_app.py /tmp/BlwMac.efi
 venv/bin/python -I tools/emu_blwmac.py /tmp/BlwMac.efi                   # BlwMac.efi
 venv/bin/python -I tools/emu_mmcinit.py releases/of1-blw-<prev>.bin driver/mmcinit_sig.inc  # SdHost's wait
-venv/bin/python -I tools/emu_mmcfix.py <firmware.bin> <BlwMmcFix.efi> <MmcTest.efi>     # BlwMmcFix.efi
+venv/bin/python -I tools/emu_mmcfix.py <firmware.bin> <BlwMmcFix.efi> <MmcTest.efi>     # BlwMmcFix.efi (and on every release's wrappers)
+venv/bin/python -I tools/emu_mmcfix.py --mutate tools/mutations/mmcfix.py <firmware.bin> <MmcTest.efi>
 venv/bin/python -I tools/emu_splash.py of1_efi_o2.img of2_efi_cisco.img [more images]   # the splash, on real display drivers
 venv/bin/python -I tools/emu_countdown.py of1_efi_o2.img of2_efi_cisco.img [more images] # the countdown, on real shells
 venv/bin/python -I tools/emu_usbfirst.py --of2-shell of2_efi_cisco.img                   # USB-first, on both shell builds

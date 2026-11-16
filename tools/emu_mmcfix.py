@@ -2,14 +2,28 @@
 and card, first as it is, to show the bug, then wrapped by BlwMmcFix.efi, which must make every
 read and write land where it should. Also runs MmcTest.efi against the same fake disk.
 
-    venv/bin/python -I tools/emu_mmcfix.py <firmware.bin> <BlwMmcFix.efi> <MmcTest.efi>
+    venv/bin/python -I tools/emu_mmcfix.py <firmware.bin> <BlwMmcFix.efi> <MmcTest.efi> [RELEASE.bin ...]
+    venv/bin/python -I tools/emu_mmcfix.py --mutate tools/mutations/mmcfix.py <firmware.bin> <MmcTest.efi> [RELEASE.bin ...]
+
+BlwMmcFix.efi must also succeed, changing nothing, where the driver is already fixed: by our
+firmware's BlwPlatformDxe (the real one, from each release image given, and from releases/
+of1-blw-26.11.22.bin on if they are there, its wrappers set up as at boot) or by an earlier run of
+itself; and fail where there is nothing it knows (another driver's BlockIo, or a wrapper-shaped
+function that doesn't wrap the buggy driver or doesn't jump into mmc_split). --mutate breaks the
+app one way at a time (MUTATIONS = [(label, old, new), ...] in driver/blwmmcfix.asm) and checks
+these scenarios notice.
 
 The fake host checks what the real one needs: each data command's buffer is the driver's aligned
 bounce buffer and the transfer doesn't cross a 512 KB DMA boundary (SendCommand never handles a
 DMA interrupt, so on hardware that would hang). Exits non-zero on any failure.
 """
+import glob
+import os
+import shutil
 import struct
+import subprocess
 import sys
+import tempfile
 import zlib
 
 import pefile
@@ -23,6 +37,7 @@ import uefi_firmware  # noqa: E402
 MMC_BASE = 0x10000000
 FIX_BASE = 0x20000000
 TEST_BASE = 0x20100000
+BLW_BASE = 0x21000000       # a release's BlwPlatformDxe
 DATA = 0x30000000          # CardData, SdHostIo, ST, BS, ConOut
 BOUNCE = 0x30400000        # the driver's 512 KB-aligned bounce buffer (2 x 512 KB)
 HEAP = 0x31000000
@@ -44,7 +59,7 @@ def check(cond, what):
 class Emu:
     def __init__(self, mmc_pe, fix_pe, test_pe):
         self.uc = uc = Uc(UC_ARCH_X86, UC_MODE_32)
-        for base, size in ((MMC_BASE, 0x10000), (FIX_BASE, 0x10000), (TEST_BASE, 0x10000), (DATA, 0x1000000),
+        for base, size in ((MMC_BASE, 0x10000), (FIX_BASE, 0x10000), (TEST_BASE, 0x10000), (BLW_BASE, 0x40000), (DATA, 0x1000000),
                            (HEAP, 0x4000000), (HOOKS, 0x10000), (STOP, 0x1000), (STACK - 0x100000, 0x100000)):
             uc.mem_map(base, size)
         self.images = {}
@@ -202,6 +217,35 @@ class Emu:
         return self.call(fn, self.bio, media_id, lba & 0xffffffff, lba >> 32, size, buf)
 
 
+DRV_GUID = 'a5d5b0c1-7d2f-4c3e-9b1a-26b1e0f17217'
+WRAP = bytes.fromhex('e800000000588b80')       # call $+5; pop eax; mov eax, [eax + disp32]
+
+
+def blw_wrappers(path):
+    """A release's BlwPlatformDxe, as mapped, and the RVAs of its MMC wrappers (ReadBlocks,
+    WriteBlocks) and their slots; None if it has no MMC fix (before 26.11.22)."""
+    import build_patched as bp
+    from uefi_firmware import efi_compressor as ec
+    img = bytearray(open(path, 'rb').read())
+    o, g, n = [(o, g, n) for o, g, n in bp.fv_files(img)[0] if g == DRV_GUID][0]
+    p, pe = o + 24, None
+    while p < o + n:
+        sl, t = int.from_bytes(img[p:p + 3], 'little'), img[p + 3]
+        if t == 0x01:
+            st = bytearray(ec.TianoDecompress(bytes(img[p + 9:p + sl]), sl - 9))
+            pe = bytes(st[bp.pe_offset(st):])
+        elif t == 0x10:
+            pe = bytes(img[p + 4:p + sl])
+        p = (p + sl + 3) & ~3
+    m = pefile.PE(data=pe).get_memory_mapped_image()
+    hits = []
+    i = m.find(WRAP)
+    while i >= 0:
+        hits.append((i, i + 5 + struct.unpack_from('<i', m, i + 8)[0]))
+        i = m.find(WRAP, i + 1)
+    return (m, hits) if len(hits) == 2 else None
+
+
 def read_ok(e, lba, size, label, expect_bad=False):
     buf = 0x32000000
     e.uc.mem_write(buf, b'\xee' * size)
@@ -216,8 +260,62 @@ def read_ok(e, lba, size, label, expect_bad=False):
     return bad
 
 
+def mutate(path, fw_path, test_path, releases):
+    """Each mutation of driver/blwmmcfix.asm must make this emulator fail."""
+    import runpy
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    sys.path.insert(0, os.path.join(root, 'tools'))
+    from build_ucode_driver import pe32
+    survived = 0
+    for label, old, new in runpy.run_path(path)['MUTATIONS']:
+        with tempfile.TemporaryDirectory() as t:
+            d = os.path.join(t, 'driver')
+            shutil.copytree(os.path.join(root, 'driver'), d)
+            src = os.path.join(d, 'blwmmcfix.asm')
+            text = open(src).read()
+            if text.count(old) != 1:
+                print('PATTERN  %s (%d matches)' % (label, text.count(old)))
+                survived += 1
+                continue
+            open(src, 'w').write(text.replace(old, new))
+            out = os.path.join(t, 'BlwMmcFix.efi')
+            r = subprocess.run(['nasm', '-f', 'bin', '-I', d + '/', '-o', out + '.bin', src], capture_output=True, text=True)
+            if r.returncode:
+                print('BUILD    %s: %s' % (label, r.stderr.strip()[:100]))
+                survived += 1
+                continue
+            open(out, 'wb').write(pe32(open(out + '.bin', 'rb').read(), subsystem=10))
+            r = subprocess.run([sys.executable, '-I', os.path.abspath(__file__), fw_path, out, test_path] + releases,
+                               capture_output=True, text=True)
+            caught = r.returncode != 0
+            survived += not caught
+            print('%s %s' % ('CAUGHT  ' if caught else 'SURVIVED', label))
+    print('%d survived' % survived if survived else 'all caught')
+    sys.exit(1 if survived else 0)
+
+
+def make_run_fix(e):
+    def run_fix():
+        """Runs the app as the shell would, then frees its image as the core does when an app
+        returns: anything left pointing into it hits int3."""
+        e.uc.mem_write(FIX_BASE, e.images[FIX_BASE])
+        e.pools.clear()
+        e.freed.clear()
+        e.out.clear()
+        st = e.call(FIX_BASE + 0x200, 0x1234, e.st)
+        e.uc.mem_write(FIX_BASE, b'\xcc' * len(e.images[FIX_BASE]))
+        return st
+    return run_fix
+
+
 def main():
+    if sys.argv[1:2] == ['--mutate']:
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        rel = sys.argv[5:] or sorted(glob.glob(os.path.join(here, 'releases', 'of1-blw-26.11.[23]*.bin')))
+        return mutate(sys.argv[2], sys.argv[3], sys.argv[4], rel)
     fw_path, fix_path, test_path = sys.argv[1:4]
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    releases = sys.argv[4:] or sorted(glob.glob(os.path.join(here, 'releases', 'of1-blw-26.11.[23]*.bin')))
     mmc_pe = pefile.PE(data=find_pe(uefi_firmware.AutoParser(open(fw_path, 'rb').read()).parse()))
     e = Emu(mmc_pe, pefile.PE(fix_path), pefile.PE(test_path))
 
@@ -233,17 +331,7 @@ def main():
 
     print('BlwMmcFix:')
     in_pool = lambda a: HEAP <= a < HEAP + 0x4000000
-
-    def run_fix():
-        """Runs the app as the shell would, then frees its image as the core does when an app
-        returns: anything left pointing into it hits int3."""
-        e.uc.mem_write(FIX_BASE, e.images[FIX_BASE])
-        e.pools.clear()
-        e.freed.clear()
-        e.out.clear()
-        st = e.call(FIX_BASE + 0x200, 0x1234, e.st)
-        e.uc.mem_write(FIX_BASE, b'\xcc' * len(e.images[FIX_BASE]))
-        return st
+    run_fix = make_run_fix(e)
 
     nonmmc = DATA + 0x5008                          # another driver's BlockIo, found first
     e.uc.mem_write(nonmmc, bytes(e.uc.mem_read(e.bio, 0x300)))
@@ -252,7 +340,7 @@ def main():
     e.handles = [nonmmc, e.bio]
     st = run_fix()
     check(st == 0, 'returns EFI_SUCCESS (0x%x)' % st)
-    check(''.join(e.out).strip().endswith('00000001'), 'prints one instance wrapped: %r' % ''.join(e.out).strip())
+    check(''.join(e.out).strip().endswith('wrapped: 00000001, already fixed: 00000000'), 'prints one instance wrapped, none already fixed: %r' % ''.join(e.out).strip())
     check([t for t, _ in e.pools] == [3] and e.pools[0][1] not in e.freed, 'one boot-services code pool, kept')
     rd, wr = e.rd32(e.bio + 0x10), e.rd32(e.bio + 0x14)
     check(in_pool(rd) and in_pool(wr), 'ReadBlocks/WriteBlocks now in the pool copy (0x%x, 0x%x)' % (rd, wr))
@@ -311,17 +399,25 @@ def main():
     check(st == 0x80000007 and reads == 2, 'third piece fails -> EFI_DEVICE_ERROR after two good pieces (0x%x, %d reads)' % (st, reads))
     e.hooks[e.rd32(e.host + 0x0c)] = orig_send
 
-    print('Run again, with a BlockIo that isn\'t the MMC driver\'s:')
+    print('Run again (boot.nsh run twice), with a BlockIo that isn\'t the MMC driver\'s:')
     other = DATA + 0x4008
     e.uc.mem_write(other, bytes(e.uc.mem_read(e.bio, 0x300)))
     e.uc.mem_write(other + 0x8, struct.pack('<I', other + 0x20))
     e.uc.mem_write(other + 0x10, struct.pack('<II', TEST_BASE + 0x200, TEST_BASE + 0x200))   # some other code
     e.handles = [e.bio, other]
     st = run_fix()
-    check(st == 0x8000000e, 'nothing left to wrap -> EFI_NOT_FOUND (0x%x)' % st)
+    check(st == 0, 'the first run\'s wrapper counts as fixed -> EFI_SUCCESS (0x%x)' % st)
+    check(''.join(e.out).strip().endswith('00000000, already fixed: 00000001'), 'prints 0 wrapped, 1 already fixed: %r' % ''.join(e.out).strip())
     check(len(e.pools) == 1 and e.pools[0][1] in e.freed, 'and the unused copy is freed')
     check(e.rd32(e.bio + 0x10) == rd and e.rd32(other + 0x10) == TEST_BASE + 0x200, 'neither instance changed')
     read_ok(e, 2048, 3 << 20, 'the first copy still works')
+
+    print('Nothing it knows: only another driver\'s BlockIo:')
+    e.handles = [other]
+    st = run_fix()
+    check(st == 0x8000000e, 'EFI_NOT_FOUND (boot.nsh goes on to GRUB) (0x%x)' % st)
+    check(''.join(e.out).strip().endswith('00000000, already fixed: 00000000'), 'prints 0 and 0: %r' % ''.join(e.out).strip())
+    e.handles = [e.bio, other]
 
     print('A fresh instance of the MMC driver alongside the wrapped one:')
     e.uc.mem_write(other + 0x10, struct.pack('<II', MMC_BASE + 0xf38, MMC_BASE + 0x109c))
@@ -363,6 +459,58 @@ def main():
 
     # Not tested: the carry into the LBA's high dword. The driver only ever uses the low dword
     # (imul with [ebp+0x10]), so nothing it does can show it.
+
+    saved = (e, run_fix, rd, wr)
+    for path in releases:
+        r = blw_wrappers(path)
+        name = os.path.basename(path)
+        if r is None:
+            print('%s: no MMC fix in its BlwPlatformDxe (before 26.11.22), skipped' % name)
+            continue
+        m, ((rr, rslot), (wr, wslot)) = r
+        print('Already fixed by %s\'s BlwPlatformDxe (as at boot):' % name)
+        # A fresh machine for each: nothing left over from the scenarios above.
+        e = Emu(mmc_pe, pefile.PE(fix_path), pefile.PE(test_path))
+        run_fix = make_run_fix(e)
+        other = DATA + 0x4008
+        e.uc.mem_write(other, bytes(e.uc.mem_read(e.bio, 0x300)))
+        e.uc.mem_write(other + 0x8, struct.pack('<I', other + 0x20))
+        e.uc.mem_write(other + 0x10, struct.pack('<II', TEST_BASE + 0x200, TEST_BASE + 0x200))
+        e.uc.mem_write(BLW_BASE, b'\0' * 0x40000)
+        e.uc.mem_write(BLW_BASE, m)
+        e.uc.mem_write(BLW_BASE + rslot, struct.pack('<I', MMC_BASE + 0xf38))
+        e.uc.mem_write(BLW_BASE + wslot, struct.pack('<I', MMC_BASE + 0x109c))
+        e.uc.mem_write(e.bio + 0x10, struct.pack('<II', BLW_BASE + rr, BLW_BASE + wr))
+        e.handles = [other, e.bio]
+        st = run_fix()
+        check(st == 0, 'EFI_SUCCESS: the kernel can start (0x%x)' % st)
+        check(''.join(e.out).strip().endswith('00000000, already fixed: 00000001'), 'prints 0 wrapped, 1 already fixed: %r' % ''.join(e.out).strip())
+        check(e.rd32(e.bio + 0x10) == BLW_BASE + rr and e.rd32(e.bio + 0x14) == BLW_BASE + wr, 'the firmware\'s wrappers left in place')
+        check(len(e.pools) == 1 and e.pools[0][1] in e.freed, 'its own copy freed')
+        read_ok(e, 2048, 3 << 20, 'reads through the firmware\'s wrapper')
+        # Look-alikes: each must make the app fail (nothing else on the system).
+        e.handles = [e.bio]
+        for label, slot_val, patch in (('its slot holds another driver\'s ReadBlocks', TEST_BASE + 0x200, None),
+                                       ('its slot is empty', 0, None),
+                                       ('its jmp goes elsewhere', MMC_BASE + 0xf38, (rr + 13, bytes([(m[rr + 13] + 1) & 0xff]))),
+                                       ('not a jmp after the load', MMC_BASE + 0xf38, (rr + 12, b'\x90')),
+                                       ('its split takes 1 MB pieces', MMC_BASE + 0xf38, 'piece'),
+                                       ('it doesn\'t start with the call', MMC_BASE + 0xf38, (rr, b'\x90')),
+                                       ('it loads through ecx, not the slot', MMC_BASE + 0xf38, (rr + 7, b'\x81'))):
+            e.uc.mem_write(BLW_BASE, m)
+            e.uc.mem_write(BLW_BASE + rslot, struct.pack('<I', slot_val))
+            e.uc.mem_write(BLW_BASE + wslot, struct.pack('<I', MMC_BASE + 0x109c))
+            if patch == 'piece':
+                tgt = rr + 14 + struct.unpack('<b', m[rr + 13:rr + 14])[0]
+                e.uc.mem_write(BLW_BASE + tgt + 17, struct.pack('<I', 0x100000))
+            elif patch:
+                e.uc.mem_write(BLW_BASE + patch[0], patch[1])
+            e.uc.mem_write(e.bio + 0x10, struct.pack('<II', BLW_BASE + rr, BLW_BASE + wr))
+            st = run_fix()
+            check(st == 0x8000000e, 'a look-alike (%s) is not taken as fixed (0x%x)' % (label, st))
+    e, run_fix, rd, wr = saved
+    e.handles = [e.bio, other]
+    e.uc.mem_write(e.bio + 0x10, struct.pack('<II', rd, wr))
 
     print('MmcTest.efi:')
     e.handles = [e.bio]
