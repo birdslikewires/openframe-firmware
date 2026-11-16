@@ -14,9 +14,13 @@
 ;   N--     keys waiting at that call (decimal, 99 at most)
 ;   K--------  the first of them: ScanCode, UnicodeChar (hex; Esc is 0017 0000)
 ;   C--u--  Simple Text Inputs, and those on USB, at the last count
-; At the shell's first ReadKeyStroke every waiting key is read and counted here, and the shell is
-; told there was none (EFI_NOT_READY), so it runs startup.nsh and the system starts: Esc pressed
-; at boot does not stop at the shell in this build. Later calls go straight through.
+;   P-----  when the first key was read (from the shell's first ReadKeyStroke on)
+;   W--     keys already waiting at that call (the rest of N came in the window)
+; At the shell's first ReadKeyStroke every waiting key is read and counted here; then, for a window
+; of KT_WINDOW ms, any that come in (a poll every 10 ms, Stall between: the keyboard's own timer
+; events run meanwhile). The shell is then told there was none (EFI_NOT_READY), so it runs
+; startup.nsh and the system starts: Esc pressed at boot does not stop at the shell in this
+; build, and a boot with it takes KT_WINDOW longer. Later calls go straight through.
 ;
 ; Reads only, apart from the string and, once, the console's ReadKeyStroke pointer. The release
 ; build has none of this.
@@ -32,6 +36,12 @@ KT_KS           equ     34
 KT_KU           equ     38
 KT_C            equ     43
 KT_UN           equ     46
+KT_P            equ     49
+KT_W            equ     55
+KT_WINDOW       equ     2000                    ; ms the shell's first ReadKeyStroke waits for keys
+KT_POLL_US      equ     10000                   ; Stall between polls
+KT_MAXPOLLS     equ     1000                    ; whatever the clock says
+KT_MAXKEYS      equ     200
 
 ; kt_start: in edi = entry.here, [ebp+12] = SystemTable. Keeps the system table for the shell's
 ; hook, watches console inputs appearing, and counts any already there. Keeps ebx, esi, edi.
@@ -175,8 +185,8 @@ kt_shell:
         ret
 
 ; EFI_STATUS EFIAPI kt_rks(EFI_SIMPLE_TEXT_INPUT_PROTOCOL *This, EFI_INPUT_KEY *Key): the first
-; call (the shell's) reads and counts every waiting key, and says there was none; later calls go
-; to the console's own.
+; call (the shell's) reads and counts the waiting keys, then those that come in for KT_WINDOW ms,
+; and says there was none; later calls go to the console's own.
 kt_rks:
         call    .here
 .here:  pop     eax
@@ -184,7 +194,7 @@ kt_rks:
         jne     .pass
         push    ebp
         mov     ebp, esp
-        sub     esp, 4                          ; -4 EFI_INPUT_KEY (ScanCode, UnicodeChar)
+        sub     esp, 12                         ; -4 EFI_INPUT_KEY, -8 polls, -12 window start (ms)
         push    ebx
         push    esi
         push    edi
@@ -192,28 +202,31 @@ kt_rks:
         mov     byte [edi + (kt_done - .here)], 1
         mov     edx, KT_F
         call    kt_stamp
+        call    kt_ms
+        mov     [ebp - 12], eax
+        mov     dword [ebp - 8], 0
         xor     esi, esi                        ; esi = keys read
-.read:  cmp     esi, 200
+        call    .drain
+        mov     eax, esi                        ; W: those already waiting
+        mov     ecx, 2
+        mov     edx, KT_W
+        call    kt_dec
+.wait:  cmp     esi, KT_MAXKEYS
         jae     .done
-        lea     eax, [ebp - 4]
-        push    eax
-        push    dword [ebp + 8]                 ; This
-        call    [edi + (kt_orig - .here)]
-        add     esp, 8
-        test    eax, eax
-        jnz     .done
-        inc     esi
-        cmp     esi, 1
-        jne     .read
-        movzx   eax, word [ebp - 4]             ; the first key
-        mov     ecx, 4
-        mov     edx, KT_KS
-        call    kt_hex
-        movzx   eax, word [ebp - 2]
-        mov     ecx, 4
-        mov     edx, KT_KU
-        call    kt_hex
-        jmp     .read
+        cmp     dword [ebp - 8], KT_MAXPOLLS
+        jae     .done
+        call    kt_ms
+        sub     eax, [ebp - 12]
+        cmp     eax, KT_WINDOW
+        jae     .done
+        mov     eax, [edi + (kt_st - .here)]
+        mov     eax, [eax + 0x3c]               ; BootServices
+        push    KT_POLL_US
+        call    [eax + 0x88]                    ; BS->Stall
+        add     esp, 4
+        inc     dword [ebp - 8]
+        call    .drain
+        jmp     .wait
 .done:  mov     eax, esi
         mov     ecx, 2
         mov     edx, KT_N
@@ -225,6 +238,34 @@ kt_rks:
         leave
         ret
 .pass:  jmp     [eax + (kt_orig - .here)]
+
+; .drain (kt_rks's frame): reads keys until none is waiting or KT_MAXKEYS are read; the first one's
+; code and time are recorded.
+.drain:
+.read:  cmp     esi, KT_MAXKEYS
+        jae     .dret
+        lea     eax, [ebp - 4]
+        push    eax
+        push    dword [ebp + 8]                 ; This
+        call    [edi + (kt_orig - .here)]
+        add     esp, 8
+        test    eax, eax
+        jnz     .dret
+        inc     esi
+        cmp     esi, 1
+        jne     .read
+        movzx   eax, word [ebp - 4]             ; the first key
+        mov     ecx, 4
+        mov     edx, KT_KS
+        call    kt_hex
+        movzx   eax, word [ebp - 2]
+        mov     ecx, 4
+        mov     edx, KT_KU
+        call    kt_hex
+        mov     edx, KT_P
+        call    kt_stamp
+        jmp     .read
+.dret:  ret
 
 ; kt_stamp: edx = a time field's digit offset. Writes the milliseconds since reset there if it
 ; is still '-' (each is stamped once). Clobbers eax, ecx, edx.

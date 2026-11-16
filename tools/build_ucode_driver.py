@@ -49,7 +49,7 @@ UCODE_FILE_OFF = 0x10048
 BOOTCOUNT_PREFIX = 'BootCount: '
 BOOTCOUNT_PLACEHOLDER = BOOTCOUNT_PREFIX + '-' * 10      # 10 digits: any 32-bit count
 KBD_PREFIX = 'KbdTime: '                                 # the -DKBDTIME development build's (kbdtime.inc)
-KBD_PLACEHOLDER = KBD_PREFIX + 'I-----U-----R-----S-----F-----N--K--------C--u--'
+KBD_PLACEHOLDER = KBD_PREFIX + 'I-----U-----R-----S-----F-----N--K--------C--u--P-----W--'
 MEMSIZE_UNKNOWN = 0xFFFF                                 # SMBIOS: size unknown
 SERIAL_PLACEHOLDER = '0' * 12                            # the card MAC as 12 hex digits
 

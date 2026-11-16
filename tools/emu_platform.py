@@ -668,7 +668,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         mu.mem_write(ST + 0x800, G('8868e871-e4f1-11d3-bc22-0080c73c8881') + struct.pack('<I', ST + 0xa00))
         mu.mem_write(ST + 0x814, SMBIOS + struct.pack('<I', ST + 0x900))
     st_crc = lambda: zlib.crc32(bytes(mu.mem_read(ST, 0x10)) + b'\0' * 4 + bytes(mu.mem_read(ST + 0x14, 0x34)))
-    kt = dict(t=500, inputs=[], keys=list(kt_keys), stub_calls=0)
+    kt = dict(t=500, inputs=[], keys=[k if len(k) == 3 else (0,) + tuple(k) for k in kt_keys], stub_calls=0)
     if kbdtime:                                                   # the console's input (kbdtime.inc)
         if kt_conin:
             mu.mem_write(ST + 0x24, struct.pack('<I', CONIN))
@@ -744,9 +744,9 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             kt['stub_calls'] += 1
             if a[0] != CONIN:
                 errors.append('ReadKeyStroke with This %#x' % a[0])
-            if not kt['keys']:
+            if not kt['keys'] or kt['keys'][0][0] > kt['t']:      # (when it can be read, scan, char)
                 return ret(0x80000006)
-            uc.mem_write(a[1], struct.pack('<HH', *kt['keys'].pop(0)))
+            uc.mem_write(a[1], struct.pack('<HH', *kt['keys'].pop(0)[1:]))
             return ret(0)
         if addr == SMMC_TRIG:                                      # SmmControl->Trigger, the real one
             tm_var.setdefault('trig_calls', []).append(tuple(a[:5]))
@@ -814,6 +814,9 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             if off == 0x88:                                        # Stall(us)
                 if a[0] > 100000:
                     errors.append('Stall of %d us' % a[0])
+                if kbdtime:                                        # the scenario's clock moves on
+                    kt['t'] += a[0] // 1000
+                    kt['stalls'] = kt.get('stalls', 0) + 1
                 return ret(0)
             if off == 0x34:                                        # CreateEvent(type, tpl, fn, ctx, &ev)
                 if create_event_fails:
@@ -1631,28 +1634,34 @@ def main():
     NR = 0x80000006
     if kbdtime:                                                   # kbdtime.inc (-DKBDTIME)
         cases += [
-            ('kbdtime: USB keyboard before the shell, Esc and "a" waiting: both counted, the shell told none, then straight through',
-             dxe, dict(store=lm(CARD), want_kbd='I01900U02600R04000S04600F04700N02K00170000C02u01',
-                       want_rks=[(NR, b'\xee' * 4, 3), (NR, b'\xee' * 4, 4)], want_hooked=True), 0, True, MAC, True),
-            ('kbdtime: no keyboard',
+            ('kbdtime: USB keyboard before the shell, Esc and "a" waiting: both counted, 2 s waited, the shell told none, then straight through',
+             dxe, dict(store=lm(CARD), want_kbd='I01900U02600R04000S04600F04700N02K00170000C02u01P04700W02',
+                       want_rks=[(NR, b'\xee' * 4, 203), (NR, b'\xee' * 4, 204)], want_hooked=True), 0, True, MAC, True),
+            ('kbdtime: no keyboard: 2 s waited, nothing',
              dxe, dict(store=lm(CARD), kt_inputs=(('split', 1900),), kt_keys=(),
-                       want_kbd='I01900U-----R04000S04600F04700N00K--------C01u00', want_rks=[(NR, b'\xee' * 4, 1), (NR, b'\xee' * 4, 2)]), 0, True, MAC, True),
+                       want_kbd='I01900U-----R04000S04600F04700N00K--------C01u00P-----W00', want_rks=[(NR, b'\xee' * 4, 201), (NR, b'\xee' * 4, 202)]), 0, True, MAC, True),
+            ('kbdtime: Esc comes 600 ms into the window, "a" 1300 ms: both counted, the first timed',
+             dxe, dict(store=lm(CARD), kt_keys=((5300, 0x17, 0), (6000, 0, 0x61)),
+                       want_kbd='I01900U02600R04000S04600F04700N02K00170000C02u01P05300W00', want_rks=[(NR, b'\xee' * 4, 203), (NR, b'\xee' * 4, 204)]), 0, True, MAC, True),
+            ('kbdtime: a key only after the window: not seen',
+             dxe, dict(store=lm(CARD), kt_keys=((7000, 0x17, 0),),
+                       want_kbd='I01900U02600R04000S04600F04700N00K--------C02u01P-----W00', want_rks=[(NR, b'\xee' * 4, 201), (NR, b'\xee' * 4, 202)]), 0, True, MAC, True),
             ('kbdtime: the keyboard comes after the shell',
              dxe, dict(store=lm(CARD), kt_inputs=(('split', 1900),), kt_keys=(), kt_late=(('usb', 5200),),
-                       want_kbd='I01900U05200R04000S04600F04700N00K--------C02u01'), 0, True, MAC, True),
+                       want_kbd='I01900U05200R04000S04600F04700N00K--------C02u01P-----W00'), 0, True, MAC, True),
             ('kbdtime: a non-USB input (ACPI path) is not counted as USB',
              dxe, dict(store=lm(CARD), kt_inputs=(('split', 1900), ('ps2', 2000)), kt_keys=((0, 0x41),),
-                       want_kbd='I01900U-----R04000S04600F04700N01K00000041C02u00'), 0, True, MAC, True),
+                       want_kbd='I01900U-----R04000S04600F04700N01K00000041C02u00P04700W01'), 0, True, MAC, True),
             ('kbdtime: no ConIn when the shell loads: nothing replaced',
-             dxe, dict(store=lm(CARD), kt_conin=False, want_kbd='I01900U02600R04000S04600F-----N--K--------C02u01', want_rks=[], want_hooked=False), 0, True, MAC, True),
+             dxe, dict(store=lm(CARD), kt_conin=False, want_kbd='I01900U02600R04000S04600F-----N--K--------C02u01P-----W--', want_rks=[], want_hooked=False), 0, True, MAC, True),
             ('kbdtime: a shell that isn\'t ours: not hooked',
              dxe, dict(store=lm(CARD), shell_variant='code', want_shell='unpatched',
-                       want_kbd='I01900U02600R04000S-----F-----N--K--------C02u01', want_rks=[(0, b'\x17\0\0\0', 1), (0, b'\0\0\x61\0', 2)], want_hooked=False), 0, True, MAC, True),
-            ('kbdtime: 250 keys waiting: 200 read, 99 shown',
+                       want_kbd='I01900U02600R04000S-----F-----N--K--------C02u01P-----W--', want_rks=[(0, b'\x17\0\0\0', 1), (0, b'\0\0\x61\0', 2)], want_hooked=False), 0, True, MAC, True),
+            ('kbdtime: 250 keys waiting: 200 read, no wait, 99 shown',
              dxe, dict(store=lm(CARD), kt_keys=((0, 0x30),) * 250,
-                       want_kbd='I01900U02600R04000S04600F04700N99K00000030C02u01', want_rks=[(NR, b'\xee' * 4, 200), (0, b'\0\0\x30\0', 201)]), 0, True, MAC, True),
+                       want_kbd='I01900U02600R04000S04600F04700N99K00000030C02u01P04700W99', want_rks=[(NR, b'\xee' * 4, 200), (0, b'\0\0\x30\0', 201)]), 0, True, MAC, True),
             ('kbdtime: SMBIOS already there: nothing written, still hooked and harmless',
-             dxe, dict(store=lm(CARD), smbios_present=True, want_count=None, want_rks=[(NR, b'\xee' * 4, 3), (NR, b'\xee' * 4, 4)], want_hooked=True), 0, True, MAC, True),
+             dxe, dict(store=lm(CARD), smbios_present=True, want_count=None, want_rks=[(NR, b'\xee' * 4, 203), (NR, b'\xee' * 4, 204)], want_hooked=True), 0, True, MAC, True),
         ]
     bad = 0
     if only:
@@ -2166,7 +2175,7 @@ def main():
                 want_count = 'BootCount: x00---0-00'        # usb_first.inc's summary (no file systems here)
             got11 = d[11][1] if 11 in d else None
             if kbdtime and got11:                              # the development build's second string
-                kbd_got = got11[1] if len(got11) == 2 and got11[1].startswith(KBD_PREFIX) and len(got11[1]) == len(KBD_PREFIX) + 48 else None
+                kbd_got = got11[1] if len(got11) == 2 and got11[1].startswith(KBD_PREFIX) and len(got11[1]) == len(KBD_PREFIX) + 57 else None
                 if kbd_got is None:
                     p.append('Type 11 %s: no KbdTime string' % got11)
                 elif want_kbd is not None and kbd_got != KBD_PREFIX + want_kbd:
