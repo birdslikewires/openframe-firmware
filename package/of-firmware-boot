@@ -144,12 +144,50 @@ draw() {
 		if (( i < STEP )); then OUT+=$(at $R 8 "${STEPS[$i]}" "$C_GRY"); OUT+=$(at $R 62 "done" "$C_GRN")
 		elif (( i == STEP )); then OUT+=$(at $R 8 "${STEPS[$i]}" "$C_WHT")
 		else OUT+=$(at $R 8 "${STEPS[$i]}" "$C_DGR"); fi
+		# Its working line, and the line under it (the blocks being written).
 		OUT+=$(at $((R + 1)) 1 "" "" 1)
+		OUT+=$(at $((R + 2)) 1 "" "" 1)
 	done
 	OUT+=$(at $R_SEP 4 "$(printf '─%.0s' {1..94})" "$C_GRY" 1)
 	MAC=$(cat /var/lib/of-netplan/lan.mac 2>/dev/null)
 	OUT+=$(at $R_FOOT 4 "This OpenFrame: ${MAC:+${MAC^^}   }Firmware: $(fw_name)" "$C_GRY" 1)
 	tty_out "$OUT"
+}
+
+# The update's detail, from what its check said ($1), for the line under its bar
+# (blocks_row): PARTS_LIST, the blocks it writes in order from its plan line ("plan:
+# write blocks 10 5 6 7 8 9"; block 10 written headers last is three writes, "10
+# bodies", "10 driver header", "10 marker header"), and FROM, what the blocks it writes
+# are now, from its "firmware now" line ("5:o2-stock+ ... 10:blank": o2-stock), less
+# the blank and torn ones.
+PARTS_LIST=(); FROM=""
+detail() {
+	local B
+	PARTS_LIST=()
+	for B in $(printf '%s\n' "$1" | sed -n 's/.*plan: write blocks* \([0-9 ]*\).*/\1/p'); do
+		if [ "$B" = 10 ] && printf '%s\n' "$1" | grep -q 'headers last'; then
+			PARTS_LIST+=("10 bodies" "10 driver header" "10 marker header")
+		else
+			PARTS_LIST+=("$B")
+		fi
+	done
+	FROM=$(printf '%s\n' "$1" | sed -n 's/.*blocks that differ from [^:]*: //p' | tr ' ' '\n' |
+		sed -n 's/^[0-9]*://p' | tr -d '+' | grep -vxE 'blank|ours|torn' | sort -u | paste -sd, - | sed 's/,/, /g')
+}
+
+# The line under step 1's bar: each block the update writes, in order, with a tick once
+# written and ► while it's being written; $1 is how many are written, $2 set while the
+# next one is being written. Then what they were.
+blocks_row() {
+	local i S="" R=$((R_STEPS + 2))
+	(( ${#PARTS_LIST[@]} > 0 )) || return 0
+	for i in "${!PARTS_LIST[@]}"; do
+		if (( i < $1 )); then S+="$C_GRY${PARTS_LIST[$i]} $C_LGN√$C_RST   "
+		elif (( i == $1 )) && [ -n "$2" ]; then S+="$C_WHT${PARTS_LIST[$i]} $C_YEL►$C_RST   "
+		else S+="$C_DGR${PARTS_LIST[$i]}$C_RST     "; fi
+	done
+	[ -n "$FROM" ] && S+="  ${C_GRY}from $FROM$C_RST"
+	tty_out "$(at $R 10 "Blocks" "$C_GRY" 1)$(at $R 18 "$S")"
 }
 
 # The current step's line: its label, and with $1 of $2 a bar, a percentage and the time
@@ -227,8 +265,8 @@ esac
 
 NEW=$(grep -aoE 'BirdsLikeWires OpenFrame EFI [0-9]+\.[0-9]+\.[0-9]+(-dev[0-9]+)? \(OF1\)' "$IMG" 2>/dev/null | head -1 | awk '{print $4}')
 # The parts: reading the chip, then each block's write (block 10 headers last is three).
-PARTS=$(printf '%s\n' "$CHECK" | sed -n 's/.*plan: write blocks* \([0-9 ]*\).*/\1/p' | wc -w)
-printf '%s\n' "$CHECK" | grep -q 'headers last' && PARTS=$((PARTS + 2))
+detail "$CHECK"
+PARTS=${#PARTS_LIST[@]}
 (( PARTS > 0 )) || PARTS=6
 PARTS=$((PARTS + 1))
 
@@ -240,6 +278,7 @@ while :; do
 	tries=$((tries + 1))
 	draw 0 "Reading the firmware chip"
 	show 0 1 $(( PARTS * PART_EST ))
+	blocks_row 0 ""
 	: > "$OUTF"
 	$UPDATE > "$OUTF" 2>&1 &
 	PID=$!
@@ -263,6 +302,7 @@ while :; do
 		elif (( DONE < PARTS )); then LABEL="Writing the firmware: $DONE of $((PARTS - 1))"
 		else LABEL="Checking the firmware"; fi
 		show $(( DONE * 1000 + FRAC )) $(( PARTS * 1000 )) $(( PARTS * PART_EST ))
+		if (( DONE == 0 )); then blocks_row 0 ""; else blocks_row $((DONE - 1)) 1; fi
 		sleep 1
 	done
 	wait $PID; rc=$?
