@@ -199,6 +199,82 @@ def inc_bytes(name, label):
     return out
 
 
+GOP_FILE = G('2b13e5f0-e82e-4209-898a-8a53e8570db9')
+GOP_IMG, GOP_SIZE = 0x65000000, 0x1a000         # the display driver's loaded image (fake, from splash_sig.inc)
+GOP_VARIANTS = ('sharp', 'samsung', 'ours', 'code', 'cfg', 'cedced', 'small', 'guid', 'nopath')
+
+
+def gsp_sigs():
+    """driver/splash_sig.inc: its constants, the code runs, and each configuration's (numbers
+    offset, first pixel offset, runs)."""
+    import os, re
+    k, code, cfgs, cur = {}, [], [], None
+    for line in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'driver', 'splash_sig.inc')):
+        t = line.split(';')[0].strip()
+        m = re.match(r'(GSP_\w+)\s+equ\s+(0x[0-9a-f]+)', t)
+        if m:
+            k[m.group(1)] = int(m.group(2), 16)
+        elif t == 'gsp_code_sig:':
+            cur = code
+        elif t == 'gsp_cfgs:':
+            cur = None
+        elif t.startswith('dw'):
+            v = [int(x, 16) for x in t[2:].split(',')]
+            if len(v) == 4:
+                cfgs.append((v[1], v[2], []))
+                cur = cfgs[-1][2]
+            elif len(v) == 2 and v[1]:
+                cur.append([v[0], v[1], b''])
+        elif t.startswith('db'):
+            cur[-1][2] += bytes(int(x, 16) for x in t[2:].split(','))
+    return k, code, cfgs
+
+
+def splash_bytes():
+    """What splash.inc writes: the numbers, then the pixels and ENDSSDATA (build_ucode_driver.py's defaults)."""
+    import os, sys as _s
+    _s.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import build_ucode_driver as bud
+    return bud.splash_data(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'logo',
+                                        'logo-blw-pecking-bird-204x82.png'), '274,199')
+
+
+def gop_fake(variant):
+    """A display driver's loaded image as splash.inc sees it, and the image it should leave (None:
+    unchanged). 'sharp' and 'samsung': the stock configurations, with another splash; 'ours': ours
+    already (an OF1 release); the rest each differ from 'sharp' in one way: 'code' one byte of a
+    handler, 'cfg' one byte of the panel settings, 'cedced' the reserve's end marker."""
+    k, code, cfgs = gsp_sigs()
+    cfg, base = (cfgs[1], 'samsung') if variant == 'samsung' else (cfgs[0], 'sharp')
+    img = bytearray(b'\x5a' * GOP_SIZE)
+    for o, ln, d in code:
+        img[k['GSP_CODE_RVA'] + o:k['GSP_CODE_RVA'] + o + ln] = d
+    value, px, runs = cfg
+    for o, ln, d in runs:
+        img[k['GSP_CFG_RVA'] + o:k['GSP_CFG_RVA'] + o + ln] = d
+    v, p_, end = k['GSP_CFG_RVA'] + value, k['GSP_CFG_RVA'] + px, k['GSP_END_RVA']
+    sp = splash_bytes()
+    old = (b'0x0,0x144,0xC7,0x99,0x51' if base == 'samsung' else b'0x0,0x168,0xBF,0x50,0x51')
+    w, h = (0x99, 0x51) if base == 'samsung' else (0x50, 0x51)
+    img[v:v + 24] = old
+    img[p_:end] = bytes((i * 7 + 3) & 0xff for i in range(w * h * 3)) + b'ENDSSDATA' + bytes(end - p_ - w * h * 3 - 9)
+    want = bytearray(img)
+    want[v:v + 24] = sp[:24]
+    want[p_:end] = sp[24:] + bytes(end - p_ - (len(sp) - 24))
+    if variant == 'ours':
+        img = bytearray(want)
+    if variant == 'code':
+        img[k['GSP_CODE_RVA'] + code[1][0] + 0x20] ^= 1
+    if variant == 'cfg':
+        panel = max(runs, key=lambda r: r[1])                    # the run with the panel settings ($dtdc01...)
+        assert b'$dtdc01' in panel[2]
+        img[k['GSP_CFG_RVA'] + panel[0] + panel[2].index(b'$dtdc01') + 12] ^= 1
+    if variant == 'cedced':
+        img[end] ^= 1
+    patched = variant in ('sharp', 'samsung', 'ours')
+    return bytes(img), (bytes(want) if patched else None)
+
+
 def mmc_functions():
     """Code that matches driver/mmc_sig.inc: the MMC driver's ReadBlocks and WriteBlocks with their
     relocated dwords (which the signature skips) filled with something else."""
@@ -248,7 +324,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         gma=True, gma_decode=True, gma_bar=GMA_MMIO, fp=GOP_FP, nb_stage=True, nb_value=NB_DPLL, nb_signals=1,
         app_dpll=NB_DPLL, nb_img='before', nb_variant='stock', li_fails=False, timing=False,
         mmc_img='after', mmc_variant='stock', mmw_variant='stock', sdh_img='after', sdh_variant='stock', pin_variant='of1', profile=False, tm_ticks=70, usbtrace=False, uhcd_variant='stock', usbrt_variant='stock', usbrt_img='after', screen=False, screen_variant='stock',
-        fake_tsc_hi=0):
+        fake_tsc_hi=0, gop_img='before', gop_variant='sharp'):
     """gma: the Poulsbo graphics device at 00:02.0 (8086:8108), its memory decode and BAR0.
     The GOP has set pipe B's PLL (fp, GOP_DPLL). nb_stage: after the entry, the boot manager's
     stage signal, on which NBDXE writes nb_value into DPLL_B and then the stage notifies run
@@ -343,6 +419,12 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         mu.mem_write(li, struct.pack('<IIIIII', 0x1000, 0, 0, 0, 0 if nopath else path, 0))
         mu.mem_write(li + 0x20, struct.pack('<IIQ', base, 0, size))
         images.append(li)
+    mu.mem_map(GOP_IMG, GOP_SIZE)
+    gop_orig, gop_want = gop_fake(gop_variant)
+    mu.mem_write(GOP_IMG, gop_orig)
+    def load_gop():
+        make_image(len(images), G('11111111-2222-3333-4444-555555555555') if gop_variant == 'guid' else GOP_FILE,
+                   GOP_IMG, 0x19000 if gop_variant == 'small' else GOP_SIZE, nopath=gop_variant == 'nopath')
     def load_nbdxe():
         make_image(len(images), G('11111111-2222-3333-4444-555555555555') if nb_variant == 'guid' else NBDXE_FILE,
                    NB_IMG, 0x200 if nb_variant == 'small' else 0x3000,
@@ -494,6 +576,8 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     if usbrt_img == 'before':
         for base in rt_copies:
             make_image(len(images), USBRT_FILE, base, 0x9f80, nopath=False)
+    if gop_img == 'before':                                       # the display driver (as on an OF1: before us)
+        load_gop()
     nb_bad = {'n': 0}
     mmio = {0x6018: GOP_DPLL, 0x6048: fp, 0x61204: 0x00000001, 0x71008: 0x80000000}
     mmio_writes = []                                              # (offset, value, PP_CONTROL then)
@@ -919,6 +1003,12 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     if timing:                                                    # the watched protocols appear
         for g in TM_GUIDS:
             notify(g, 'timing notify')
+    if gop_img == 'after':                                        # the display driver loads after it
+        load_gop()
+        for e in evs.values():
+            if e.get('guid') == LOADED_IMAGE:
+                li_queues[e['key']].append(0xB20000 + len(images) - 1)
+        notify(LOADED_IMAGE, 'LoadedImage notify')
     if usbrt_img == 'after':                                      # USBRT's two copies load (as on an OF1)
         load_usbrt()
         if screen:
@@ -1194,8 +1284,9 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         except Exception:
             sdh_target = b''
     sdh_changed = [(i, sdh_now[i]) for i in range(SDH_SIZE) if sdh_now[i] != sdh_orig[i]]
+    gop_now = bytes(mu.mem_read(GOP_IMG, GOP_SIZE))
     rt_now = [bytes(mu.mem_read(a, 0x9f80)) for a in rt_copies]
-    return dict(ident=tm_var.get('ident'), rcap=tm_var.get('rcap'), rt_orig=rt_orig, rt_now=rt_now, pin_conns=pin['conns'], pin_devs=pci_devs, cea_changed=cea_changed, mmw_changed=mmw_changed, sdh_changed=sdh_changed, sdh_target=sdh_target, sdh_orig=sdh_orig, sdh_now=sdh_now, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
+    return dict(gop_orig=gop_orig, gop_want=gop_want, gop_now=gop_now, ident=tm_var.get('ident'), rcap=tm_var.get('rcap'), rt_orig=rt_orig, rt_now=rt_now, pin_conns=pin['conns'], pin_devs=pci_devs, cea_changed=cea_changed, mmw_changed=mmw_changed, sdh_changed=sdh_changed, sdh_target=sdh_target, sdh_orig=sdh_orig, sdh_now=sdh_now, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
                 mmc_ev=mmc_ev, nb_ev=nb_ev, evs=evs, mmio_writes=mmio_writes, dpll=final,
                 pp_final=struct.unpack('<I', mu.mem_read(GMA_MMIO + 0x61204, 4))[0] if gma else None,
                 nb_after_notify=nb_bad.get('after_notify'), wrapped=wrapped, entry_bio=entry_bio, late_bio=late_bio, in_image=in_image,
@@ -1344,6 +1435,20 @@ def main():
         ('USBRT: both copies get the shorter waits as they load', dxe, dict(store=lm(CARD)), 0, True, MAC, True),
         ('USBRT loaded before the driver: changed at the entry', dxe, dict(store=lm(CARD), usbrt_img='before'), 0, True, MAC, True),
         ('no USBRT: nothing else affected', dxe, dict(store=lm(CARD), usbrt_img='none'), 0, True, MAC, True),
+        # The display driver's splash (splash.inc): written before it is drawn, only into a display driver we know
+        ('display driver (Sharp panel) loaded before the driver: our splash written at the entry', dxe, dict(store=lm(CARD), gop_img='before'), 0, True, MAC, True),
+        ('display driver (Sharp panel) loads after the driver: our splash written as it loads', dxe, dict(store=lm(CARD), gop_img='after'), 0, True, MAC, True),
+        ('display driver with the Samsung panel (Cisco OF2), before: our splash, its panel settings kept', dxe, dict(store=lm(CARD), gop_variant='samsung'), 0, True, MAC, True),
+        ('display driver with the Samsung panel, after: our splash as it loads', dxe, dict(store=lm(CARD), gop_variant='samsung', gop_img='after'), 0, True, MAC, True),
+        ('display driver already with our splash (an OF1 release): the same bytes written again', dxe, dict(store=lm(CARD), gop_variant='ours'), 0, True, MAC, True),
+        ('display driver with one handler byte different: left alone', dxe, dict(store=lm(CARD), gop_variant='code'), 0, True, MAC, True),
+        ('display driver with one panel setting different: left alone', dxe, dict(store=lm(CARD), gop_variant='cfg'), 0, True, MAC, True),
+        ('display driver whose reserve does not end with CEDCED: left alone', dxe, dict(store=lm(CARD), gop_variant='cedced'), 0, True, MAC, True),
+        ('display driver image smaller than the handlers: left alone', dxe, dict(store=lm(CARD), gop_variant='small'), 0, True, MAC, True),
+        ('another file with the same code: left alone', dxe, dict(store=lm(CARD), gop_variant='guid', gop_img='after'), 0, True, MAC, True),
+        ('display driver with no FilePath: left alone', dxe, dict(store=lm(CARD), gop_variant='nopath'), 0, True, MAC, True),
+        ('no display driver: nothing else affected', dxe, dict(store=lm(CARD), gop_img='none'), 0, True, MAC, True),
+        ('display driver loads after the driver, LoadedImage notify not registered: left alone', dxe, dict(nb_img='none', store=lm(CARD), gop_img='after', register_fails=True, want_mmc_ev='closed', want_pclk='rtb'), 0, True, MAC, True),
         ('USBRT\'s 500 ms wait not stock: only the ready loop changed', dxe, dict(store=lm(CARD), usbrt_variant='a_changed'), 0, True, MAC, True),
         ('USBRT\'s ready-loop wait not stock: neither it nor the tries changed', dxe, dict(store=lm(CARD), usbrt_variant='b_changed'), 0, True, MAC, True),
         ('USBRT\'s tries setter not stock: neither it nor the wait changed', dxe, dict(store=lm(CARD), usbrt_variant='c_changed'), 0, True, MAC, True),
@@ -1391,6 +1496,10 @@ def main():
         sdh_patchable = (sdh_img != 'none' and kw.get('sdh_variant', 'stock') == 'stock' and not kw.get('li_fails') and
                          (sdh_img == 'before' or not (kw.get('register_fails') or kw.get('create_event_fails'))))
         want_sdh = kw.pop('want_sdh', 'patched' if img is dxe and want_ev and sdh_patchable else 'unpatched')
+        gop_img = kw.get('gop_img', 'before')
+        gop_patchable = (gop_img != 'none' and not kw.get('li_fails') and
+                         (gop_img == 'before' or not (kw.get('register_fails') or kw.get('create_event_fails'))))
+        want_gop = kw.pop('want_gop', 'patched' if img is dxe and want_ev and gop_patchable else 'unpatched')
         want_pclk = kw.pop('want_pclk', ('untouched' if want_nbp == 'patched' else 'notify' if want_ev else 'untouched')
                            if img is dxe else 'app')
         # NBDXE (with the 'value' variant) writes its own value; the notify must leave that alone
@@ -1430,7 +1539,9 @@ def main():
                          if kw.get('mmc_img', 'after') == 'before' else []) + \
                         ([b'\x11' * 4 if kw.get('sdh_variant') == 'guid' else b'LI??' if kw.get('sdh_variant') == 'nopath' else SDH_FILE[:4]]
                          if kw.get('sdh_img', 'after') == 'before' else []) + \
-                        ([USBRT_FILE[:4]] * 2 if kw.get('usbrt_img', 'after') == 'before' else [])
+                        ([USBRT_FILE[:4]] * 2 if kw.get('usbrt_img', 'after') == 'before' else []) + \
+                        ([{'guid': b'\x11' * 4, 'nopath': b'LI??'}.get(kw.get('gop_variant'), GOP_FILE[:4])]
+                         if kw.get('gop_img', 'before') == 'before' else [])
                     if not kw.get('li_fails') and pre != want_pre:
                         p.append('images before the entry %s, expected %s' % (pre, want_pre))
                     if kw.get('nb_img') == 'after' and NBDXE_FILE[:4] not in tags:
@@ -1713,6 +1824,14 @@ def main():
                 p.append('MmcMediaDevice waits changed %s, expected %s' % (r['mmw_changed'], want_w))
         elif r['mmw_changed']:
             p.append('MmcMediaDevice waits changed at %s' % r['mmw_changed'][:6])
+        # The display driver's splash (splash.inc): exactly the numbers, pixels and zeros, or nothing
+        if want_gop == 'patched' and r['gop_want'] is not None:
+            if r['gop_now'] != r['gop_want']:
+                d = [i for i in range(GOP_SIZE) if r['gop_now'][i] != r['gop_want'][i]]
+                p.append('display driver not as expected at %d bytes, first %#x' % (len(d), d[0]))
+        elif r['gop_now'] != r['gop_orig']:
+            d = [i for i in range(GOP_SIZE) if r['gop_now'][i] != r['gop_orig'][i]]
+            p.append('display driver changed at %d bytes, first %#x' % (len(d), d[0]))
         if want_sdh == 'patched':
             # The glue (mmcinit.inc): the template, SdHost's own gBS operand (from 0x532), and a call
             # whose target holds exactly sdh_wait (sdh_wait.inc, assembled alone).
@@ -1730,7 +1849,8 @@ def main():
             p.append('SdHost changed at %s' % r['sdh_changed'][:6])
         if not timing and want_nbp == 'patched' and want_cea == 'patched' and kw.get('nb_img', 'before') == 'before' and \
                 kw.get('mmc_img', 'after') == 'before' and kw.get('usbrt_img', 'after') == 'before' and \
-                want_mmw == 'patched' and want_sdh == 'patched' and kw.get('sdh_img', 'after') == 'before' and \
+                want_gop == 'patched' and kw.get('gop_img', 'before') == 'before' and \
+                (want_mmw == 'patched' or no_cmd0) and want_sdh == 'patched' and kw.get('sdh_img', 'after') == 'before' and \
                 any(e.get('guid') == LOADED_IMAGE for e in r['evs'].values()):
             p.append('LoadedImage notify registered although every image was patched at the entry')
         # Panel clock

@@ -50,7 +50,12 @@ venv/bin/python -I tools/build_blwmac_app.py /tmp/BlwMac.efi
 venv/bin/python -I tools/emu_blwmac.py /tmp/BlwMac.efi                   # BlwMac.efi
 venv/bin/python -I tools/emu_mmcinit.py releases/of1-blw-<prev>.bin driver/mmcinit_sig.inc  # SdHost's wait
 venv/bin/python -I tools/emu_mmcfix.py <firmware.bin> <BlwMmcFix.efi> <MmcTest.efi>     # BlwMmcFix.efi
+venv/bin/python -I tools/emu_splash.py of1_efi_o2.img of2_efi_cisco.img [more images]   # the splash, on real display drivers
 ```
+
+`emu_splash.py` and `tools/splash_sig.py` (which makes `driver/splash_sig.inc`) need the stock
+`of1_efi_o2.img` and `of2_efi_cisco.img` from https://openbeak.net/openframe/firmware/efi/ (md5
+`eeb32d85…` and `07a8fb52…`): the Sharp and the Samsung panel's display drivers.
 
 The emulators run the real code under Unicorn against a fake firmware and fail on anything the
 code mustn't do (any SetVariable from the driver, port I/O before PCI is up, unrestored registers,

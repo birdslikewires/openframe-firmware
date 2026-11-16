@@ -55,6 +55,9 @@
 ; 12. ...unless a USB drive has boot files: from 26.11.30, at ReadyToBoot, if a file system on a USB
 ;    disk has \startup.nsh, it is moved to the front of the core's list of file systems, so the
 ;    drive is the shell's fs0 and its startup.nsh and files come first (usb_first.inc).
+; 13. Boot splash: from 26.11.31 our splash (the bird) is put into the stock display driver's loaded
+;    image before it draws, so an OpenFrame whose display driver our updates don't write (an
+;    OpenFrame 2's) shows it too (splash.inc). On our OpenFrame 1 releases it is already there.
 ;
 ; Position-independent: data is reached through call/pop, so no relocations are needed.
 ; Assembled with `nasm -f bin`; build_ucode_driver.py wraps it in a PE32 image and an FFS
@@ -790,6 +793,7 @@ mac_ok: xor     eax, eax
 %include "mmc_pin.inc"
 %include "usb_first.inc"
 %include "usbrt.inc"
+%include "splash.inc"
 %include "img_patch.inc"
 %ifdef TIMING
 %include "timing.inc"

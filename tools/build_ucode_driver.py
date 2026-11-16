@@ -27,6 +27,24 @@ import build_patched as bp
 DRIVER_GUID = 'a5d5b0c1-7d2f-4c3e-9b1a-26b1e0f17217'   # BlwPlatformDxe (was BlwUcodeLate)
 MP_GUID = 'f33261e7-23cb-11d5-bd5c-0080c73c8881'
 ASM = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'driver', 'ucode_late.asm')
+ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
+
+
+def splash_data(png, pos):
+    """What splash.inc writes into the display driver: its $sspc01 numbers (background 0, x, y,
+    width, height, with 3, 2, 2 and 2 hex digits, as in every display driver it changes), then the
+    raw RGB pixels and ENDSSDATA, exactly as build_patched.py puts them in flash."""
+    from PIL import Image
+    im = Image.open(png).convert('RGB')
+    w, h = im.size
+    x, y = (int(v) for v in pos.split(','))
+    if w * h > 16800:
+        bp.fail('splash %dx%d = %d px exceeds the proven 16,800 px' % (w, h, w * h))
+    if not (0 <= x < 0x1000 and 0 <= y < 0x100 and 0 < w < 0x100 and 0 < h < 0x100 and x + w <= 800 and y + h <= 480):
+        bp.fail("splash %dx%d at %d,%d does not fit the screen or the numbers' digits" % (w, h, x, y))
+    numbers = '0x0,0x%03X,0x%02X,0x%02X,0x%02X' % (x, y, w, h)
+    assert len(numbers) == 24
+    return numbers.encode() + im.tobytes() + b'ENDSSDATA'
 UCODE_FILE_OFF = 0x10048
 BOOTCOUNT_PREFIX = 'BootCount: '
 BOOTCOUNT_PLACEHOLDER = BOOTCOUNT_PREFIX + '-' * 10      # 10 digits: any 32-bit count
@@ -179,6 +197,10 @@ def main():
     ap.add_argument('--app', help='also write an EFI application build (subsystem 10) here, for running from the shell')
     ap.add_argument('--system', default='OpenPeak,OpenFrame 1,OF1,OpenFrame', metavar='MAKER,PRODUCT,VERSION,FAMILY',
                     help="SMBIOS Type 1 (default the OpenFrame 1's; an OpenFrame 2: OpenPeak,OpenFrame 2,OF2,OpenFrame)")
+    ap.add_argument('--splash', default=os.path.join(ROOT, 'logo', 'logo-blw-pecking-bird-204x82.png'),
+                    help='the boot splash the driver puts into the display driver (default the bird)')
+    ap.add_argument('--splash-pos', default='274,199', metavar='X,Y',
+                    help='its position (default 274,199, as in our OF1 releases)')
     ap.add_argument('--define', action='append', default=[], metavar='NAME',
                     help='assemble with -DNAME as well (e.g. TIMING for the boot-timing development build)')
     a = ap.parse_args()
@@ -209,9 +231,11 @@ def main():
         open(tf, 'wb').write(table)
         if a.smbios_out:
             open(a.smbios_out, 'wb').write(eps + table)
+        sp = os.path.join(td, 'splash.bin')
+        open(sp, 'wb').write(splash_data(a.splash, a.splash_pos))
         def assemble(*defs):
             r = subprocess.run(['nasm', '-f', 'bin', '-I', os.path.dirname(ASM) + '/', '-DUCODE_FILE="%s"' % uc,
-                                '-DSMBIOS_EPS_FILE="%s"' % ef, '-DSMBIOS_FILE="%s"' % tf,
+                                '-DSMBIOS_EPS_FILE="%s"' % ef, '-DSMBIOS_FILE="%s"' % tf, '-DSPLASH_FILE="%s"' % sp,
                                 '-DSMBIOS_LEN=%d' % len(table), '-DSMBIOS_COUNT_OFF=%d' % offs['count'],
                                 '-DSMBIOS_MEMSIZE_OFF=%d' % offs['memsize'], '-DSMBIOS_MEMSPEED_OFF=%d' % offs['memspeed']] + list(defs) + ['-o', out, ASM],
                                capture_output=True, text=True)
