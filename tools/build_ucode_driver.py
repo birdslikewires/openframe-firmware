@@ -177,6 +177,8 @@ def main():
     ap.add_argument('--bios-date', required=True, help='SMBIOS BIOS release date, MM/DD/YYYY')
     ap.add_argument('--smbios-out', help='also write the SMBIOS entry point + table here (address 0)')
     ap.add_argument('--app', help='also write an EFI application build (subsystem 10) here, for running from the shell')
+    ap.add_argument('--system', default='OpenPeak,OpenFrame 1,OF1,OpenFrame', metavar='MAKER,PRODUCT,VERSION,FAMILY',
+                    help="SMBIOS Type 1 (default the OpenFrame 1's; an OpenFrame 2: OpenPeak,OpenFrame 2,OF2,OpenFrame)")
     ap.add_argument('--define', action='append', default=[], metavar='NAME',
                     help='assemble with -DNAME as well (e.g. TIMING for the boot-timing development build)')
     a = ap.parse_args()
@@ -198,8 +200,10 @@ def main():
         uc = os.path.join(td, 'ucode.bin')
         open(uc, 'wb').write(entry)
         out = os.path.join(td, 'drv.bin')
-        eps, table, offs = smbios_blobs(a.bios_version, a.bios_date, release,
-                                  ('OpenPeak', 'OpenFrame 1', 'OF1', 'OpenFrame'))
+        system = tuple(a.system.split(','))
+        if len(system) != 4 or not all(system):
+            bp.fail('--system must be four comma-separated names')
+        eps, table, offs = smbios_blobs(a.bios_version, a.bios_date, release, system)
         ef, tf = os.path.join(td, 'eps.bin'), os.path.join(td, 'smbios.bin')
         open(ef, 'wb').write(eps)
         open(tf, 'wb').write(table)

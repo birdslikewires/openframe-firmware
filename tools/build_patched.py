@@ -2,7 +2,7 @@
 """
 Build a BirdsLikeWires OpenFrame 1 EFI image from a stock (or dumped) AMI image.
 
-Changes, each optional except the shell fix:
+Changes, each optional (the shell fix unless --no-shell):
   1. EFI Shell (C57AD6B7...): the startup.nsh countdown default 0x32 (50 x 100 ms)
      becomes 0, at both `push 0x32` sites (PE 0x1856 and 0x187E). Just enough of
      the ALIAS help text is blanked that the Tiano-recompressed shell is exactly
@@ -25,6 +25,11 @@ Changes, each optional except the shell fix:
 
 Only FV_MAIN (0x10000-0xCFFFF) changes. NVRAM, NCB and boot block are copied from
 the base image untouched. Every FFS header/data checksum is recomputed and checked.
+
+--no-shell leaves the shell as it is: its patch is at this OF1 shell's own offsets, and the
+OpenFrame 2's shell is another build. With no --logo either, a stock image changes only by
+what's added after its last file (the spacer's header in its free space, and block 10): the
+OpenFrame 2 build, written into erased space alone, nothing of the stock firmware erased.
 
 Needs uefi_firmware (Tiano compressor) and Pillow.
 """
@@ -273,6 +278,7 @@ def main():
     ap.add_argument('--version', help='version marker text')
     ap.add_argument('--block10', action='store_true', help='spacer to 0xA0000, then the marker there (needs --version)')
     ap.add_argument('--core-pe', help='also write the DXE core PE32 here (for build_ucode_driver.py --check-with-core)')
+    ap.add_argument('--no-shell', action='store_true', help="leave the shell as it is (an OpenFrame 2's: another build)")
     ap.add_argument('--allow-large-splash', action='store_true', help='allow a splash over 16,800 px, the largest proven on this IEGD build (Verizon OF1, 300x56)')
     a = ap.parse_args()
 
@@ -290,7 +296,7 @@ def main():
     for o, g, s in files:
         check_file(img, o)
 
-    notes = [patch_shell(img, *by_guid[SHELL_GUID])]
+    notes = [] if a.no_shell else [patch_shell(img, *by_guid[SHELL_GUID])]
     if a.microcode:
         notes.append(patch_ucode(img, *by_guid[UCODE_GUID], a.microcode))
     g_off, g_size = by_guid[GOP_GUID]
@@ -326,7 +332,11 @@ def main():
     last_off, _, last_size = new_files[-1]
     if set(img[last_off + last_size:fv_end]) - {0xff}:
         fail('free space after the last file is not erased')
-    changed_guids = {SHELL_GUID, GOP_GUID, UCODE_GUID}
+    changed_guids = ({GOP_GUID, UCODE_GUID} if a.no_shell else {SHELL_GUID, GOP_GUID, UCODE_GUID})
+    if not a.logo:
+        changed_guids.discard(GOP_GUID)
+    if not a.microcode:
+        changed_guids.discard(UCODE_GUID)
     for o, g, s in files:
         if g not in changed_guids and img[o:o + s] != orig[o:o + s]:
             fail('file %s changed unexpectedly' % g)

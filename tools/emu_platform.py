@@ -1206,6 +1206,9 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 st_unchanged=st_now == st_orig)
 
 
+SYSTEM = ['OpenPeak', 'OpenFrame 1', 'OF1', 'OpenFrame']
+
+
 def main():
     first_fail = '--first-fail' in sys.argv                       # stop at the first failing scenario (mutation runs)
     only = sys.argv[sys.argv.index('--only') + 1] if '--only' in sys.argv else None   # run just the matching scenarios
@@ -1214,7 +1217,10 @@ def main():
     profile = '--profile' in sys.argv or usbtrace                 # ... with -DPROFILE as well
     timing = '--timing' in sys.argv or profile                    # the -DTIMING development build
     no_cmd0 = '--cmd0' not in sys.argv                            # only a -DMMI_CMD0 build changes the CMD0 waits
-    files = [x for i, x in enumerate(sys.argv[1:], 1) if not x.startswith('--') and sys.argv[i - 1] != '--only']
+    global SYSTEM                                                 # SMBIOS Type 1 the build was given (build_ucode_driver.py --system)
+    if '--system' in sys.argv:
+        SYSTEM = sys.argv[sys.argv.index('--system') + 1].split(',')
+    files = [x for i, x in enumerate(sys.argv[1:], 1) if not x.startswith('--') and sys.argv[i - 1] not in ('--only', '--system')]
     dxe, app = (open(p, 'rb').read() for p in files[:2])
     Z = bytes(6)
     lm = lambda d, attr=7: {('BlwMac', BLW): (attr, d)}
@@ -1808,7 +1814,7 @@ def main():
                 p.append('Type 3 chassis %#x %s' % (d[3][0][5], d[3][1]))
             if 1 in d:
                 raw, ss = d[1]
-                if ss[:4] != ['OpenPeak', 'OpenFrame 1', 'OF1', 'OpenFrame'] or len(ss) != 5:
+                if ss[:4] != SYSTEM or len(ss) != 5:
                     p.append('Type 1 strings %s' % ss)
                 got = (ss[raw[7] - 1] if raw[7] else None, raw[8:24])
                 if got != want_t1:
@@ -1817,7 +1823,7 @@ def main():
                     p.append('serial placeholder changed to %r' % ss[4:5])
             if img is dxe and r['entry_smbios']:
                 e1 = [(raw[7], raw[8:24], ss) for t, _, raw, ss in r['entry_smbios']['structs'] if t == 1]
-                if e1 != [(0, b'\xff' * 16, ['OpenPeak', 'OpenFrame 1', 'OF1', 'OpenFrame', '0' * 12])]:
+                if e1 != [(0, b'\xff' * 16, SYSTEM + ['0' * 12])]:
                     p.append('Type 1 filled before ReadyToBoot: %s' % e1)
             if 16 in d and d[16][0] != struct.pack('<BBHBBBIHH', 16, 0x0F, 3, 3, 3, 3, 0x200000, 0xFFFE, 1):
                 p.append('Type 16 %s' % d[16][0].hex())
