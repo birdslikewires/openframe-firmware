@@ -19,7 +19,9 @@ openframe-linux stick, reachable over SSH (`tools/of.sh`), with a smart plug for
   firmware booting**, so writing a header last is not enough by itself.
 - **Never write NVRAM (block 0) or the boot block (blocks 14-15) with a flash.** Releases change
   block 10 only (block 9 up to 26.11.28; 26.11.29 was the one move, blocks 9 and 10), and only
-  in the order step 6 describes: a power cut at any point must leave a chip that boots. `tools/repair-block0.sh` exists for one emergency and needs a known-good image.
+  in an order where a power cut at any point leaves a chip that boots. Step 6's order does
+  not yet meet that (its erase and its marker header can each be cut into a chip that won't
+  start): see [flash-order.md](flash-order.md) for what does, checked with `tools/emu_fvwalk.py`. `tools/repair-block0.sh` exists for one emergency and needs a known-good image.
 - **Never create an NVRAM variable under a vendor GUID the store doesn't already have.** AMI's
   NVRAM code half-writes the store when it adds a GUID (see [nvram.md](nvram.md)). Our variables
   use AMI's own `EC87D643-…` GUID.
@@ -64,6 +66,7 @@ venv/bin/python -I tools/emu_mmcfix.py <firmware.bin> <BlwMmcFix.efi> <MmcTest.e
 venv/bin/python -I tools/emu_splash.py of1_efi_o2.img of2_efi_cisco.img [more images]   # the splash, on real display drivers
 venv/bin/python -I tools/emu_countdown.py of1_efi_o2.img of2_efi_cisco.img [more images] # the countdown, on real shells
 venv/bin/python -I tools/emu_usbfirst.py --of2-shell of2_efi_cisco.img                   # USB-first, on both shell builds
+venv/bin/python -I tools/emu_fvwalk.py of1_efi_o2.img of2_efi_cisco.img [more OF2 images]   # write orders vs the firmware's own file walkers
 ```
 
 `emu_splash.py`, `emu_countdown.py`, `emu_usbfirst.py --of2-shell`, `tools/splash_sig.py` and
