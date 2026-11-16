@@ -7,7 +7,8 @@ it was done.
 Releases are 1 MB images for the board's socketed SST 49LF008A firmware hub, written with `fh`, a
 kernel module that gives a running OpenFrame a `/dev/fh` for the chip (in
 [openframe-kernel](https://github.com/birdslikewires/openframe-kernel/tree/main/fh), whose kernel
-packages ship it). Only the
+packages ship it). A chip that doesn't boot can be written in another OpenFrame 1: see
+[docs/chip-swap.md](docs/chip-swap.md). Only the
 OpenFrame 1 is supported so far; nothing here has been tried on an OpenFrame 2.
 
 This repository was `fh` until 2026-11; its history carries on here.

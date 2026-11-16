@@ -14,7 +14,7 @@ openframe-linux stick, reachable over SSH (`tools/of.sh`), with a smart plug for
   use AMI's own `EC87D643-…` GUID.
 - **One change per release**, and one release per flash, unless each change has first been tested
   on its own as a development build (26.11.27's five USB fixes, 26.11.28's two MMC changes).
-  26.11.1 changed three things at once, didn't boot, and took a chip swap to find which
+  26.11.1 changed three things at once, didn't boot, and took a chip swap ([chip-swap.md](chip-swap.md)) to find which
   ([history.md](history.md)).
 - **After any boot in which our apps wrote NVRAM, reboot before flashing.** `BlwMac.efi` locks
   flash blocks 1-15 down before it writes, and lock-down only clears at reset; a flash then fails
