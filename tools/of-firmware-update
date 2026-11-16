@@ -1,6 +1,6 @@
 #!/bin/bash
 
-## of-firmware-update v26.11.1 (13th November 2026)
+## of-firmware-update v26.11.2 (16th November 2026)
 ##  Brings an OpenFrame 1's firmware to the BirdsLikeWires release in $IMG, from any firmware listed
 ##  in $MANIFEST (BirdsLikeWires releases from 26.11.29 on, and the stock firmware we know: O2,
 ##  Verizon, Telstra). Firmware it doesn't recognise is never written: a dump is saved.
@@ -136,7 +136,9 @@ if [ $CHECK = 1 ]; then rm -rf "$W"; exit 5; fi
 if [ $TEST = 0 ]; then
 	KO=$(find /lib/modules/$(uname -r) -name 'gma500_gfx.ko*' | head -1)
 	case "$KO" in *.xz) KCAT=xzcat ;; *.zst) KCAT=zstdcat ;; *.gz) KCAT=zcat ;; *) KCAT=cat ;; esac
-	[ -n "$KO" ] && $KCAT "$KO" | grep -aq "pre-programmed mode is" || refuse "this kernel's gma500 lacks the 60 Hz panel fix: install 6.18.63-4 or later first"
+	# grep -q stops reading at the first match, so the decompressor's write fails with
+	# "Broken pipe": harmless (it means the fix is there), but alarming on the screen.
+	[ -n "$KO" ] && $KCAT "$KO" 2>/dev/null | grep -aq "pre-programmed mode is" || refuse "this kernel's gma500 lacks the 60 Hz panel fix: install 6.18.63-4 or later first"
 	LOCKED=$(python3 -c '
 import mmap, os, sys
 f = os.open("/dev/mem", os.O_RDONLY | os.O_SYNC)
