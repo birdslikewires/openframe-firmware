@@ -142,7 +142,7 @@ fw_name() {
 
 # The working screen, drawn afresh, step $1 (0 or 1) current, its line saying $2.
 draw() {
-	local i R MARK COL OUT MAC
+	local i R MARK COL OUT MAC FW
 	STEP=$1; LABEL=$2; T0=$(uptime_s)
 	console_hush
 	[ -n "$DRAWN" ] || { panel_clear; DRAWN=1; }
@@ -168,7 +168,10 @@ draw() {
 	done
 	OUT+=$(at $R_SEP 4 "$(printf '─%.0s' {1..94})" "$C_GRY" 1)
 	MAC=$(cat /var/lib/of-netplan/lan.mac 2>/dev/null)
-	OUT+=$(at $R_FOOT 4 "This OpenFrame: ${MAC:+${MAC^^}   }Firmware: $(fw_name)" "$C_GRY" 1)
+	# Once it's written, the release too, as OpenFrame Flash's screen has it.
+	FW=$(fw_name)
+	[ -n "$WRITTEN" ] && [ -n "$NEW" ] && FW+=", $NEW from the next start"
+	OUT+=$(at $R_FOOT 4 "This OpenFrame: ${MAC:+${MAC^^}   }Firmware: $FW" "$C_GRY" 1)
 	tty_out "$OUT"
 	[ -n "$WRITTEN" ] && blocks_row ${#PARTS_LIST[@]} ""
 }
