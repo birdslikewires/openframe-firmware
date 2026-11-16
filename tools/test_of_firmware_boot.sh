@@ -27,6 +27,8 @@ say "plan: write blocks 10 5 6 7 8 9"
 [ "${1:-}" = --check ] && exit 5
 N=$(( $(cat "$T/runs" 2>/dev/null || echo 0) + 1 )); echo $N > "$T/runs"
 RC=$(sed -n "${N}p" "$T/seq"); RC=${RC:-2}
+# A write that takes a while, for a stop signal to land in (as the real one's last ~30 s).
+[ -n "${STANDIN_SLEEP:-}" ] && sleep "$STANDIN_SLEEP"
 D=$(mktemp -d "$T/dumps/of-firmware-update.XXXXXX"); head -c 1024 /dev/zero > "$D/pre1.bin"
 case $RC in
 	0) for n in 10 5 6 7 8 9; do say "block $n written and verified"; done
@@ -92,6 +94,24 @@ timeout 120 bash "$T/boot" > /dev/null 2>&1
 N=$(ls -1d "$T/dumps/of-firmware-update."* 2>/dev/null | wc -l)
 if [ "$N" -le 2 ]; then echo "ok   12 tries that didn't verify, then updated: $N dump folders left"
 else echo "FAIL 12 tries that didn't verify, then updated: $N dump folders left (want 2 at most)"; FAILS=$((FAILS + 1)); fi
+
+# A shutdown (or Ctrl-C, or a dropped session) part way through: the update carries on to
+# the end, its restart included, and the stand-in, ignoring them as the updater's writes
+# do, isn't stopped either.
+rm -rf "$T/dumps" "$T/runs" "$T/lock-reboot"; mkdir -p "$T/dumps"; echo 0 > "$T/seq"; touch "$T/pending"
+STANDIN_SLEEP=1.5 timeout 60 bash "$T/boot" > "$T/stop.out" 2>&1 &
+P=$!
+for i in $(seq 50); do [ -s "$T/runs" ] && break; sleep 0.1; done
+sleep 0.3
+for SIG in TERM INT HUP; do kill -s $SIG $P 2>/dev/null; pkill --signal $SIG -f "$T/upd" 2>/dev/null; done
+wait $P
+if grep -q "TEST: restart" "$T/stop.out" && grep -q "UPDATED" "$T/stop.out" && [ ! -e "$T/pending" ]; then
+	echo "ok   stop signals part way through: updated and restarted"
+else
+	echo "FAIL stop signals part way through: no update and restart"
+	sed 's/^/       /' "$T/stop.out" | grep -v ': block [0-9]* written' | tail -8
+	FAILS=$((FAILS + 1))
+fi
 
 [ $FAILS = 0 ] && echo "All passed." || echo "$FAILS failed."
 exit $FAILS

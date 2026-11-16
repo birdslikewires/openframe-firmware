@@ -1,6 +1,6 @@
 #!/bin/bash
 
-## of-firmware-boot v26.11.2 (16th November 2026)
+## of-firmware-boot v26.11.3 (16th November 2026)
 ##  Run at boot by of-firmware.service while a firmware update is pending (the package's
 ##  postinst marks one). Before the login prompt, provisioning or any interface starts, it
 ##  brings the firmware to the packaged release with of-firmware-update, and restarts on
@@ -242,6 +242,8 @@ restart() {
 	LABEL="$1 Restarting now."
 	show
 	log "restarting: $1"
+	# Stoppable again (see the update, below): the shutdown this starts stops us.
+	trap - HUP INT TERM
 	systemctl reboot
 	exec sleep 120
 }
@@ -308,6 +310,10 @@ tries=0
 # chip as it was is already part written, so it's taken as another that didn't verify,
 # whatever it says, and never lets the boot carry on.
 torn=""
+# Nothing but finishing stops the update: a shutdown, a Ctrl-C or a dropped session waits
+# for it (of-firmware-update ignores them too from its first write, and of-firmware.service
+# never follows with a kill), as stopping between blocks can leave a unit that won't start.
+trap '' HUP INT TERM
 while :; do
 	tries=$((tries + 1))
 	dumps_prune

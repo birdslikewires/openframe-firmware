@@ -69,6 +69,17 @@ start $D/o2-stock.bin; run "an image whose blocks aren't in the manifest: refuse
 md5sum $OF_FW_IMAGE | sed 's/^0/1/;t;s/^./0/' > $(dirname $F)/img2.bin.md5; cp $OF_FW_IMAGE $(dirname $F)/img2.bin   # (first digit changed)
 start $D/o2-stock.bin; run "an image that doesn't match its .md5: refused" 1 same OF_FW_IMAGE=$(dirname $F)/img2.bin
 
+# Stop signals part way through (a shutdown, a Ctrl-C, a dropped session): once writing, the
+# updater (and its writes) ignore them and finish. A second a block, so they land mid-update.
+start $D/o2-stock.bin
+env FLASH_TEST_PAUSE=1 bash $U > /tmp/oftest.out 2>&1 &
+P=$!
+for i in $(seq 100); do grep -q "block 10 written" /tmp/oftest.out && break; sleep 0.1; done
+for SIG in TERM INT HUP; do kill -s $SIG $P 2>/dev/null; pkill --signal $SIG -P $P 2>/dev/null; done
+wait $P; rc=$?
+if [ $rc = 0 ] && [ "$(b $F 1 15)" = $T15 ]; then echo "ok   stock, stop signals after block 10: finished anyway (exit 0)"
+else echo "FAIL stock, stop signals after block 10: exit $rc, blocks 1-15 $(b $F 1 15) (want 0, $T15)"; sed 's/^/       /' /tmp/oftest.out; FAILS=$((FAILS + 1)); fi
+
 rm -rf $(dirname $F) /tmp/of-firmware-update.*
 [ $FAILS = 0 ] && echo "all passed" || echo "$FAILS FAILED"
 exit $FAILS

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-## of-firmware-update v26.11.2 (16th November 2026)
+## of-firmware-update v26.11.3 (16th November 2026)
 ##  Brings an OpenFrame 1's firmware to the BirdsLikeWires release in $IMG, from any firmware listed
 ##  in $MANIFEST (BirdsLikeWires releases from 26.11.29 on, and the stock firmware we know: O2,
 ##  Verizon, Telstra). Firmware it doesn't recognise is never written: a dump is saved.
@@ -32,11 +32,18 @@
 ##  A chip part way through an update (block 10 already the release's) has its other differing
 ##  blocks rewritten even if they match nothing in the manifest: they are torn writes.
 ##
+##  Once the first write starts, nothing but finishing stops it: hangup, interrupt and terminate
+##  are ignored from then on (by the writes too), so a shutdown, a Ctrl-C or a dropped SSH session
+##  can't stop it between blocks, where a unit from stock firmware may not start. (kill -9 still
+##  can; the services that run this never send it: of-firmware.service and of-flash.service wait
+##  for it however long it takes.)
+##
 ##  Settings (environment): OF_FW_IMAGE, OF_FW_MANIFEST, OF_FW_DUMPDIR; FH_KO=/path/to/fh.ko loads
 ##  a module that isn't installed. Test mode: FH=/path/to/a/1MB/file works on that file (no module,
 ##  no lock registers, /dev/fhp emulated); FLASH_TEST_FAULT_BLOCK=n with FLASH_TEST_FAULT=N corrupts
 ##  block n on its first N writes; FLASH_TEST_STOP=n (or 10.1, 10.2 for the header steps) stops
-##  (exit 9) right after that write, as a power cut would. None of these can touch a real chip.
+##  (exit 9) right after that write, as a power cut would; FLASH_TEST_PAUSE=seconds waits after
+##  each block's write, as a real chip's slower writes do. None of these can touch a real chip.
 
 set -u
 IMG=${OF_FW_IMAGE:-/usr/lib/openframe-firmware/of1-blw.bin}
@@ -189,6 +196,8 @@ writeblock() {
 }
 
 for n in $ORDER; do blk "$IMG" $n 1 > "$W/b$n.bin"; done
+# From the first write on, only finishing stops this (see the top).
+trap '' HUP INT TERM
 for n in $ORDER; do
 	if [ $n = 10 ] && [ $HDRLAST = 1 ]; then
 		MSIZE=$(u24 "$W/b10.bin" 20); DRV=$(( (MSIZE + 7) & ~7 ))
@@ -221,6 +230,7 @@ for n in $ORDER; do
 		say "block $n written and verified"
 	fi
 	teststop $n
+	[ $TEST = 1 ] && [ -n "${FLASH_TEST_PAUSE:-}" ] && sleep "$FLASH_TEST_PAUSE"
 done
 
 for i in 1 2; do readchip "$W/post$i.bin"; done
