@@ -1,6 +1,6 @@
 """Mutations for usb_first.inc (a USB drive with startup.nsh is the shell's fs0). Each is
 (label, old, new), or (label, [(old, new), ...]) for several changes at once:
-    venv/bin/python -I tools/emu_usbfirst.py --mutate tools/mutations/usb_first.py
+    venv/bin/python -I tools/emu_usbfirst.py --mutate tools/mutations/usb_first.py [--of2-shell of2_efi_cisco.img]
 Not caught on purpose, so not listed: dropping the read-back of the patch (the emulated memory
 always takes the write); usbf_scan going on without the want flag (it is only ever called, and its
 notify only registered, once that is set); either of the two guards against
@@ -23,13 +23,14 @@ MUTATIONS = [
     ('FilePath node type not checked', '        cmp     dword [esi], 0x00140604         ; type 4, subtype 6, length 20\n        jne     .no', '        cmp     dword [esi], 0x00140604         ; type 4, subtype 6, length 20\n        nop\n        nop'),
     ('no FilePath not checked', '        mov     esi, [ebx + 0x10]               ; FilePath\n        test    esi, esi\n        jz      .no', '        mov     esi, [ebx + 0x10]               ; FilePath\n        test    esi, esi\n        nop\n        nop'),
     ('file GUID not checked', '        repe    cmpsb\n        pop     edi\n        jne     .no\n        UFSCOUNT 9', '        repe    cmpsb\n        pop     edi\n        nop\n        nop\n        UFSCOUNT 9'),
-    ('ImageSize not checked', '        cmp     dword [ebx + 0x28], USBF_CMP_RVA + USBF_CMP_LEN   ; ImageSize (low half: IA32)\n        jb      .no', '        cmp     dword [ebx + 0x28], USBF_CMP_RVA + USBF_CMP_LEN   ; ImageSize (low half: IA32)\n        nop\n        nop'),
-    ('function bytes not compared', '        pop     edi\n        pop     esi\n        jne     .no\n        UFSUNCOUNT 9', '        pop     edi\n        pop     esi\n        nop\n        nop\n        UFSUNCOUNT 9'),
+    ('ImageSize not checked', '        cmp     dword [ebx + 0x28], ecx         ; ImageSize (low half: IA32)\n        jb      .next', '        cmp     dword [ebx + 0x28], ecx         ; ImageSize (low half: IA32)\n        nop\n        nop'),
+    ('function bytes not compared', '        pop     edi\n        pop     esi\n        je      .match', '        pop     edi\n        pop     esi\n        jmp     .match'),
     ('only half the function compared', '        mov     ecx, USBF_CMP_LEN\n        cld\n        repe    cmpsb\n        pop     edi\n        pop     esi', '        mov     ecx, USBF_CMP_LEN / 2\n        cld\n        repe    cmpsb\n        pop     edi\n        pop     esi'),
     ('first sequence not changed', '        mov     dword [esi + USBF_A], 0x940fd284        ; test dl, dl; sete dl; add edx, edx\n        mov     dword [esi + USBF_A + 3], 0xd201c294    ;  (84 D2 0F 94 C2 01 D2)', ''),
     ('second sequence not changed', '        mov     dword [esi + USBF_B], 0x940fc084        ; test al, al; sete al; add eax, eax\n        mov     dword [esi + USBF_B + 3], 0xc001c094    ;  (84 C0 0F 94 C0 01 C0)', ''),
     ('first sequence written one byte out', '        mov     dword [esi + USBF_A], 0x940fd284        ; test dl, dl; sete dl; add edx, edx\n        mov     dword [esi + USBF_A + 3], 0xd201c294', '        mov     dword [esi + USBF_A + 1], 0x940fd284        ; test dl, dl; sete dl; add edx, edx\n        mov     dword [esi + USBF_A + 4], 0xd201c294'),
-    ('stock bytes wrong in the copy', '        db      0x14, 0x8b, 0x56, 0x14', '        db      0x14, 0x8b, 0x56, 0x15'),
+    ('next shell build looked for at the wrong place', '.next:  add     edx, 4 + USBF_CMP_LEN', '.next:  add     edx, 3 + USBF_CMP_LEN'),
+    ('only the first shell build tried', '.next:  add     edx, 4 + USBF_CMP_LEN\n        jmp     .try', '.next:  jmp     .no'),
     ('shell GUID wrong', '        dd      0xc57ad6b7', '        dd      0xc57ad6b8'),
     ('notify scans with the wrong context', '        push    dword [esp + 8]\n        call    usbf_scan', '        push    dword [esp + 4]\n        call    usbf_scan'),
     ('scan list not freed', '        call    [ebx + 0x30]                    ; FreePool\n        add     esp, 4\n.none:  movzx', '        add     esp, 0\n        add     esp, 4\n.none:  movzx'),

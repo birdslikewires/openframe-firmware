@@ -1,7 +1,8 @@
 ; usb_first: a USB drive with boot files on it is the shell's fs0, ahead of the internal memory.
 ;
 ; The built-in shell (EDK1, FV file C57AD6B7) names devices with its "consistent mapping": it
-; gathers every file system and block device and sorts them (comparison function at RVA 0xB7C5).
+; gathers every file system and block device and sorts them (comparison function at RVA 0xB7C5 in
+; the OF1's shell build, 0xCD88 in the OF2's).
 ; The sort's first key puts any device whose path has a USB or SCSI node after every other, so
 ; with the internal memory (MMC) holding a file system the MMC is always fs0 and a USB drive fs1
 ; or later, whatever order the core installed them in. (A stick was only ever fs0 when the MMC
@@ -19,7 +20,8 @@
 ; the source of truth, with the MMC after it. That is made as the shell loads (a LoadedImage
 ; notify, registered only then), or at once if it is already loaded, and only to the exact stock
 ; function: the shell's file GUID, an image big enough, and all 120 bytes of the function as they
-; are in every OF1 firmware we have. Without such a drive nothing is changed: the MMC is fs0, and
+; are in one of the two shell builds we know (every OF1 firmware has one, every good OF2 firmware
+; the other; shell_sig.inc, from 26.11.31). Without such a drive nothing is changed: the MMC is fs0, and
 ; the shell sorts as it always has. Two drives with it, or a drive with it and one without, are
 ; all ahead of the MMC, in the shell's own order among themselves.
 ;
@@ -29,8 +31,7 @@
 ; UINT32 usb_first(EFI_BOOT_SERVICES *BS): 1 if the shell was changed now, 2 if it will be as it
 ; loads, 0 if not (no such drive, or the shell isn't one we know). cdecl. Keeps ebx, esi, edi.
 
-USBF_CMP_RVA    equ     0xb7c5                  ; the shell's mapping sort comparison
-USBF_CMP_LEN    equ     120
+USBF_CMP_LEN    equ     120                     ; the shell's mapping sort comparison (shell_sig.inc)
 USBF_A          equ     0x28                    ; its two "USB or SCSI: later" sequences
 USBF_B          equ     0x4d
 
@@ -445,22 +446,29 @@ usbf_patch:
         pop     edi
         jne     .no
         UFSCOUNT 9                              ; the shell: one more, until it proves stock
-        cmp     dword [ebx + 0x28], USBF_CMP_RVA + USBF_CMP_LEN   ; ImageSize (low half: IA32)
-        jb      .no
+        lea     edx, [edi + (shl_sorts - .here)] ; each shell build we know (shell_sig.inc)
+.try:   mov     eax, [edx]                      ; its sort comparison's RVA (0: no more)
+        test    eax, eax
+        jz      .no
+        lea     ecx, [eax + USBF_CMP_LEN]
+        cmp     dword [ebx + 0x28], ecx         ; ImageSize (low half: IA32)
+        jb      .next
         mov     esi, [ebx + 0x20]               ; ImageBase
         test    esi, esi
         jz      .no
-        add     esi, USBF_CMP_RVA               ; esi = the function
+        add     esi, eax                        ; esi = the function
         push    esi
         push    edi
-        lea     edi, [edi + (usbf_cmp_stock - .here)]
+        lea     edi, [edx + 4]
         mov     ecx, USBF_CMP_LEN
         cld
         repe    cmpsb
         pop     edi
         pop     esi
-        jne     .no
-        UFSUNCOUNT 9
+        je      .match
+.next:  add     edx, 4 + USBF_CMP_LEN
+        jmp     .try
+.match: UFSUNCOUNT 9
         mov     dword [esi + USBF_A], 0x940fd284        ; test dl, dl; sete dl; add edx, edx
         mov     dword [esi + USBF_A + 3], 0xd201c294    ;  (84 D2 0F 94 C2 01 D2)
         mov     dword [esi + USBF_B], 0x940fc084        ; test al, al; sete al; add eax, eax
@@ -492,15 +500,6 @@ usbf_shell_guid:                                ; C57AD6B7-0515-40A8-9D21-551652
         dd      0xc57ad6b7
         dw      0x0515, 0x40a8
         db      0x9d, 0x21, 0x55, 0x16, 0x52, 0x85, 0x4e, 0x37
-usbf_cmp_stock:                                 ; the shell's sort comparison, RVA 0xB7C5, as stock
-        db      0x8b, 0x44, 0x24, 0x04, 0x8b, 0x08, 0x8b, 0x44, 0x24, 0x08, 0x56, 0x8b, 0x30, 0x8a, 0x41, 0x1a
-        db      0xf6, 0xd8, 0x57, 0x1b, 0xc0, 0x33, 0xd2, 0x83, 0xe0, 0xfc, 0x83, 0xc0, 0x04, 0x38, 0x51, 0x19
-        db      0x0f, 0x94, 0xc2, 0x0b, 0xc2, 0x8a, 0x51, 0x18, 0xf6, 0xda, 0x1b, 0xd2, 0x83, 0xe2, 0x02, 0x0b
-        db      0xc2, 0x8a, 0x56, 0x1a, 0xf6, 0xda, 0x8b, 0xf8, 0x1b, 0xd2, 0x33, 0xc0, 0x83, 0xe2, 0xfc, 0x83
-        db      0xc2, 0x04, 0x38, 0x46, 0x19, 0x0f, 0x94, 0xc0, 0x0b, 0xd0, 0x8a, 0x46, 0x18, 0xf6, 0xd8, 0x1b
-        db      0xc0, 0x83, 0xe0, 0x02, 0x0b, 0xd0, 0x3b, 0xfa, 0x74, 0x04, 0x8b, 0xc7, 0xeb, 0x0a, 0x8b, 0x41
-        db      0x14, 0x8b, 0x56, 0x14, 0x3b, 0xc2, 0x74, 0x04, 0x2b, 0xc2, 0xeb, 0x09, 0x56, 0x51, 0xe8, 0x64
-        db      0xac, 0x00, 0x00, 0x59, 0x59, 0x5f, 0x5e, 0xc3
 
 %ifdef TIMING
 ; usbf_summary: copies usbf_diag over the SMBIOS boot count, if this driver's table has one.

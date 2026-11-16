@@ -2,7 +2,7 @@
 """Runs driver/usb_first.inc under Unicorn against fake disks and the real shell, and checks the
 shell's sort.
 
-    venv/bin/python -I tools/emu_usbfirst.py
+    venv/bin/python -I tools/emu_usbfirst.py [--of2-shell of2_efi_cisco.img]
     venv/bin/python -I tools/emu_usbfirst.py --mutate tools/mutations/usb_first.py
 
 The fake firmware has file systems on partitions of disks (the internal memory behind its SD
@@ -72,10 +72,11 @@ def check(cond, what):
         failures.append(what)
 
 
-def real_shell():
-    """The built-in shell's PE image (sections at their file offsets), from the 26.11.29 release."""
+def real_shell(path=os.path.join(ROOT, 'releases', 'of1-blw-26.11.29.bin')):
+    """The built-in shell's PE image (sections at their file offsets), from the 26.11.29 release
+    (or another image)."""
     from uefi_firmware import efi_compressor as ec
-    img = open(os.path.join(ROOT, 'releases', 'of1-blw-26.11.29.bin'), 'rb').read()
+    img = open(path, 'rb').read()
     hlen, = struct.unpack_from('<H', img, 0x10030)
     fvlen, = struct.unpack_from('<Q', img, 0x10020)
     off = 0x10000 + hlen
@@ -109,7 +110,7 @@ def assemble(driver=DRIVER, timing=False):
             tm = ('tm_rec:\n        push    ecx\n        mov     ecx, [%#x]\n        mov     [%#x + 4 + ecx * 4], eax\n'
                   '        inc     dword [%#x]\n        pop     ecx\n        ret\n        align 4, db 0\n'
                   'count_ptr:      dd %#x\n' % (TM_LOG, TM_LOG, TM_LOG, COUNT))
-        open(src, 'w').write('bits 32\n        jmp usb_first\n%include "usb_first.inc"\n' + tm)
+        open(src, 'w').write('bits 32\n        jmp usb_first\n%include "usb_first.inc"\n%include "shell_sig.inc"\n' + tm)
         r = subprocess.run(['nasm', '-f', 'bin', '-I', driver + '/'] + (['-DTIMING'] if timing else []) +
                            ['-o', out, src], capture_output=True, text=True)
         if r.returncode:
@@ -518,7 +519,7 @@ def run_all(code, timing=False):
       [dict(MMC, parts=[boot]), USB(1, parts=[boot])], 0, False, register_fails=True)
 
 
-def mutate(path):
+def mutate(path, of2=None):
     import contextlib, io, runpy, shutil
     muts = runpy.run_path(path)['MUTATIONS']
     survived = []
@@ -544,9 +545,17 @@ def mutate(path):
             continue
         del failures[:]
         with contextlib.redirect_stdout(io.StringIO()):
+            global SHELL, CMP
             try:
                 run_all(code)
                 run_all(tcode, timing=True)
+                if of2:                            # and on the OpenFrame 2's shell build
+                    keep = SHELL, CMP
+                    SHELL, CMP = OF2_SHELL, 0xcd88
+                    try:
+                        run_all(code)
+                    finally:
+                        SHELL, CMP = keep
             except Exception:                      # the harness itself fell over: noticed
                 failures.append('exception')
         print('%-9s %s' % ('CAUGHT' if failures else 'SURVIVED', label))
@@ -557,8 +566,13 @@ def mutate(path):
 
 
 def main():
+    global SHELL, CMP
+    of2 = sys.argv[sys.argv.index('--of2-shell') + 1] if '--of2-shell' in sys.argv else None
     if len(sys.argv) > 2 and sys.argv[1] == '--mutate':
-        return mutate(sys.argv[2])
+        global OF2_SHELL
+        if of2:
+            OF2_SHELL = real_shell(of2)
+        return mutate(sys.argv[2], of2)
     code = assemble()
     print('usb_first: %d bytes assembled with its test entry; the shell from 26.11.29 (%d bytes)' % (len(code), len(SHELL)))
     run_all(code)
@@ -567,6 +581,12 @@ def main():
     print('The boot-timing build (-DTIMING, %d bytes): the same scenarios, its records and summary' % len(tcode))
     run_all(tcode, timing=True)
     print()
+    if of2:                                    # the OpenFrame 2's shell build: its comparison at 0xcd88
+        SHELL, CMP = real_shell(of2), 0xcd88
+        print('The OpenFrame 2\'s shell, from %s (%d bytes): the same scenarios' % (os.path.basename(of2), len(SHELL)))
+        run_all(code)
+        run_all(tcode, timing=True)
+        print()
     if failures:
         print('%d FAILED' % len(failures))
         sys.exit(1)

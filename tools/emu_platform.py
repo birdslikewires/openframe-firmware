@@ -275,6 +275,50 @@ def gop_fake(variant):
     return bytes(img), (bytes(want) if patched else None)
 
 
+SHELL_FILE = G('c57ad6b7-0515-40a8-9d21-551652854e37')
+SHELL_IMG = 0x66000000            # the shell's loaded image (fake, from shell_sig.inc)
+SHELL_VARIANTS = ('of1', 'of2', 'ours', 'code', 'small', 'guid', 'nopath')
+
+
+def shell_fake(variant):
+    """The shell's loaded image as countdown.inc sees it (its countdown function from shell_sig.inc,
+    the rest filler), the image it should leave (None: unchanged), and its ImageSize. 'of1' and
+    'of2': the two stock builds; 'ours': the OF1 build with the countdown already 0 (our releases);
+    'code': one byte of the function different; 'small', 'guid', 'nopath': as for the others."""
+    import os, re
+    builds, cur = [], None
+    for line in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'driver', 'shell_sig.inc')):
+        t = line.split(';')[0].strip()
+        if t == 'shl_cds:':
+            cur = 'cd'
+        elif t == 'shl_sorts:':
+            cur = None
+        elif cur and t.startswith('dd'):
+            v = [int(x, 16) for x in t[2:].split(',')]
+            if len(v) == 2:
+                builds.append((v[0], v[1], []))
+        elif cur and t.startswith('dw'):
+            o, ln = (int(x, 16) for x in t[2:].split(','))
+            if ln:
+                builds[-1][2].append([o, ln, b''])
+        elif cur and t.startswith('db'):
+            builds[-1][2][-1][2] += bytes(int(x, 16) for x in t[2:].split(','))
+    rva, need, runs = builds[1] if variant == 'of2' else builds[0]
+    size = need + 0x100
+    img = bytearray(b'\x5a' * size)
+    for o, ln, d in runs:
+        img[rva + o:rva + o + ln] = d
+    for site in (0x0e, 0x36):
+        img[rva + site] = 0x00 if variant == 'ours' else 0x32
+    if variant == 'code':
+        img[rva + runs[0][0] + 2] ^= 1
+    want = bytearray(img)
+    for site in (0x0e, 0x36):
+        want[rva + site] = 0
+    ok = variant in ('of1', 'of2', 'ours')
+    return bytes(img), (bytes(want) if ok else None), (need - 1 if variant == 'small' else size)
+
+
 def mmc_functions():
     """Code that matches driver/mmc_sig.inc: the MMC driver's ReadBlocks and WriteBlocks with their
     relocated dwords (which the signature skips) filled with something else."""
@@ -324,7 +368,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         gma=True, gma_decode=True, gma_bar=GMA_MMIO, fp=GOP_FP, nb_stage=True, nb_value=NB_DPLL, nb_signals=1,
         app_dpll=NB_DPLL, nb_img='before', nb_variant='stock', li_fails=False, timing=False,
         mmc_img='after', mmc_variant='stock', mmw_variant='stock', sdh_img='after', sdh_variant='stock', pin_variant='of1', profile=False, tm_ticks=70, usbtrace=False, uhcd_variant='stock', usbrt_variant='stock', usbrt_img='after', screen=False, screen_variant='stock',
-        fake_tsc_hi=0, gop_img='before', gop_variant='sharp', gop_dpll=GOP_DPLL):
+        fake_tsc_hi=0, gop_img='before', gop_variant='sharp', gop_dpll=GOP_DPLL, shell_img='after', shell_variant='of1', flash_model=None):
     """gma: the Poulsbo graphics device at 00:02.0 (8086:8108), its memory decode and BAR0.
     The GOP has set pipe B's PLL (fp, GOP_DPLL). nb_stage: after the entry, the boot manager's
     stage signal, on which NBDXE writes nb_value into DPLL_B and then the stage notifies run
@@ -425,6 +469,12 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     def load_gop():
         make_image(len(images), G('11111111-2222-3333-4444-555555555555') if gop_variant == 'guid' else GOP_FILE,
                    GOP_IMG, 0x19000 if gop_variant == 'small' else GOP_SIZE, nopath=gop_variant == 'nopath')
+    shell_orig, shell_want, shell_size = shell_fake(shell_variant)
+    mu.mem_map(SHELL_IMG, (len(shell_orig) + 0xfff) & ~0xfff)
+    mu.mem_write(SHELL_IMG, shell_orig)
+    def load_shell():
+        make_image(len(images), G('11111111-2222-3333-4444-555555555555') if shell_variant == 'guid' else SHELL_FILE,
+                   SHELL_IMG, shell_size, nopath=shell_variant == 'nopath')
     def load_nbdxe():
         make_image(len(images), G('11111111-2222-3333-4444-555555555555') if nb_variant == 'guid' else NBDXE_FILE,
                    NB_IMG, 0x200 if nb_variant == 'small' else 0x3000,
@@ -578,6 +628,8 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             make_image(len(images), USBRT_FILE, base, 0x9f80, nopath=False)
     if gop_img == 'before':                                       # the display driver (as on an OF1: before us)
         load_gop()
+    if shell_img == 'before':                                     # (not on hardware: the shell loads at BDS)
+        load_shell()
     nb_bad = {'n': 0}
     mmio = {0x6018: gop_dpll, 0x6048: fp, 0x61204: 0x00000001, 0x71008: 0x80000000}
     mmio_writes = []                                              # (offset, value, PP_CONTROL then)
@@ -595,6 +647,9 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         mu.hook_add(UC_HOOK_MEM_WRITE, mmio_write, begin=GMA_MMIO, end=GMA_MMIO + 0x7ffff)
     mu.mem_map(FWH, 0x100000, UC_PROT_READ)
     mu.mem_map(FLASH, 0x100000, UC_PROT_READ)
+    if flash_model:                                               # the boot block's ROM name (model.inc)
+        mu.mem_write(FLASH + 0xea268, {'of1': b'0ABPW400.rom', 'of2': b'0ABPW005.rom', 'bad': b'0ABPW006.rom',
+                                       'near': b'0ABPW004.rom', 'half': b'1ABPW005.rom'}[flash_model])
     mu.mem_write(ST, b'IBI SYST' + struct.pack('<III', 0x20000, 0x48, 0))
     mu.mem_write(ST + 0x100, AMI_VENDOR.encode('utf-16le') + b'\0\0')
     mu.mem_write(ST + 0x18, struct.pack('<II', ST + 0x100, 0x0004000d))   # FirmwareVendor, FirmwareRevision
@@ -1009,6 +1064,12 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             if e.get('guid') == LOADED_IMAGE:
                 li_queues[e['key']].append(0xB20000 + len(images) - 1)
         notify(LOADED_IMAGE, 'LoadedImage notify')
+    if shell_img == 'after':                                      # the shell loads (at BDS, from the boot option)
+        load_shell()
+        for e in evs.values():
+            if e.get('guid') == LOADED_IMAGE:
+                li_queues[e['key']].append(0xB20000 + len(images) - 1)
+        notify(LOADED_IMAGE, 'LoadedImage notify')
     if usbrt_img == 'after':                                      # USBRT's two copies load (as on an OF1)
         load_usbrt()
         if screen:
@@ -1288,8 +1349,9 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             sdh_target = b''
     sdh_changed = [(i, sdh_now[i]) for i in range(SDH_SIZE) if sdh_now[i] != sdh_orig[i]]
     gop_now = bytes(mu.mem_read(GOP_IMG, GOP_SIZE))
+    shell_now = bytes(mu.mem_read(SHELL_IMG, len(shell_orig)))
     rt_now = [bytes(mu.mem_read(a, 0x9f80)) for a in rt_copies]
-    return dict(gop_orig=gop_orig, gop_want=gop_want, gop_now=gop_now, ident=tm_var.get('ident'), rcap=tm_var.get('rcap'), rt_orig=rt_orig, rt_now=rt_now, pin_conns=pin['conns'], pin_devs=pci_devs, cea_changed=cea_changed, mmw_changed=mmw_changed, sdh_changed=sdh_changed, sdh_target=sdh_target, sdh_orig=sdh_orig, sdh_now=sdh_now, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_first=nb_now[0x3ca], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
+    return dict(shell_orig=shell_orig, shell_want=shell_want, shell_now=shell_now, gop_orig=gop_orig, gop_want=gop_want, gop_now=gop_now, ident=tm_var.get('ident'), rcap=tm_var.get('rcap'), rt_orig=rt_orig, rt_now=rt_now, pin_conns=pin['conns'], pin_devs=pci_devs, cea_changed=cea_changed, mmw_changed=mmw_changed, sdh_changed=sdh_changed, sdh_target=sdh_target, sdh_orig=sdh_orig, sdh_now=sdh_now, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_first=nb_now[0x3ca], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
                 mmc_ev=mmc_ev, nb_ev=nb_ev, evs=evs, mmio_writes=mmio_writes, dpll=final,
                 pp_final=struct.unpack('<I', mu.mem_read(GMA_MMIO + 0x61204, 4))[0] if gma else None,
                 nb_after_notify=nb_bad.get('after_notify'), wrapped=wrapped, entry_bio=entry_bio, late_bio=late_bio, in_image=in_image,
@@ -1405,8 +1467,10 @@ def main():
         # xor al, al; ret, nothing else changed) or 'unpatched' (its image untouched).
         ('MmcMediaDevice loads after the driver (as on an OF1): CE-ATA check patched as it loads', dxe, dict(store=lm(CARD), mmc_img='after'), 0, True, MAC, True),
         ('MmcMediaDevice loaded before the driver: patched at the entry', dxe, dict(store=lm(CARD), mmc_img='before'), 0, True, MAC, True),
-        ('NBDXE, MmcMediaDevice, SdHost and USBRT all loaded before the driver: all patched at the entry, no LoadedImage notify', dxe, dict(store=lm(CARD), mmc_img='before', sdh_img='before', usbrt_img='before'), 0, True, MAC, True),
+        ('NBDXE, MmcMediaDevice, SdHost, USBRT, the display driver and the shell all loaded before the driver: all patched at the entry, no LoadedImage notify', dxe, dict(store=lm(CARD), mmc_img='before', sdh_img='before', usbrt_img='before', shell_img='before'), 0, True, MAC, True),
         ('all but SdHost loaded before the driver: the LoadedImage notify stays for it', dxe, dict(store=lm(CARD), mmc_img='before', usbrt_img='before'), 0, True, MAC, True),
+        ('all but the display driver loaded before the driver: the notify stays, its splash written as it loads', dxe, dict(store=lm(CARD), mmc_img='before', sdh_img='before', usbrt_img='before', shell_img='before', gop_img='after'), 0, True, MAC, True),
+        ('all but the shell loaded before the driver: the notify stays, its countdown made 0 as it loads', dxe, dict(store=lm(CARD), mmc_img='before', sdh_img='before', usbrt_img='before', shell_img='after'), 0, True, MAC, True),
         # mmcinit.inc: MmcMediaDevice's waits after CMD0, SdHost's command wait. want_mmw / want_sdh:
         # 'patched' (exactly the expected bytes) or 'unpatched' (untouched).
         ('SdHost loaded before the driver: its wait changed at the entry', dxe, dict(store=lm(CARD), sdh_img='before'), 0, True, MAC, True),
@@ -1453,6 +1517,23 @@ def main():
         ('another file with the same code: left alone', dxe, dict(store=lm(CARD), gop_variant='guid', gop_img='after'), 0, True, MAC, True),
         ('display driver with no FilePath: left alone', dxe, dict(store=lm(CARD), gop_variant='nopath'), 0, True, MAC, True),
         ('no display driver: nothing else affected', dxe, dict(store=lm(CARD), gop_img='none'), 0, True, MAC, True),
+        # The model (model.inc): the boot block's ROM name says which OpenFrame this is
+        ('boot block says 0ABPW400 (an OF1): OpenFrame 1, OF1', dxe, dict(store=lm(CARD), flash_model='of1'), 0, True, MAC, True),
+        ('boot block says 0ABPW005 (an OF2): OpenFrame 2, OF2', dxe, dict(store=lm(CARD), flash_model='of2'), 0, True, MAC, True),
+        ('OF2, no MAC stored yet: OpenFrame 2, OF2, serial and UUID unfilled', dxe, dict(flash_model='of2'), 0, True, JUNK, False),
+        ('boot block says 0ABPW006 (a do-not-use OF2 build): left as built', dxe, dict(store=lm(CARD), flash_model='bad'), 0, True, MAC, True),
+        ('boot block says 0ABPW004: left as built', dxe, dict(store=lm(CARD), flash_model='near'), 0, True, MAC, True),
+        ('boot block says 1ABPW005: left as built', dxe, dict(store=lm(CARD), flash_model='half'), 0, True, MAC, True),
+        # The shell's countdown (countdown.inc): 0 as it loads, for either shell build we know
+        ('OF1 shell loads at BDS: its countdown made 0', dxe, dict(store=lm(CARD), shell_variant='of1'), 0, True, MAC, True),
+        ('OF2 shell loads at BDS: its countdown made 0', dxe, dict(store=lm(CARD), shell_variant='of2'), 0, True, MAC, True),
+        ('OF2 shell already loaded at the entry: made 0 then', dxe, dict(store=lm(CARD), shell_variant='of2', shell_img='before'), 0, True, MAC, True),
+        ('our OF1 release\'s shell (countdown already 0): 0 written again', dxe, dict(store=lm(CARD), shell_variant='ours'), 0, True, MAC, True),
+        ('shell with one byte of the function different: left alone', dxe, dict(store=lm(CARD), shell_variant='code'), 0, True, MAC, True),
+        ('shell image smaller than the function: left alone', dxe, dict(store=lm(CARD), shell_variant='small'), 0, True, MAC, True),
+        ('another file with the shell\'s code: left alone', dxe, dict(store=lm(CARD), shell_variant='guid'), 0, True, MAC, True),
+        ('shell with no FilePath: left alone', dxe, dict(store=lm(CARD), shell_variant='nopath'), 0, True, MAC, True),
+        ('no shell: nothing else affected', dxe, dict(store=lm(CARD), shell_img='none'), 0, True, MAC, True),
         ('display driver loads after the driver, LoadedImage notify not registered: left alone', dxe, dict(nb_img='none', store=lm(CARD), gop_img='after', register_fails=True, want_mmc_ev='closed', want_pclk='rtb'), 0, True, MAC, True),
         ('USBRT\'s 500 ms wait not stock: only the ready loop changed', dxe, dict(store=lm(CARD), usbrt_variant='a_changed'), 0, True, MAC, True),
         ('USBRT\'s ready-loop wait not stock: neither it nor the tries changed', dxe, dict(store=lm(CARD), usbrt_variant='b_changed'), 0, True, MAC, True),
@@ -1505,6 +1586,10 @@ def main():
         gop_patchable = (gop_img != 'none' and not kw.get('li_fails') and
                          (gop_img == 'before' or not (kw.get('register_fails') or kw.get('create_event_fails'))))
         want_gop = kw.pop('want_gop', 'patched' if img is dxe and want_ev and gop_patchable else 'unpatched')
+        shell_img = kw.get('shell_img', 'after')
+        shell_patchable = (shell_img != 'none' and not kw.get('li_fails') and
+                           (shell_img == 'before' or not (kw.get('register_fails') or kw.get('create_event_fails'))))
+        want_shell = kw.pop('want_shell', 'patched' if img is dxe and want_ev and shell_patchable else 'unpatched')
         want_pclk = kw.pop('want_pclk', ('untouched' if want_nbp == 'patched' else 'notify' if want_ev else 'untouched')
                            if img is dxe else 'app')
         # NBDXE (with the 'value' variant) writes its own value; the notify must leave that alone
@@ -1546,7 +1631,9 @@ def main():
                          if kw.get('sdh_img', 'after') == 'before' else []) + \
                         ([USBRT_FILE[:4]] * 2 if kw.get('usbrt_img', 'after') == 'before' else []) + \
                         ([{'guid': b'\x11' * 4, 'nopath': b'LI??'}.get(kw.get('gop_variant'), GOP_FILE[:4])]
-                         if kw.get('gop_img', 'before') == 'before' else [])
+                         if kw.get('gop_img', 'before') == 'before' else []) + \
+                        ([{'guid': b'\x11' * 4, 'nopath': b'LI??'}.get(kw.get('shell_variant'), SHELL_FILE[:4])]
+                         if kw.get('shell_img', 'after') == 'before' else [])
                     if not kw.get('li_fails') and pre != want_pre:
                         p.append('images before the entry %s, expected %s' % (pre, want_pre))
                     if kw.get('nb_img') == 'after' and NBDXE_FILE[:4] not in tags:
@@ -1829,6 +1916,14 @@ def main():
                 p.append('MmcMediaDevice waits changed %s, expected %s' % (r['mmw_changed'], want_w))
         elif r['mmw_changed']:
             p.append('MmcMediaDevice waits changed at %s' % r['mmw_changed'][:6])
+        # The shell's countdown (countdown.inc): exactly its two operands 0, or nothing
+        if want_shell == 'patched' and r['shell_want'] is not None:
+            if r['shell_now'] != r['shell_want']:
+                d = [i for i in range(len(r['shell_now'])) if r['shell_now'][i] != r['shell_want'][i]]
+                p.append('shell not as expected at %d bytes, first %#x' % (len(d), d[0]))
+        elif r['shell_now'] != r['shell_orig']:
+            d = [i for i in range(len(r['shell_now'])) if r['shell_now'][i] != r['shell_orig'][i]]
+            p.append('shell changed at %d bytes, first %#x' % (len(d), d[0]))
         # The display driver's splash (splash.inc): exactly the numbers, pixels and zeros, or nothing
         if want_gop == 'patched' and r['gop_want'] is not None:
             if r['gop_now'] != r['gop_want']:
@@ -1855,6 +1950,7 @@ def main():
         if not timing and want_nbp == 'patched' and want_cea == 'patched' and kw.get('nb_img', 'before') == 'before' and \
                 kw.get('mmc_img', 'after') == 'before' and kw.get('usbrt_img', 'after') == 'before' and \
                 want_gop == 'patched' and kw.get('gop_img', 'before') == 'before' and \
+                want_shell == 'patched' and kw.get('shell_img', 'after') == 'before' and \
                 (want_mmw == 'patched' or no_cmd0) and want_sdh == 'patched' and kw.get('sdh_img', 'after') == 'before' and \
                 any(e.get('guid') == LOADED_IMAGE for e in r['evs'].values()):
             p.append('LoadedImage notify registered although every image was patched at the entry')
@@ -1931,6 +2027,9 @@ def main():
             p.append('SMBIOS not installed')
         else:
             sm = r['smbios']
+            want_system = list(SYSTEM)                        # OpenFrame 2 when the boot block says so (model.inc)
+            if kw.get('flash_model') == 'of2' and SYSTEM == ['OpenPeak', 'OpenFrame 1', 'OF1', 'OpenFrame']:
+                want_system = ['OpenPeak', 'OpenFrame 2', 'OF2', 'OpenFrame']
             types = [(t, h) for t, h, _, _ in sm['structs']]
             if types != [(0, 0), (1, 1), (3, 2), (16, 3), (17, 4), (11, 5), (127, 6)]:
                 p.append('SMBIOS structures %s' % types)
@@ -1941,7 +2040,7 @@ def main():
                 p.append('Type 3 chassis %#x %s' % (d[3][0][5], d[3][1]))
             if 1 in d:
                 raw, ss = d[1]
-                if ss[:4] != SYSTEM or len(ss) != 5:
+                if ss[:4] != want_system or len(ss) != 5:
                     p.append('Type 1 strings %s' % ss)
                 got = (ss[raw[7] - 1] if raw[7] else None, raw[8:24])
                 if got != want_t1:
@@ -1950,7 +2049,7 @@ def main():
                     p.append('serial placeholder changed to %r' % ss[4:5])
             if img is dxe and r['entry_smbios']:
                 e1 = [(raw[7], raw[8:24], ss) for t, _, raw, ss in r['entry_smbios']['structs'] if t == 1]
-                if e1 != [(0, b'\xff' * 16, SYSTEM + ['0' * 12])]:
+                if e1 != [(0, b'\xff' * 16, want_system + ['0' * 12])]:
                     p.append('Type 1 filled before ReadyToBoot: %s' % e1)
             if 16 in d and d[16][0] != struct.pack('<BBHBBBIHH', 16, 0x0F, 3, 3, 3, 3, 0x200000, 0xFFFE, 1):
                 p.append('Type 16 %s' % d[16][0].hex())

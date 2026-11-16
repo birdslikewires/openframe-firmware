@@ -10,13 +10,15 @@
 ;   - USBRT, both copies (the SMM one while SMRAM is still open): two shorter waits and more
 ;     tries (usbrt.inc, urt_patch_image), from 26.11.26;
 ;   - the display driver (IEGD GOP): our splash in its configuration (splash.inc,
-;     gsp_patch_image), from 26.11.31. It reads that only when the console starts it.
+;     gsp_patch_image), from 26.11.31. It reads that only when the console starts it;
+;   - the shell: no startup.nsh countdown (countdown.inc, cd_patch_image), from 26.11.31. It
+;     loads at BDS, from the boot option, long after the rest.
 ; NBDXE is loaded before this driver, so it is patched at the entry; the others after, so
 ; through a LoadedImage protocol notify, before anything uses them.
 
 ; UINT32 img_patch(EFI_BOOT_SERVICES *BS): looks through every loaded image (EFI_LOADED_IMAGE)
 ; for the ones to change. 1 once all are made (now or before: NBDXE, MmcMediaDevice (both changes),
-; SdHost, two USBRT copies and the display driver), else 0. cdecl.
+; SdHost, two USBRT copies, the display driver and the shell), else 0. cdecl.
 ; Keeps ebx, esi, edi.
 img_patch:
         push    ebp
@@ -95,11 +97,17 @@ img_patch:
         add     esp, 4
         add     [edi + (urt_n - .here)], al
 .gop:   cmp     byte [edi + (gsp_done - .here)], 0
-        jne     .all
+        jne     .shl
         push    dword [ebp - 12]
         call    gsp_patch_image
         add     esp, 4
         mov     [edi + (gsp_done - .here)], al
+.shl:   cmp     byte [edi + (cd_done - .here)], 0
+        jne     .all
+        push    dword [ebp - 12]
+        call    cd_patch_image
+        add     esp, 4
+        mov     [edi + (cd_done - .here)], al
 .all:   call    .both
         jnz     .free
 .next:  inc     dword [ebp - 16]
@@ -127,6 +135,8 @@ img_patch:
         cmp     byte [edi + (urt_n - .here)], 2
         jb      .b0
         cmp     byte [edi + (gsp_done - .here)], 0
+        je      .b0
+        cmp     byte [edi + (cd_done - .here)], 0
         je      .b0
         inc     eax
 .b0:    test    eax, eax

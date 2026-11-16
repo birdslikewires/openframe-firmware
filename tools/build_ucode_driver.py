@@ -114,7 +114,18 @@ def smbios_blobs(bios_version, bios_date, release, system):
     t17_off = len(b''.join(structs[:structs.index(t17)]))
     assert table[t17_off] == 17 and table[t17_off + 1] == 0x1B
     assert table.count(BOOTCOUNT_PLACEHOLDER.encode()) == 1
-    return bytes(eps) + b'\0', table, dict(count=digits, memsize=t17_off + 12, memspeed=t17_off + 21)
+    # The model's digit in "OpenFrame 1" and "OF1", which the driver makes 2 on an OpenFrame 2
+    # (model.inc); 0 (left alone) when the build was given other names.
+    t1_off = len(t0)
+    sset = table[t1_off + 0x1B:]
+    if (man, prod, ver) == ('OpenPeak', 'OpenFrame 1', 'OF1'):
+        model1 = t1_off + 0x1B + sset.index(b'\0OpenFrame 1\0') + 11
+        model2 = t1_off + 0x1B + sset.index(b'\0OF1\0') + 3
+        assert table[model1:model1 + 1] == b'1' and table[model2:model2 + 1] == b'1'
+    else:
+        model1 = model2 = 0
+    return bytes(eps) + b'\0', table, dict(count=digits, memsize=t17_off + 12, memspeed=t17_off + 21,
+                                          model1=model1, model2=model2)
 
 
 def pick_ucode(img, path):
@@ -237,7 +248,8 @@ def main():
             r = subprocess.run(['nasm', '-f', 'bin', '-I', os.path.dirname(ASM) + '/', '-DUCODE_FILE="%s"' % uc,
                                 '-DSMBIOS_EPS_FILE="%s"' % ef, '-DSMBIOS_FILE="%s"' % tf, '-DSPLASH_FILE="%s"' % sp,
                                 '-DSMBIOS_LEN=%d' % len(table), '-DSMBIOS_COUNT_OFF=%d' % offs['count'],
-                                '-DSMBIOS_MEMSIZE_OFF=%d' % offs['memsize'], '-DSMBIOS_MEMSPEED_OFF=%d' % offs['memspeed']] + list(defs) + ['-o', out, ASM],
+                                '-DSMBIOS_MEMSIZE_OFF=%d' % offs['memsize'], '-DSMBIOS_MEMSPEED_OFF=%d' % offs['memspeed'],
+                                '-DSMBIOS_MODEL1_OFF=%d' % offs['model1'], '-DSMBIOS_MODEL2_OFF=%d' % offs['model2']] + list(defs) + ['-o', out, ASM],
                                capture_output=True, text=True)
             if r.returncode:
                 bp.fail('nasm: ' + r.stderr)

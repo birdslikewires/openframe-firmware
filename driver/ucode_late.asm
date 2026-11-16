@@ -58,6 +58,11 @@
 ; 13. Boot splash: from 26.11.31 our splash (the bird) is put into the stock display driver's loaded
 ;    image before it draws, so an OpenFrame whose display driver our updates don't write (an
 ;    OpenFrame 2's) shows it too (splash.inc). On our OpenFrame 1 releases it is already there.
+; 14. Shell countdown: from 26.11.31 the shell's 5 s wait before startup.nsh is made 0 in its loaded
+;    image as it loads, for the OF1's and the OF2's shell builds (countdown.inc); USB-first knows
+;    both builds too. On our OpenFrame 1 releases the countdown is already 0 in flash.
+; 15. Model: from 26.11.31 one block 10 serves both OpenFrames; SMBIOS Type 1 says OpenFrame 2 / OF2
+;    when the boot block's ROM name (read only, at 0xFFFEA268) is the OF2's (model.inc).
 ;
 ; Position-independent: data is reached through call/pop, so no relocations are needed.
 ; Assembled with `nasm -f bin`; build_ucode_driver.py wraps it in a PE32 image and an FFS
@@ -312,6 +317,9 @@ smbios_install:
         push    edx
         lea     edi, [edx + 32]
         call    mem_fill                        ; Type 17 size and speed
+%if SMBIOS_MODEL1_OFF
+        call    model_fill                      ; Type 1: OpenFrame 1 or 2 (model.inc)
+%endif
         pop     edx
 
         xor     eax, eax                        ; intermediate checksum over 0x10..0x1E
@@ -794,6 +802,8 @@ mac_ok: xor     eax, eax
 %include "usb_first.inc"
 %include "usbrt.inc"
 %include "splash.inc"
+%include "countdown.inc"
+%include "model.inc"
 %include "img_patch.inc"
 %ifdef TIMING
 %include "timing.inc"
