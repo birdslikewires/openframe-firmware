@@ -120,7 +120,7 @@ seconds_left() {
 # The firmware the unit started with, for the bottom line: ours by its version, stock by
 # the carrier it came from ("O2": it has no version of its own), going by FWCHECK, what
 # of-firmware-update's check said: a block it gave one stock image's name alone says
-# which (blocks 5 and 6 are the same in all three: "5:o2-stock+"). Plain "stock" if it
+# which (blocks 5 and 6 are the same in all three: "5:o2-stock+"). "OpenPeak" if it
 # named none.
 FWCHECK=""
 fw_name() {
@@ -134,7 +134,7 @@ fw_name() {
 		o2-stock) echo "O2" ;;
 		verizon) echo "Verizon" ;;
 		telstra) echo "Telstra" ;;
-		*) echo "stock" ;;
+		*) echo "OpenPeak" ;;
 	esac
 }
 
