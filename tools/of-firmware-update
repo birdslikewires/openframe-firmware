@@ -45,7 +45,7 @@
 ##      carried on by the next run, from what is on the chip.
 ##
 ##  Once the first write starts, nothing but finishing stops it: hangup, interrupt and terminate
-##  are ignored from then on (by the writes too), so a shutdown, a Ctrl-C or a dropped SSH session
+##  (and a broken pipe) are ignored from then on (by the writes too), so a shutdown, a Ctrl-C or a dropped SSH session
 ##  can't stop it part way. (kill -9 still can; the services that run this never send it:
 ##  of-firmware.service and of-flash.service wait for it however long it takes. And a run cut off
 ##  anywhere still leaves a chip that starts.)
@@ -264,8 +264,9 @@ put() {
 # verify <n> <md5>: two reads; block n = md5.
 verify() { readchip "$W/r1.bin"; readchip "$W/r2.bin"; [ "$(bm "$W/r1.bin" $1)" = $2 ] && [ "$(bm "$W/r2.bin" $1)" = $2 ]; }
 
-# From the first write on, only finishing stops this (see the top).
-trap '' HUP INT TERM
+# From the first write on, only finishing stops this (see the top). PIPE too: a dropped SSH
+# session or a closed reader must not stop it at its next message.
+trap '' HUP INT TERM PIPE
 bootnsh_fallback
 
 NSTEPS=$(wc -l < "$W/plan/steps.txt")
