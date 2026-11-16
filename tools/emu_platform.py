@@ -67,7 +67,7 @@ JUNK = bytes.fromhex('b8fcffffffff')
 BS_OK = {0x28: 'GetMemoryMap', 0x2c: 'AllocatePool', 0x30: 'FreePool', 0x6c: 'InstallConfigurationTable',
          0xac: 'LocateProtocol', 0xb8: 'CalculateCrc32', 0xc4: 'CreateEventEx', 0x34: 'CreateEvent',
          0x44: 'CloseEvent', 0x58: 'HandleProtocol', 0x60: 'RegisterProtocolNotify', 0xa8: 'LocateHandleBuffer',
-         0x88: 'Stall', 0x64: 'LocateHandle', 0x90: 'ConnectController'}
+         0x88: 'Stall', 0x64: 'LocateHandle', 0x90: 'ConnectController', 0x38: 'SetTimer', 0x48: 'CheckEvent'}
 BLOCKIO = G('964e5b21-6459-11d2-8e39-00a0c969723b')
 NB_STAGE = G('ef9a3971-c1a0-4a93-bd40-5aa165f2dc3a')   # the boot-manager stage NBDXE's clock write waits for
 PCIIO_GUID = G('4cf5b200-68b8-4ca5-9eec-b23e3f50029a')
@@ -377,7 +377,14 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         app_dpll=NB_DPLL, nb_img='before', nb_variant='stock', li_fails=False, timing=False,
         mmc_img='after', mmc_variant='stock', mmw_variant='stock', sdh_img='after', sdh_variant='stock', pin_variant='of1', profile=False, tm_ticks=70, usbtrace=False, uhcd_variant='stock', usbrt_variant='stock', usbrt_img='after', screen=False, screen_variant='stock',
         fake_tsc_hi=0, gop_img='before', gop_variant='sharp', gop_dpll=GOP_DPLL, shell_img='after', shell_variant='of1', flash_model=None,
-        kbdtime=False, kt_inputs=(('split', 1900), ('usb', 2600)), kt_keys=((0x17, 0), (0, 0x61)), kt_conin=True, kt_late=()):
+        kbdtime=False, kt_inputs=(('split', 1900), ('usb', 2600)), kt_keys=((0x17, 0), (0, 0x61)), kt_conin=True, kt_late=(),
+        kt_shell_t=4600, kt_rks_t=4700, kt_rks_error=False, kt_timer_fails=False, kt_settimer_fails=False, kt_timer_never=False):
+    """The console (every run): ST->ConIn, whose ReadKeyStroke hands out kt_keys ((ms it can be read,
+    scan, char), or (scan, char) from the start) or always fails (kt_rks_error); Simple Text
+    Inputs appearing at kt_inputs' times ('split': ConSplitter's, no device path; 'usb'; 'ps2':
+    an ACPI path); the shell loading at kt_shell_t and making its one ReadKeyStroke at kt_rks_t
+    (twice: the second must go through). The clock moves with Stall; timers (EVT_TIMER, SetTimer
+    relative) go off on it (kt_timer_never: never)."""
     """gma: the Poulsbo graphics device at 00:02.0 (8086:8108), its memory decode and BAR0.
     The GOP has set pipe B's PLL (fp, GOP_DPLL). nb_stage: after the entry, the boot manager's
     stage signal, on which NBDXE writes nb_value into DPLL_B and then the stage notifies run
@@ -669,9 +676,8 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         mu.mem_write(ST + 0x814, SMBIOS + struct.pack('<I', ST + 0x900))
     st_crc = lambda: zlib.crc32(bytes(mu.mem_read(ST, 0x10)) + b'\0' * 4 + bytes(mu.mem_read(ST + 0x14, 0x34)))
     kt = dict(t=500, inputs=[], keys=[k if len(k) == 3 else (0,) + tuple(k) for k in kt_keys], stub_calls=0)
-    if kbdtime:                                                   # the console's input (kbdtime.inc)
-        if kt_conin:
-            mu.mem_write(ST + 0x24, struct.pack('<I', CONIN))
+    if kt_conin:                                                  # the console's input
+        mu.mem_write(ST + 0x24, struct.pack('<I', CONIN))
     mu.mem_write(ST + 0x10, struct.pack('<I', st_crc()))
     st_orig = bytes(mu.mem_read(ST, 0x48))
     allocs = {}
@@ -686,7 +692,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         mu.mem_write(RT + off, struct.pack('<I', RT_STUB + off))
     mu.mem_write(MP + 8, struct.pack('<I', STUBS + 0x10))     # StartupAllAPs
     mu.mem_write(STUBS, b'\xc3' * 0x3000)
-    if kbdtime:                                                   # the console's input and device paths
+    if True:                                                      # the console's input and device paths
         mu.mem_write(CONIN, struct.pack('<III', STUBS + 0x60, CONIN_RKS, 0))
         mu.mem_write(KT_PATHS, bytes([1, 1, 6, 0, 0, 0x1d, 3, 5, 6, 0, 1, 0, 0x7f, 0xff, 4, 0]))   # PCI, USB, end
         mu.mem_write(KT_PATHS + 0x40, bytes([2, 1, 12, 0]) + struct.pack('<II', 0x0303d041, 0) + bytes([0x7f, 0xff, 4, 0]))
@@ -744,6 +750,8 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             kt['stub_calls'] += 1
             if a[0] != CONIN:
                 errors.append('ReadKeyStroke with This %#x' % a[0])
+            if kt_rks_error:
+                return ret(0x80000007)
             if not kt['keys'] or kt['keys'][0][0] > kt['t']:      # (when it can be read, scan, char)
                 return ret(0x80000006)
             uc.mem_write(a[1], struct.pack('<HH', *kt['keys'].pop(0)[1:]))
@@ -753,6 +761,24 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             return ret(0x5a5a0000 + len(tm_var['trig_calls']))
         if BS_STUB <= addr < BS_STUB + 0x100:
             off = addr - BS_STUB
+            if off == 0x38 and a[0] in evs and evs[a[0]]['type'] == 0x80000000:   # SetTimer on a plain timer
+                e_ = evs[a[0]]
+                if a[1] != 2 or e_.get('closed'):
+                    errors.append('SetTimer type %d on %#x' % (a[1], a[0]))
+                if kt_settimer_fails:
+                    return ret(0x80000002)
+                e_.update(due=None if kt_timer_never else kt['t'] + (a[2] | a[3] << 32) // 10000, fired=False)
+                kt['timer_set'] = (kt['t'], a[2] | a[3] << 32)
+                return ret(0)
+            if off == 0x48:                                        # CheckEvent(ev)
+                e_ = evs.get(a[0])
+                if not e_ or e_.get('closed') or e_.get('fn'):
+                    errors.append('CheckEvent on %#x' % a[0])
+                    return ret(0x80000002)
+                if e_.get('due') is not None and kt['t'] >= e_['due'] and not e_['fired']:
+                    e_['fired'] = True
+                    return ret(0)
+                return ret(0x80000006)
             if off == 0x38 and profile:                            # SetTimer(ev, type, lo, hi)
                 tm_var.setdefault('timer', []).append((a[0], a[1], a[2], a[3]))
                 return ret(0)
@@ -814,12 +840,12 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             if off == 0x88:                                        # Stall(us)
                 if a[0] > 100000:
                     errors.append('Stall of %d us' % a[0])
-                if kbdtime:                                        # the scenario's clock moves on
+                if True:                                           # the scenario's clock moves on
                     kt['t'] += a[0] // 1000
                     kt['stalls'] = kt.get('stalls', 0) + 1
                 return ret(0)
             if off == 0x34:                                        # CreateEvent(type, tpl, fn, ctx, &ev)
-                if create_event_fails:
+                if create_event_fails or (kt_timer_fails and a[0] == 0x80000000):
                     return ret(0x80000009)
                 h = 0xE7E70010 + len(evs)
                 evs[h] = dict(type=a[0], tpl=a[1], fn=a[2], ctx=a[3], handle=h)
@@ -827,7 +853,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 return ret(0)
             if off == 0x60:                                        # RegisterProtocolNotify(guid, ev, &reg)
                 g = bytes(uc.mem_read(a[0], 16))
-                ok = (BLOCKIO, NB_STAGE, LOADED_IMAGE) + (tuple(TM_GUIDS) if timing else ()) + ((SMMC_GUID,) if usbtrace else ()) + ((TEXTIN_GUID,) if kbdtime else ())
+                ok = (BLOCKIO, NB_STAGE, LOADED_IMAGE) + (tuple(TM_GUIDS) if timing else ()) + ((SMMC_GUID,) if usbtrace else ()) + (TEXTIN_GUID,)
                 if g not in ok or a[1] not in evs or 'guid' in evs[a[1]]:
                     errors.append('RegisterProtocolNotify for something else')
                     return ret(0x80000002)
@@ -865,7 +891,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 if a[0] == 2 and g == SFS_GUID:                    # no file systems here
                     events.append('LocateHandleBuffer(SimpleFileSystem)')
                     return ret(0x8000000E)
-                if kbdtime and a[0] == 2 and g == TEXTIN_GUID:     # the console inputs so far
+                if a[0] == 2 and g == TEXTIN_GUID:                 # the console inputs so far
                     if not kt['inputs']:
                         return ret(0x8000000E)
                     buf = pool['next']; pool['next'] += 4 * len(kt['inputs'])
@@ -899,7 +925,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 if g == LOADED_IMAGE and 0 <= a[0] - 0xB20000 < len(images):
                     uc.mem_write(a[2], struct.pack('<I', images[a[0] - 0xB20000]))
                     return ret(0)
-                if kbdtime and g == DP_GUID and 0 <= a[0] - 0xB50000 < len(kt['inputs']):
+                if g == DP_GUID and 0 <= a[0] - 0xB50000 < len(kt['inputs']):
                     kind = kt['inputs'][a[0] - 0xB50000]
                     if kind == 'split':                            # ConSplitter's own: no device path
                         return ret(0x80000003)
@@ -1111,7 +1137,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     if timing:                                                    # the watched protocols appear
         for g in TM_GUIDS:
             notify(g, 'timing notify')
-    if kbdtime:                                                   # console inputs appear (BDS connects them)
+    if True:                                                      # console inputs appear (BDS connects them)
         for kind, t in kt_inputs:
             kt['t'] = t
             kt['inputs'].append(kind)
@@ -1123,7 +1149,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 li_queues[e['key']].append(0xB20000 + len(images) - 1)
         notify(LOADED_IMAGE, 'LoadedImage notify')
     if shell_img == 'after':                                      # the shell loads (at BDS, from the boot option)
-        kt['t'] = 4600
+        kt['t'] = kt_shell_t
         load_shell()
         for e in evs.values():
             if e.get('guid') == LOADED_IMAGE:
@@ -1361,20 +1387,23 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         kt['t'] = 4000
         for _ in range(signals):
             call(ev['fn'], [0xE7E70001, ev['ctx']], 'ReadyToBoot notify')
-    if kbdtime:                                                   # the shell asks for its one key, twice
-        kt['t'] = 4700
+    if True:                                                      # the shell asks for its one key, twice
+        kt['t'] = kt_rks_t
         kt['rks'] = []
         conin = rd(ST + 0x24)
         if conin:
             for _ in range(2):
                 mu.mem_write(STACK + 0x8000, b'\xee' * 4)
+                stalls0 = kt.get('stalls', 0)
                 st_ = call(rd(conin + 4), [conin, STACK + 0x8000], 'the shell\'s ReadKeyStroke')
                 kt['rks'].append((st_, bytes(mu.mem_read(STACK + 0x8000, 4)), kt['stub_calls']))
+                kt.setdefault('rks_t', []).append((kt['t'], kt.get('stalls', 0) - stalls0))
         for kind, t in kt_late:                                   # a keyboard that comes later
             kt['t'] = t
             kt['inputs'].append(kind)
             notify(TEXTIN_GUID, 'Simple Text Input notify')
         kt['conin_rks'] = rd(CONIN + 4)
+        kt['timers'] = [(e_.get('due'), e_.get('closed', False)) for e_ in evs.values() if e_.get('type') == 0x80000000]
     for key in ((0, 0x1c, 0), (1, 0, 0)):
         if cfg[key][4] & 0xffff:
             errors.append('command register of %02x:%02x.%d left at %#x' % (key + (cfg[key][4] & 0xffff,)))
@@ -1389,7 +1418,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     wrapped = [(kind, in_image(rd(a + 0x10)), in_image(rd(a + 0x14))) for a, kind in bios]
     ordered = sorted(evs.values(), key=lambda e: e['handle'])
     mmc_ev = (next((e for e in ordered if e.get('guid') == BLOCKIO), None)
-              or next((e for e in ordered if 'guid' not in e), {}))
+              or next((e for e in ordered if 'guid' not in e and e.get('type') != 0x80000000), {}))
     nb_ev = next((e for e in evs.values() if e.get('guid') == NB_STAGE), {})
     final = struct.unpack('<I', mu.mem_read(GMA_MMIO + 0x6018, 4))[0] if gma else None
     nb_now = bytes(mu.mem_read(NB_IMG, 0x3000))
@@ -1632,6 +1661,47 @@ def main():
         ('app build: MmcMediaDevice left alone', app, dict(store=lm(CARD), cpu_rev=0x217, enumerated_at_entry=True, mmc_img='before'), 0x80000014, False, MAC, True),
     ]
     NR = 0x80000006
+    ESC, NOKEY = b'\x17\0\0\0', b'\xee' * 4
+    KB = dict(store=lm(CARD), kt_inputs=(('split', 1900), ('usb', 3430)), kt_shell_t=3627, kt_rks_t=3670)
+    if not kbdtime:                                               # escwin.inc: Esc at boot, reliably
+        cases += [
+            ('Esc window: no USB keyboard: one read, no wait (as before)', dxe,
+             dict(store=lm(CARD), kt_inputs=(('split', 1900),), kt_keys=(), kt_rks_t=3670,
+                  want_esc=([(NR, NOKEY, 1), (NR, NOKEY, 2)], [(3670, 0), (3670, 0)]), want_timers=[]), 0, True, MAC, True),
+            ('Esc window: keyboard, nobody presses: until 1 s after the keyboard, then on; timer closed', dxe,
+             dict(KB, kt_keys=(), want_esc=([(NR, NOKEY, 77), (NR, NOKEY, 78)], [(4430, 76), (4430, 0)]), want_timers=[(4430, True)]), 0, True, MAC, True),
+            ('Esc window: Esc 300 ms in: handed to the shell at once', dxe,
+             dict(KB, kt_keys=((3970, 0x17, 0),), want_esc=([(0, ESC, 31), (NR, NOKEY, 32)], [(3970, 30), (3970, 0)]), want_timers=[(4430, True)]), 0, True, MAC, True),
+            ('Esc window: Esc already waiting at the look', dxe,
+             dict(KB, kt_keys=((0, 0x17, 0),), want_esc=([(0, ESC, 1), (NR, NOKEY, 2)], [(3670, 0), (3670, 0)])), 0, True, MAC, True),
+            ('Esc window: other keys mashed, then Esc: the others dropped, Esc to the shell', dxe,
+             dict(KB, kt_keys=((3700, 0, 0x61), (3800, 0, 0x62), (4000, 0x17, 0)), want_esc=([(0, ESC, 36), (NR, NOKEY, 37)], [(4000, 33), (4000, 0)])), 0, True, MAC, True),
+            ('Esc window: only other keys: dropped, the window runs out', dxe,
+             dict(KB, kt_keys=((3700, 0, 0x61),), want_esc=([(NR, NOKEY, 78), (NR, NOKEY, 79)], [(4430, 76), (4430, 0)])), 0, True, MAC, True),
+            ('Esc window: Esc after the window: not taken; the next call gets it', dxe,
+             dict(KB, kt_keys=((4500, 0x17, 0),), want_esc=([(NR, NOKEY, 77), (NR, NOKEY, 78)], [(4430, 76), (4430, 0)])), 0, True, MAC, True),
+            ('Esc window: the shell looks after the window is over (slow boot): no wait', dxe,
+             dict(KB, kt_keys=(), kt_rks_t=4600, want_esc=([(NR, NOKEY, 1), (NR, NOKEY, 2)], [(4600, 0), (4600, 0)])), 0, True, MAC, True),
+            ('Esc window: no timer (CreateEvent fails): 1 s from the look instead', dxe,
+             dict(KB, kt_keys=(), kt_timer_fails=True, want_esc=([(NR, NOKEY, 101), (NR, NOKEY, 102)], [(4670, 100), (4670, 0)]), want_timers=[]), 0, True, MAC, True),
+            ('Esc window: SetTimer fails: the timer closed, 1 s from the look', dxe,
+             dict(KB, kt_keys=(), kt_settimer_fails=True, want_esc=([(NR, NOKEY, 101), (NR, NOKEY, 102)], [(4670, 100), (4670, 0)]), want_timers=[(None, True)]), 0, True, MAC, True),
+            ('Esc window: the timer never goes off: 3 s at most', dxe,
+             dict(KB, kt_keys=(), kt_timer_never=True, want_esc=([(NR, NOKEY, 301), (NR, NOKEY, 302)], [(6670, 300), (6670, 0)])), 0, True, MAC, True),
+            ('Esc window: the keyboard appears after the look: no wait', dxe,
+             dict(KB, kt_inputs=(('split', 1900),), kt_late=(('usb', 5200),), kt_keys=(), want_esc=([(NR, NOKEY, 1), (NR, NOKEY, 2)], [(3670, 0), (3670, 0)])), 0, True, MAC, True),
+            ('Esc window: a non-USB input is no keyboard: no wait', dxe,
+             dict(KB, kt_inputs=(('split', 1900), ('ps2', 3430)), kt_keys=(), want_esc=([(NR, NOKEY, 1), (NR, NOKEY, 2)], [(3670, 0), (3670, 0)])), 0, True, MAC, True),
+            ('Esc window: the console\'s ReadKeyStroke fails: taken as no key, the window runs out', dxe,
+             dict(KB, kt_rks_error=True, want_esc=([(NR, NOKEY, 77), (0x80000007, NOKEY, 78)], [(4430, 76), (4430, 0)])), 0, True, MAC, True),
+            ('Esc window: 100 other keys waiting, then Esc: read 64 at a time, Esc found', dxe,
+             dict(KB, kt_keys=((0, 0, 0x78),) * 100 + ((0, 0x17, 0),), want_esc=([(0, ESC, 101), (NR, NOKEY, 102)], [(3680, 1), (3680, 0)])), 0, True, MAC, True),
+            ('Esc window: no ConIn at the shell: nothing replaced', dxe,
+             dict(KB, kt_conin=False, want_esc=([], None)), 0, True, MAC, True),
+            ('Esc window: a shell that isn\'t ours: not hooked, no wait', dxe,
+             dict(KB, shell_variant='code', want_shell='unpatched', kt_keys=(),
+                  want_esc=([(NR, NOKEY, 1), (NR, NOKEY, 2)], [(3670, 0), (3670, 0)])), 0, True, MAC, True),
+        ]
     if kbdtime:                                                   # kbdtime.inc (-DKBDTIME)
         cases += [
             ('kbdtime: USB keyboard before the shell, Esc and "a" waiting: both counted, 2 s waited, the shell told none, then straight through',
@@ -1672,6 +1742,8 @@ def main():
         want_kbd = kw.pop('want_kbd', None)                    # kbdtime.inc's string, when the scenario says
         want_rks = kw.pop('want_rks', None)
         want_hooked = kw.pop('want_hooked', None)
+        want_esc = kw.pop('want_esc', None)                    # escwin.inc: ([(status, key, stub calls)] x2, [(ms, stalls)] x2)
+        want_timers = kw.pop('want_timers', None)
         want_vendor = kw.pop('want_vendor', 'BirdsLikeWires')
         want_mem = kw.pop('want_mem', (512, 533))
         want_t1 = kw.pop('want_t1', FILLED if kw.get('store') == lm(CARD) and (want_ev or img is app) else UNFILLED)
@@ -2185,6 +2257,10 @@ def main():
                 p.append('Type 11 %s, expected %r' % (got11, want_count))
             if img is dxe and r['entry_smbios'] and [ss[:1] for t, _, _, ss in r['entry_smbios']['structs'] if t == 11] != [[PLACEHOLDER]]:
                 p.append('boot count filled before ReadyToBoot')
+            if want_esc is not None and (r['kt'].get('rks'), r['kt'].get('rks_t')) != want_esc:
+                p.append('the shell\'s ReadKeyStroke calls %s at (ms, stalls) %s, expected %s' % (r['kt'].get('rks'), r['kt'].get('rks_t'), want_esc))
+            if want_timers is not None and r['kt'].get('timers') != want_timers:
+                p.append('timers %s, expected %s' % (r['kt'].get('timers'), want_timers))
             if kbdtime and want_rks is not None and r['kt'].get('rks') != want_rks:
                 p.append('the shell\'s ReadKeyStroke calls %s, expected %s' % (r['kt'].get('rks'), want_rks))
             if kbdtime and want_hooked is not None and (r['kt'].get('conin_rks') != CONIN_RKS) != want_hooked:

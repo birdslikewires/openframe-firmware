@@ -191,14 +191,16 @@ if [ -n "$CUR" ] && [ "${CUR%%-*}" != "${NEW%%-*}" ] && [ "$(printf '%s\n%s\n' "
 fi
 
 # What the chip is now, block by block, where it differs from the image: each block named by the
-# image the manifest has it from ("9:o2-stock" says which carrier's firmware it is), "blank", or
-# "torn" (ours, out of the firmware's reach, part way through an earlier run).
+# image the manifest has it from ("9:o2-stock" says which carrier's firmware it is), "blank",
+# "signposts" (block 10 holding only spacer headers), or "torn" (ours, out of the firmware's
+# reach, part way through an earlier run).
 DESC=""
 for n in $(seq 1 15); do
 	[ "${R[$n]}" = "${T[$n]}" ] && continue
 	# Blocks 10 and 11 by what's in them; the others by what they are without our spacer.
 	case $n in 10|11) L=$(label $n "${R[$n]}") ;; *) L=$(label $n "${C[$n]}") ;; esac
 	if [ "${R[$n]}" = "$BLANK" ]; then DESC="$DESC $n:blank"
+	elif [ $n = 10 ] && [ -z "$L" ] && [ "${C[10]}" = "$BLANK" ]; then DESC="$DESC 10:signposts"
 	elif [ -n "$L" ]; then DESC="$DESC $n:$(echo "$L" | cut -d, -f1)$(echo "$L" | grep -q , && echo +)"
 	else DESC="$DESC $n:torn"; fi
 done

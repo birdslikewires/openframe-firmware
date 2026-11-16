@@ -108,10 +108,12 @@ img_patch:
         call    cd_patch_image
         add     esp, 4
         mov     [edi + (cd_done - .here)], al
-%ifdef KBDTIME
-        test    al, al                          ; development build: the shell is here
+        test    al, al                          ; the shell is here and ours:
         jz      .all
-        call    kt_shell
+%ifdef KBDTIME
+        call    kt_shell                        ; development build: keyboard timing
+%else
+        call    ew_shell                        ; Esc reliably stops at it (escwin.inc)
 %endif
 .all:   call    .both
         jnz     .free

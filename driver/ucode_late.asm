@@ -63,6 +63,9 @@
 ;    both builds too. On our OpenFrame 1 releases the countdown is already 0 in flash.
 ; 15. Model: from 26.11.31 one block 10 serves both OpenFrames; SMBIOS Type 1 says OpenFrame 2 / OF2
 ;    when the boot block's ROM name (read only, at 0xFFFEA268) is the OF2's (model.inc).
+; 16. Esc at boot: from 26.11.31, with a USB keyboard, the shell's one look for Esc waits until 1 s
+;    after the keyboard appeared, so Esc pressed at boot reliably stops at the shell's prompt;
+;    nothing is shown for it, and with no USB keyboard nothing waits (escwin.inc).
 ;
 ; Position-independent: data is reached through call/pop, so no relocations are needed.
 ; Assembled with `nasm -f bin`; build_ucode_driver.py wraps it in a PE32 image and an FFS
@@ -197,6 +200,8 @@ entry:
 .nbp:
 %ifdef KBDTIME
         call    kt_start                        ; development build: keyboard timing
+%else
+        call    ew_start                        ; Esc at boot: the shell, reliably (escwin.inc)
 %endif
 %ifdef TIMING
         call    tm_pre                          ; development build: what loaded before us,
@@ -821,6 +826,8 @@ mac_ok: xor     eax, eax
 %endif
 %ifdef KBDTIME
 %include "kbdtime.inc"
+%else
+%include "escwin.inc"
 %endif
 %ifdef SCREEN
 %include "screentrace.inc"
