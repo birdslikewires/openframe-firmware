@@ -171,7 +171,7 @@ draw() {
 	# Once it's written, the release too, as OpenFrame Flash's screen has it.
 	FW=$(fw_name)
 	[ -n "$WRITTEN" ] && [ -n "$NEW" ] && FW+=", $NEW from the next start"
-	OUT+=$(at $R_FOOT 4 "This OpenFrame: ${MAC:+${MAC^^}   }Firmware: $FW" "$C_GRY" 1)
+	OUT+=$(at $R_FOOT 4 "${MAC:+MAC: ${MAC^^}   }Firmware: $FW" "$C_GRY" 1)
 	tty_out "$OUT"
 	[ -n "$WRITTEN" ] && blocks_row ${#PARTS_LIST[@]} ""
 }
