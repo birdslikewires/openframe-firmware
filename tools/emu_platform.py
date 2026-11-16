@@ -74,6 +74,14 @@ PCIIO_GUID = G('4cf5b200-68b8-4ca5-9eec-b23e3f50029a')
 SFS_GUID = G('964e5b22-6459-11d2-8e39-00a0c969723b')   # usb_first.inc (tested on its own: emu_usbfirst.py)
 PCI_READ_STUB = STUBS + 0x40      # every fake PciIo's Pci.Read (mmc_pin.inc)
 PCIIO_AREA = STUBS + 0x2800       # the fake PciIo instances, 0x80 apart
+# The keyboard-timing development build (-DKBDTIME, kbdtime.inc): the console's input and devices.
+CONIN = STUBS + 0x2f00            # ST->ConIn: Reset, ReadKeyStroke, WaitForKey
+CONIN_RKS = STUBS + 0x50          # its ReadKeyStroke: hands out the queued keys
+KT_PATHS = STUBS + 0x2e00         # device paths: USB at +0, ACPI (a PS/2-like device) at +0x40
+KBD_PREFIX = 'KbdTime: '
+TEXTIN_GUID = G('387477c1-69c7-11d2-8e39-00a0c969723b')
+DP_GUID = G('09576e91-6d3f-11d2-8e39-00a0c969723b')
+KT_TSC_KHZ = 1329993
 # The OF1's PCI functions, as (bus, dev, fn, class dword at 0x08): graphics, three SD hosts (08/05), USB, the NIC.
 OF1_PCI = ((0, 0x02, 0, 0x03000007), (0, 0x1e, 0, 0x08050101), (0, 0x1e, 1, 0x08050101), (0, 0x1e, 2, 0x08050101),
            (0, 0x1d, 7, 0x0c032002), (1, 0x00, 0, 0x02000006))
@@ -368,7 +376,8 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         gma=True, gma_decode=True, gma_bar=GMA_MMIO, fp=GOP_FP, nb_stage=True, nb_value=NB_DPLL, nb_signals=1,
         app_dpll=NB_DPLL, nb_img='before', nb_variant='stock', li_fails=False, timing=False,
         mmc_img='after', mmc_variant='stock', mmw_variant='stock', sdh_img='after', sdh_variant='stock', pin_variant='of1', profile=False, tm_ticks=70, usbtrace=False, uhcd_variant='stock', usbrt_variant='stock', usbrt_img='after', screen=False, screen_variant='stock',
-        fake_tsc_hi=0, gop_img='before', gop_variant='sharp', gop_dpll=GOP_DPLL, shell_img='after', shell_variant='of1', flash_model=None):
+        fake_tsc_hi=0, gop_img='before', gop_variant='sharp', gop_dpll=GOP_DPLL, shell_img='after', shell_variant='of1', flash_model=None,
+        kbdtime=False, kt_inputs=(('split', 1900), ('usb', 2600)), kt_keys=((0x17, 0), (0, 0x61)), kt_conin=True, kt_late=()):
     """gma: the Poulsbo graphics device at 00:02.0 (8086:8108), its memory decode and BAR0.
     The GOP has set pipe B's PLL (fp, GOP_DPLL). nb_stage: after the entry, the boot manager's
     stage signal, on which NBDXE writes nb_value into DPLL_B and then the stage notifies run
@@ -659,6 +668,10 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         mu.mem_write(ST + 0x800, G('8868e871-e4f1-11d3-bc22-0080c73c8881') + struct.pack('<I', ST + 0xa00))
         mu.mem_write(ST + 0x814, SMBIOS + struct.pack('<I', ST + 0x900))
     st_crc = lambda: zlib.crc32(bytes(mu.mem_read(ST, 0x10)) + b'\0' * 4 + bytes(mu.mem_read(ST + 0x14, 0x34)))
+    kt = dict(t=500, inputs=[], keys=list(kt_keys), stub_calls=0)
+    if kbdtime:                                                   # the console's input (kbdtime.inc)
+        if kt_conin:
+            mu.mem_write(ST + 0x24, struct.pack('<I', CONIN))
     mu.mem_write(ST + 0x10, struct.pack('<I', st_crc()))
     st_orig = bytes(mu.mem_read(ST, 0x48))
     allocs = {}
@@ -673,6 +686,10 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         mu.mem_write(RT + off, struct.pack('<I', RT_STUB + off))
     mu.mem_write(MP + 8, struct.pack('<I', STUBS + 0x10))     # StartupAllAPs
     mu.mem_write(STUBS, b'\xc3' * 0x3000)
+    if kbdtime:                                                   # the console's input and device paths
+        mu.mem_write(CONIN, struct.pack('<III', STUBS + 0x60, CONIN_RKS, 0))
+        mu.mem_write(KT_PATHS, bytes([1, 1, 6, 0, 0, 0x1d, 3, 5, 6, 0, 1, 0, 0x7f, 0xff, 4, 0]))   # PCI, USB, end
+        mu.mem_write(KT_PATHS + 0x40, bytes([2, 1, 12, 0]) + struct.pack('<II', 0x0303d041, 0) + bytes([0x7f, 0xff, 4, 0]))
     pci_devs = [] if pin_variant == 'none' else [d for d in OF1_PCI if not (pin_variant == 'no_sd' and d[3] >> 16 == 0x0805)]
     if pin_variant == 'other_class':                              # an 08/05 function with another class code
         pci_devs = [(b_, d_, f_, (0x08800001 if c_ >> 16 == 0x0805 else c_)) for b_, d_, f_, c_ in pci_devs]
@@ -722,6 +739,14 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             if pin_variant == 'read_fails':
                 return ret(0x80000007)
             uc.mem_write(a[4], struct.pack('<I', pci_devs[i_][3]))
+            return ret(0)
+        if addr == CONIN_RKS:                                      # ConIn->ReadKeyStroke(This, &Key)
+            kt['stub_calls'] += 1
+            if a[0] != CONIN:
+                errors.append('ReadKeyStroke with This %#x' % a[0])
+            if not kt['keys']:
+                return ret(0x80000006)
+            uc.mem_write(a[1], struct.pack('<HH', *kt['keys'].pop(0)))
             return ret(0)
         if addr == SMMC_TRIG:                                      # SmmControl->Trigger, the real one
             tm_var.setdefault('trig_calls', []).append(tuple(a[:5]))
@@ -799,7 +824,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 return ret(0)
             if off == 0x60:                                        # RegisterProtocolNotify(guid, ev, &reg)
                 g = bytes(uc.mem_read(a[0], 16))
-                ok = (BLOCKIO, NB_STAGE, LOADED_IMAGE) + (tuple(TM_GUIDS) if timing else ()) + ((SMMC_GUID,) if usbtrace else ())
+                ok = (BLOCKIO, NB_STAGE, LOADED_IMAGE) + (tuple(TM_GUIDS) if timing else ()) + ((SMMC_GUID,) if usbtrace else ()) + ((TEXTIN_GUID,) if kbdtime else ())
                 if g not in ok or a[1] not in evs or 'guid' in evs[a[1]]:
                     errors.append('RegisterProtocolNotify for something else')
                     return ret(0x80000002)
@@ -837,6 +862,15 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 if a[0] == 2 and g == SFS_GUID:                    # no file systems here
                     events.append('LocateHandleBuffer(SimpleFileSystem)')
                     return ret(0x8000000E)
+                if kbdtime and a[0] == 2 and g == TEXTIN_GUID:     # the console inputs so far
+                    if not kt['inputs']:
+                        return ret(0x8000000E)
+                    buf = pool['next']; pool['next'] += 4 * len(kt['inputs'])
+                    allocs[buf] = (4, 4 * len(kt['inputs']))
+                    uc.mem_write(buf, b''.join(struct.pack('<I', 0xB50000 + i) for i in range(len(kt['inputs']))))
+                    uc.mem_write(a[3], struct.pack('<I', len(kt['inputs'])))
+                    uc.mem_write(a[4], struct.pack('<I', buf))
+                    return ret(0)
                 if a[0] != 2 or g not in (BLOCKIO, LOADED_IMAGE, PCIIO_GUID):
                     errors.append('LocateHandleBuffer other than ByProtocol BlockIo/LoadedImage/PciIo')
                     return ret(0x80000002)
@@ -861,6 +895,12 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                     return ret(0)
                 if g == LOADED_IMAGE and 0 <= a[0] - 0xB20000 < len(images):
                     uc.mem_write(a[2], struct.pack('<I', images[a[0] - 0xB20000]))
+                    return ret(0)
+                if kbdtime and g == DP_GUID and 0 <= a[0] - 0xB50000 < len(kt['inputs']):
+                    kind = kt['inputs'][a[0] - 0xB50000]
+                    if kind == 'split':                            # ConSplitter's own: no device path
+                        return ret(0x80000003)
+                    uc.mem_write(a[2], struct.pack('<I', KT_PATHS + (0 if kind == 'usb' else 0x40)))
                     return ret(0)
                 if g == PCIIO_GUID and 0 <= a[0] - 0xB40000 < len(pci_devs):
                     uc.mem_write(a[2], struct.pack('<I', PCIIO_AREA + 0x80 * (a[0] - 0xB40000)))
@@ -991,6 +1031,16 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         errors.append('OUT to port %#x size %d value %#x' % (port, size, value))
 
     mu.hook_add(UC_HOOK_CODE, stub, begin=STUBS, end=STUBS + 0x3000)
+    if kbdtime:                                                   # kt_ms's rdtsc: the scenario's clock
+        at = pe.find(bytes.fromhex('510f31b9') + struct.pack('<I', KT_TSC_KHZ))
+        if at < 0:
+            errors.append('kbdtime: kt_ms not found')
+        else:
+            def kt_rdtsc(uc, addr, size, _):
+                tsc = kt['t'] * KT_TSC_KHZ + 1000
+                uc.reg_write(UC_X86_REG_EAX, tsc & 0xffffffff); uc.reg_write(UC_X86_REG_EDX, tsc >> 32)
+                uc.reg_write(UC_X86_REG_EIP, addr + 2)
+            mu.hook_add(UC_HOOK_CODE, kt_rdtsc, begin=LOAD + at + 1, end=LOAD + at + 1)
     # cpuid, rdmsr and wrmsr: hooked at each place they occur in the image (an instruction only
     # fires its hook where it starts, so a byte pair inside other code or data never triggers it)
     image_now = bytes(mu.mem_read(LOAD, size_img))
@@ -1058,6 +1108,11 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     if timing:                                                    # the watched protocols appear
         for g in TM_GUIDS:
             notify(g, 'timing notify')
+    if kbdtime:                                                   # console inputs appear (BDS connects them)
+        for kind, t in kt_inputs:
+            kt['t'] = t
+            kt['inputs'].append(kind)
+            notify(TEXTIN_GUID, 'Simple Text Input notify')
     if gop_img == 'after':                                        # the display driver loads after it
         load_gop()
         for e in evs.values():
@@ -1065,6 +1120,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 li_queues[e['key']].append(0xB20000 + len(images) - 1)
         notify(LOADED_IMAGE, 'LoadedImage notify')
     if shell_img == 'after':                                      # the shell loads (at BDS, from the boot option)
+        kt['t'] = 4600
         load_shell()
         for e in evs.values():
             if e.get('guid') == LOADED_IMAGE:
@@ -1299,8 +1355,23 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     if ev:
         cpu['phase'] = 'ReadyToBoot'
         enumerate_pci()
+        kt['t'] = 4000
         for _ in range(signals):
             call(ev['fn'], [0xE7E70001, ev['ctx']], 'ReadyToBoot notify')
+    if kbdtime:                                                   # the shell asks for its one key, twice
+        kt['t'] = 4700
+        kt['rks'] = []
+        conin = rd(ST + 0x24)
+        if conin:
+            for _ in range(2):
+                mu.mem_write(STACK + 0x8000, b'\xee' * 4)
+                st_ = call(rd(conin + 4), [conin, STACK + 0x8000], 'the shell\'s ReadKeyStroke')
+                kt['rks'].append((st_, bytes(mu.mem_read(STACK + 0x8000, 4)), kt['stub_calls']))
+        for kind, t in kt_late:                                   # a keyboard that comes later
+            kt['t'] = t
+            kt['inputs'].append(kind)
+            notify(TEXTIN_GUID, 'Simple Text Input notify')
+        kt['conin_rks'] = rd(CONIN + 4)
     for key in ((0, 0x1c, 0), (1, 0, 0)):
         if cfg[key][4] & 0xffff:
             errors.append('command register of %02x:%02x.%d left at %#x' % (key + (cfg[key][4] & 0xffff,)))
@@ -1351,7 +1422,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     gop_now = bytes(mu.mem_read(GOP_IMG, GOP_SIZE))
     shell_now = bytes(mu.mem_read(SHELL_IMG, len(shell_orig)))
     rt_now = [bytes(mu.mem_read(a, 0x9f80)) for a in rt_copies]
-    return dict(shell_orig=shell_orig, shell_want=shell_want, shell_now=shell_now, gop_orig=gop_orig, gop_want=gop_want, gop_now=gop_now, ident=tm_var.get('ident'), rcap=tm_var.get('rcap'), rt_orig=rt_orig, rt_now=rt_now, pin_conns=pin['conns'], pin_devs=pci_devs, cea_changed=cea_changed, mmw_changed=mmw_changed, sdh_changed=sdh_changed, sdh_target=sdh_target, sdh_orig=sdh_orig, sdh_now=sdh_now, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_first=nb_now[0x3ca], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
+    return dict(kt=kt, shell_orig=shell_orig, shell_want=shell_want, shell_now=shell_now, gop_orig=gop_orig, gop_want=gop_want, gop_now=gop_now, ident=tm_var.get('ident'), rcap=tm_var.get('rcap'), rt_orig=rt_orig, rt_now=rt_now, pin_conns=pin['conns'], pin_devs=pci_devs, cea_changed=cea_changed, mmw_changed=mmw_changed, sdh_changed=sdh_changed, sdh_target=sdh_target, sdh_orig=sdh_orig, sdh_now=sdh_now, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_first=nb_now[0x3ca], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
                 mmc_ev=mmc_ev, nb_ev=nb_ev, evs=evs, mmio_writes=mmio_writes, dpll=final,
                 pp_final=struct.unpack('<I', mu.mem_read(GMA_MMIO + 0x61204, 4))[0] if gma else None,
                 nb_after_notify=nb_bad.get('after_notify'), wrapped=wrapped, entry_bio=entry_bio, late_bio=late_bio, in_image=in_image,
@@ -1372,6 +1443,7 @@ def main():
     usbtrace = '--usbtrace' in sys.argv or screen                 # ... and -DUSBTRACE
     profile = '--profile' in sys.argv or usbtrace                 # ... with -DPROFILE as well
     timing = '--timing' in sys.argv or profile                    # the -DTIMING development build
+    kbdtime = '--kbdtime' in sys.argv                             # the -DKBDTIME development build
     no_cmd0 = '--cmd0' not in sys.argv                            # only a -DMMI_CMD0 build changes the CMD0 waits
     global SYSTEM                                                 # SMBIOS Type 1 the build was given (build_ucode_driver.py --system)
     if '--system' in sys.argv:
@@ -1556,12 +1628,41 @@ def main():
         ('screen trace build: a function-table fill not stock: no table hooks, the rest in', dxe, dict(store=lm(CARD), screen_variant='tables_changed'), 0, True, MAC, True),
         ('app build: MmcMediaDevice left alone', app, dict(store=lm(CARD), cpu_rev=0x217, enumerated_at_entry=True, mmc_img='before'), 0x80000014, False, MAC, True),
     ]
+    NR = 0x80000006
+    if kbdtime:                                                   # kbdtime.inc (-DKBDTIME)
+        cases += [
+            ('kbdtime: USB keyboard before the shell, Esc and "a" waiting: both counted, the shell told none, then straight through',
+             dxe, dict(store=lm(CARD), want_kbd='I01900U02600R04000S04600F04700N02K00170000C02u01',
+                       want_rks=[(NR, b'\xee' * 4, 3), (NR, b'\xee' * 4, 4)], want_hooked=True), 0, True, MAC, True),
+            ('kbdtime: no keyboard',
+             dxe, dict(store=lm(CARD), kt_inputs=(('split', 1900),), kt_keys=(),
+                       want_kbd='I01900U-----R04000S04600F04700N00K--------C01u00', want_rks=[(NR, b'\xee' * 4, 1), (NR, b'\xee' * 4, 2)]), 0, True, MAC, True),
+            ('kbdtime: the keyboard comes after the shell',
+             dxe, dict(store=lm(CARD), kt_inputs=(('split', 1900),), kt_keys=(), kt_late=(('usb', 5200),),
+                       want_kbd='I01900U05200R04000S04600F04700N00K--------C02u01'), 0, True, MAC, True),
+            ('kbdtime: a non-USB input (ACPI path) is not counted as USB',
+             dxe, dict(store=lm(CARD), kt_inputs=(('split', 1900), ('ps2', 2000)), kt_keys=((0, 0x41),),
+                       want_kbd='I01900U-----R04000S04600F04700N01K00000041C02u00'), 0, True, MAC, True),
+            ('kbdtime: no ConIn when the shell loads: nothing replaced',
+             dxe, dict(store=lm(CARD), kt_conin=False, want_kbd='I01900U02600R04000S04600F-----N--K--------C02u01', want_rks=[], want_hooked=False), 0, True, MAC, True),
+            ('kbdtime: a shell that isn\'t ours: not hooked',
+             dxe, dict(store=lm(CARD), shell_variant='code', want_shell='unpatched',
+                       want_kbd='I01900U02600R04000S-----F-----N--K--------C02u01', want_rks=[(0, b'\x17\0\0\0', 1), (0, b'\0\0\x61\0', 2)], want_hooked=False), 0, True, MAC, True),
+            ('kbdtime: 250 keys waiting: 200 read, 99 shown',
+             dxe, dict(store=lm(CARD), kt_keys=((0, 0x30),) * 250,
+                       want_kbd='I01900U02600R04000S04600F04700N99K00000030C02u01', want_rks=[(NR, b'\xee' * 4, 200), (0, b'\0\0\x30\0', 201)]), 0, True, MAC, True),
+            ('kbdtime: SMBIOS already there: nothing written, still hooked and harmless',
+             dxe, dict(store=lm(CARD), smbios_present=True, want_count=None, want_rks=[(NR, b'\xee' * 4, 3), (NR, b'\xee' * 4, 4)], want_hooked=True), 0, True, MAC, True),
+        ]
     bad = 0
     if only:
         cases = [c for c in cases if only in c[0]]
     for name, img, kw, want_status, want_ev, want_mac, want_io in cases:
         kw = dict(kw)
         want_count = kw.pop('want_count', 'BootCount: 0000001613')
+        want_kbd = kw.pop('want_kbd', None)                    # kbdtime.inc's string, when the scenario says
+        want_rks = kw.pop('want_rks', None)
+        want_hooked = kw.pop('want_hooked', None)
         want_vendor = kw.pop('want_vendor', 'BirdsLikeWires')
         want_mem = kw.pop('want_mem', (512, 533))
         want_t1 = kw.pop('want_t1', FILLED if kw.get('store') == lm(CARD) and (want_ev or img is app) else UNFILLED)
@@ -1596,7 +1697,7 @@ def main():
         if kw.get('nb_variant') == 'value':
             want_pclk = 'value'
         r = run(img, timing=timing, profile=profile and img is dxe, usbtrace=usbtrace and img is dxe, screen=screen and img is dxe,
-                **kw)
+                kbdtime=kbdtime and img is dxe, **kw)
         p = list(r['errors'])
         tv = r['tm_var']
         if timing and img is dxe and want_ev:                      # ReadyToBoot ran: the records published
@@ -2063,10 +2164,22 @@ def main():
                     p.append('Type 17 fixed fields %s %s' % (raw.hex(), ss))
             if timing and img is dxe and want_ev and want_count:
                 want_count = 'BootCount: x00---0-00'        # usb_first.inc's summary (no file systems here)
-            if 11 in d and d[11][1] != [want_count]:
-                p.append('Type 11 %s, expected %r' % (d[11][1], want_count))
-            if img is dxe and r['entry_smbios'] and [ss for t, _, _, ss in r['entry_smbios']['structs'] if t == 11] != [[PLACEHOLDER]]:
+            got11 = d[11][1] if 11 in d else None
+            if kbdtime and got11:                              # the development build's second string
+                kbd_got = got11[1] if len(got11) == 2 and got11[1].startswith(KBD_PREFIX) and len(got11[1]) == len(KBD_PREFIX) + 48 else None
+                if kbd_got is None:
+                    p.append('Type 11 %s: no KbdTime string' % got11)
+                elif want_kbd is not None and kbd_got != KBD_PREFIX + want_kbd:
+                    p.append('KbdTime %r, expected %r' % (kbd_got[len(KBD_PREFIX):], want_kbd))
+                got11 = got11[:1]
+            if 11 in d and got11 != [want_count]:
+                p.append('Type 11 %s, expected %r' % (got11, want_count))
+            if img is dxe and r['entry_smbios'] and [ss[:1] for t, _, _, ss in r['entry_smbios']['structs'] if t == 11] != [[PLACEHOLDER]]:
                 p.append('boot count filled before ReadyToBoot')
+            if kbdtime and want_rks is not None and r['kt'].get('rks') != want_rks:
+                p.append('the shell\'s ReadKeyStroke calls %s, expected %s' % (r['kt'].get('rks'), want_rks))
+            if kbdtime and want_hooked is not None and (r['kt'].get('conin_rks') != CONIN_RKS) != want_hooked:
+                p.append('ConIn->ReadKeyStroke %s' % ('left as it was' if want_hooked else 'replaced'))
         if r['vendor'] != want_vendor:
             p.append('FirmwareVendor %r, expected %r' % (r['vendor'], want_vendor))
         if want_vendor == AMI_VENDOR:

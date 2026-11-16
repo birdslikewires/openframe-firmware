@@ -48,11 +48,13 @@ def splash_data(png, pos):
 UCODE_FILE_OFF = 0x10048
 BOOTCOUNT_PREFIX = 'BootCount: '
 BOOTCOUNT_PLACEHOLDER = BOOTCOUNT_PREFIX + '-' * 10      # 10 digits: any 32-bit count
+KBD_PREFIX = 'KbdTime: '                                 # the -DKBDTIME development build's (kbdtime.inc)
+KBD_PLACEHOLDER = KBD_PREFIX + 'I-----U-----R-----S-----F-----N--K--------C--u--'
 MEMSIZE_UNKNOWN = 0xFFFF                                 # SMBIOS: size unknown
 SERIAL_PLACEHOLDER = '0' * 12                            # the card MAC as 12 hex digits
 
 
-def smbios_blobs(bios_version, bios_date, release, system):
+def smbios_blobs(bios_version, bios_date, release, system, kbdtime=False):
     """SMBIOS 2.4: a 31-byte entry point (+1 pad) with the table address and both checksums left 0
     for the driver to fill in, and the structure table: Type 0 BIOS, Type 1 System, Type 3 Chassis,
     Type 16/17 memory, Type 11 OEM Strings (boot count placeholder), Type 127 End. Also returns the offsets of the
@@ -102,7 +104,10 @@ def smbios_blobs(bios_version, bios_date, release, system):
                       0x13, 0x0080,                   # DDR2; synchronous
                       0,                              # speed (MT/s): filled in
                       0, 0, 0, 0) + strings('Onboard')    # manufacturer, serial, asset tag, part: none
-    t11 = struct.pack('<BBHB', 11, 5, 0x0005, 1) + strings(BOOTCOUNT_PLACEHOLDER)
+    if kbdtime:                                      # development build: a second string (kbdtime.inc)
+        t11 = struct.pack('<BBHB', 11, 5, 0x0005, 2) + strings(BOOTCOUNT_PLACEHOLDER, KBD_PLACEHOLDER)
+    else:
+        t11 = struct.pack('<BBHB', 11, 5, 0x0005, 1) + strings(BOOTCOUNT_PLACEHOLDER)
     t127 = struct.pack('<BBH', 127, 4, 0x0006) + b'\0\0'
     structs = [t0, t1, t3, t16, t17, t11, t127]
     table = b''.join(structs)
@@ -124,8 +129,9 @@ def smbios_blobs(bios_version, bios_date, release, system):
         assert table[model1:model1 + 1] == b'1' and table[model2:model2 + 1] == b'1'
     else:
         model1 = model2 = 0
+    kbd = table.index(KBD_PLACEHOLDER.encode()) + len(KBD_PREFIX) if kbdtime else 0
     return bytes(eps) + b'\0', table, dict(count=digits, memsize=t17_off + 12, memspeed=t17_off + 21,
-                                          model1=model1, model2=model2)
+                                          model1=model1, model2=model2, kbd=kbd)
 
 
 def pick_ucode(img, path):
@@ -236,7 +242,7 @@ def main():
         system = tuple(a.system.split(','))
         if len(system) != 4 or not all(system):
             bp.fail('--system must be four comma-separated names')
-        eps, table, offs = smbios_blobs(a.bios_version, a.bios_date, release, system)
+        eps, table, offs = smbios_blobs(a.bios_version, a.bios_date, release, system, kbdtime='KBDTIME' in a.define)
         ef, tf = os.path.join(td, 'eps.bin'), os.path.join(td, 'smbios.bin')
         open(ef, 'wb').write(eps)
         open(tf, 'wb').write(table)
@@ -249,7 +255,8 @@ def main():
                                 '-DSMBIOS_EPS_FILE="%s"' % ef, '-DSMBIOS_FILE="%s"' % tf, '-DSPLASH_FILE="%s"' % sp,
                                 '-DSMBIOS_LEN=%d' % len(table), '-DSMBIOS_COUNT_OFF=%d' % offs['count'],
                                 '-DSMBIOS_MEMSIZE_OFF=%d' % offs['memsize'], '-DSMBIOS_MEMSPEED_OFF=%d' % offs['memspeed'],
-                                '-DSMBIOS_MODEL1_OFF=%d' % offs['model1'], '-DSMBIOS_MODEL2_OFF=%d' % offs['model2']] + list(defs) + ['-o', out, ASM],
+                                '-DSMBIOS_MODEL1_OFF=%d' % offs['model1'], '-DSMBIOS_MODEL2_OFF=%d' % offs['model2'],
+                                '-DSMBIOS_KBD_OFF=%d' % offs['kbd']] + list(defs) + ['-o', out, ASM],
                                capture_output=True, text=True)
             if r.returncode:
                 bp.fail('nasm: ' + r.stderr)

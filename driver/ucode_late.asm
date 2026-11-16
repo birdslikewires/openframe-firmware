@@ -195,6 +195,9 @@ entry:
         lea     ecx, [edi + (img_patch_notify - entry.here)]
         call    notify_on
 .nbp:
+%ifdef KBDTIME
+        call    kt_start                        ; development build: keyboard timing
+%endif
 %ifdef TIMING
         call    tm_pre                          ; development build: what loaded before us,
         call    tm_watch_images                 ; and what happens from now on
@@ -314,6 +317,10 @@ smbios_install:
         mov     [ebx + (eps_ptr - entry.here)], edx     ; where apply_mac fills the serial and UUID
         lea     eax, [edx + 32 + SMBIOS_COUNT_OFF]
         mov     [ebx + (count_ptr - entry.here)], eax   ; where fill_count writes the boot count
+%ifdef KBDTIME
+        lea     eax, [edx + 32 + SMBIOS_KBD_OFF]
+        mov     [ebx + (kt_ptr - entry.here)], eax      ; development build: kbdtime.inc's string
+%endif
         push    edx
         lea     edi, [edx + 32]
         call    mem_fill                        ; Type 17 size and speed
@@ -543,6 +550,10 @@ rtb_register:
 
 ; VOID EFIAPI rtb_notify(EFI_EVENT Event, VOID *Context = SystemTable): the ReadyToBoot work
 rtb_notify:
+%ifdef KBDTIME
+        mov     edx, KT_R
+        call    kt_stamp
+%endif
 %ifdef TIMING
         mov     eax, 'RTB '
         call    tm_rec
@@ -807,6 +818,9 @@ mac_ok: xor     eax, eax
 %include "img_patch.inc"
 %ifdef TIMING
 %include "timing.inc"
+%endif
+%ifdef KBDTIME
+%include "kbdtime.inc"
 %endif
 %ifdef SCREEN
 %include "screentrace.inc"

@@ -108,6 +108,11 @@ img_patch:
         call    cd_patch_image
         add     esp, 4
         mov     [edi + (cd_done - .here)], al
+%ifdef KBDTIME
+        test    al, al                          ; development build: the shell is here
+        jz      .all
+        call    kt_shell
+%endif
 .all:   call    .both
         jnz     .free
 .next:  inc     dword [ebp - 16]
