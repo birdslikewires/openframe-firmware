@@ -470,6 +470,24 @@ def next_release(rel, version):
     return img
 
 
+def fwplan_plans(chip, rel, name):
+    """fwplan.py's own plan for chip -> rel, as a Plan for the real walkers."""
+    import fwplan
+    steps = fwplan.plan(chip, rel)
+    goods, after = fwplan.goods_for(chip, rel)
+    cur, out = bytearray(chip), []
+    for op, blk, data in steps:
+        base = blk * BLOCK
+        if op == 'fh':
+            out.append(('erase', blk))
+            cur[base:base + BLOCK] = b'\xff' * BLOCK
+        for i in range(BLOCK):
+            if cur[base + i] != data[i]:
+                out.append(('prog', base + i, data[i]))
+                cur[base + i] = data[i]
+    return Plan('fwplan: ' + name, chip, out, [('chip', goods[0]), ('after', goods[1]), ('stock', goods[2])]), after
+
+
 def show(path):
     img = bytearray(open(path, 'rb').read())
     w = Walkers(img)
@@ -538,7 +556,7 @@ def main():
     for p, ok in plans:
         failures += bool(check_plan(w, p, ok))
     w = Walkers(rel30)
-    nxt = next_release(rel30, 'BirdsLikeWires OpenFrame EFI 26.11.31-dev9 (OF1)')
+    nxt = nxt_of1 = next_release(rel30, 'BirdsLikeWires OpenFrame EFI 26.11.31-dev9 (OF1)')
     for p, ok in update_plans(rel30, nxt):
         failures += bool(check_plan(w, p, ok))
 
@@ -554,6 +572,19 @@ def main():
         nxt[0xA0000:0xB0000] = rel30[0xA0000:0xB0000]
         for p, ok in update_plans(new, nxt):
             failures += bool(check_plan(w, p, ok))
+    print('fwplan.py\'s plans on the real walkers:')
+    for path in a.images:
+        stock = bytes(open(path, 'rb').read())
+        w = Walkers(stock)
+        p, after = fwplan_plans(stock, bytes(rel30), os.path.basename(path) + ' -> 26.11.30')
+        failures += bool(check_plan(w, p))
+        p, after2 = fwplan_plans(bytes(after), bytes(nxt_of1), 'then -> next')
+        failures += bool(check_plan(w, p))
+        p, _ = fwplan_plans(bytes(after2), bytes(rel30), 'then -> 26.11.30 again')
+        failures += bool(check_plan(w, p))
+    w = Walkers(rel30)
+    p, _ = fwplan_plans(bytes(rel30), bytes(nxt_of1), '26.11.30 release chip -> next')
+    failures += bool(check_plan(w, p))
     print('FAIL: %d' % failures if failures else 'all as expected')
     sys.exit(1 if failures else 0)
 

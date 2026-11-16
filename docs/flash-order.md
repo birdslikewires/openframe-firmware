@@ -76,6 +76,17 @@ block 9's hash alone (the closed headers have to be read past); and between step
 boots like stock firmware, so an OS that relies on our driver (direct boot from the internal memory
 needs our MMC fix) must be in its fallback mode first. That also applies to today's order.
 
+## The planner
+
+`tools/fwplan.py` (pure Python, runs on the unit) reads the chip as the walkers do, finds where it
+stands (stock, our release with its open spacer, or an earlier run cut off anywhere along the
+way), plans the gate order above as whole-block `fh`/`fhp` writes, and proves every state of the
+plan with the walkers' rules before anything is written; it refuses rather than write anything it
+can't prove. `tools/test_fwplan.py` cuts its plans off at 557 points (between and inside steps,
+part-programmed bytes, part-erased blocks as garbage) and checks each re-run finishes the job;
+`emu_fvwalk.py` runs its plans on the real PEI and DXE code. Removing the State-first step or
+the gate's close makes its own proof refuse. Not yet used by `of-firmware-update`.
+
 ## Still to confirm on hardware
 
 One physical assumption isn't in the emulation: that the SST 49LF008A takes a second program of a
