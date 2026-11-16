@@ -110,7 +110,7 @@ class Walkers:
 
     def _read(self, uc, acc, addr, size, value, _):
         for a in range(addr, addr + size):
-            if a >= CACHE:
+            if CACHE <= a < CACHE + 0x100000:
                 self.reads.add(FV_MAIN + self.hlen + a - CACHE)
             else:
                 self.reads.add(a - FLASH)
