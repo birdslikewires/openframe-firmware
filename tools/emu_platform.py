@@ -324,7 +324,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         gma=True, gma_decode=True, gma_bar=GMA_MMIO, fp=GOP_FP, nb_stage=True, nb_value=NB_DPLL, nb_signals=1,
         app_dpll=NB_DPLL, nb_img='before', nb_variant='stock', li_fails=False, timing=False,
         mmc_img='after', mmc_variant='stock', mmw_variant='stock', sdh_img='after', sdh_variant='stock', pin_variant='of1', profile=False, tm_ticks=70, usbtrace=False, uhcd_variant='stock', usbrt_variant='stock', usbrt_img='after', screen=False, screen_variant='stock',
-        fake_tsc_hi=0, gop_img='before', gop_variant='sharp'):
+        fake_tsc_hi=0, gop_img='before', gop_variant='sharp', gop_dpll=GOP_DPLL):
     """gma: the Poulsbo graphics device at 00:02.0 (8086:8108), its memory decode and BAR0.
     The GOP has set pipe B's PLL (fp, GOP_DPLL). nb_stage: after the entry, the boot manager's
     stage signal, on which NBDXE writes nb_value into DPLL_B and then the stage notifies run
@@ -579,7 +579,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     if gop_img == 'before':                                       # the display driver (as on an OF1: before us)
         load_gop()
     nb_bad = {'n': 0}
-    mmio = {0x6018: GOP_DPLL, 0x6048: fp, 0x61204: 0x00000001, 0x71008: 0x80000000}
+    mmio = {0x6018: gop_dpll, 0x6048: fp, 0x61204: 0x00000001, 0x71008: 0x80000000}
     mmio_writes = []                                              # (offset, value, PP_CONTROL then)
     if gma:
         mu.mem_map(GMA_MMIO, 0x80000)
@@ -1205,9 +1205,12 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     if gma and nb_stage and img_is_dxe:
         nb_wrote = []
         for _ in range(nb_signals):                               # NBDXE's notify runs first, then ours
-            v = rd(NB_IMG + NB_IMM) if nb_img != 'none' else nb_value
-            nb_wrote.append(v)
-            mu.mem_write(GMA_MMIO + 0x6018, struct.pack('<I', v))
+            if nb_img != 'none' and bytes(mu.mem_read(NB_IMG + 0x3ca, 1)) == b'\xc3':
+                nb_wrote.append(None)                             # its function returns at once
+            else:
+                v = rd(NB_IMG + NB_IMM) if nb_img != 'none' else nb_value
+                nb_wrote.append(v)
+                mu.mem_write(GMA_MMIO + 0x6018, struct.pack('<I', v))
             pin['stage'] += 1
             notify(NB_STAGE, 'NB-stage notify')
         nb_bad['after_notify'] = rd(GMA_MMIO + 0x6018)
@@ -1286,7 +1289,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     sdh_changed = [(i, sdh_now[i]) for i in range(SDH_SIZE) if sdh_now[i] != sdh_orig[i]]
     gop_now = bytes(mu.mem_read(GOP_IMG, GOP_SIZE))
     rt_now = [bytes(mu.mem_read(a, 0x9f80)) for a in rt_copies]
-    return dict(gop_orig=gop_orig, gop_want=gop_want, gop_now=gop_now, ident=tm_var.get('ident'), rcap=tm_var.get('rcap'), rt_orig=rt_orig, rt_now=rt_now, pin_conns=pin['conns'], pin_devs=pci_devs, cea_changed=cea_changed, mmw_changed=mmw_changed, sdh_changed=sdh_changed, sdh_target=sdh_target, sdh_orig=sdh_orig, sdh_now=sdh_now, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
+    return dict(gop_orig=gop_orig, gop_want=gop_want, gop_now=gop_now, ident=tm_var.get('ident'), rcap=tm_var.get('rcap'), rt_orig=rt_orig, rt_now=rt_now, pin_conns=pin['conns'], pin_devs=pci_devs, cea_changed=cea_changed, mmw_changed=mmw_changed, sdh_changed=sdh_changed, sdh_target=sdh_target, sdh_orig=sdh_orig, sdh_now=sdh_now, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_first=nb_now[0x3ca], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
                 mmc_ev=mmc_ev, nb_ev=nb_ev, evs=evs, mmio_writes=mmio_writes, dpll=final,
                 pp_final=struct.unpack('<I', mu.mem_read(GMA_MMIO + 0x61204, 4))[0] if gma else None,
                 nb_after_notify=nb_bad.get('after_notify'), wrapped=wrapped, entry_bio=entry_bio, late_bio=late_bio, in_image=in_image,
@@ -1389,6 +1392,8 @@ def main():
         # else changed in it, and the clock never changes) or 'unpatched' (its image untouched).
         ('NBDXE loaded before the driver: patched at the entry, the clock never changes', dxe, dict(store=lm(CARD), nb_signals=2), 0, True, MAC, True),
         ('NBDXE loaded after the driver: patched as it loads', dxe, dict(store=lm(CARD), nb_img='after'), 0, True, MAC, True),
+        ('Samsung panel (Cisco OF2): NBDXE writes nothing, the display driver\'s own clock kept', dxe, dict(store=lm(CARD), fp=0x00031008, gop_dpll=0xd8200003, gop_variant='samsung', want_pclk='untouched'), 0, True, MAC, True),
+        ('Samsung panel, NBDXE not patched: its value left, not swapped for the Sharp panel\'s', dxe, dict(store=lm(CARD), fp=0x00031008, gop_dpll=0xd8200003, nb_variant='code', want_nbp='unpatched', want_pclk='untouched'), 0, True, MAC, True),
         ('NBDXE with another fixed value: left alone, the notify puts the clock back', dxe, dict(store=lm(CARD), nb_variant='value', want_nbp='unpatched', want_pclk='notify', nb_value=0xd8027303), 0, True, MAC, True),
         ('NBDXE with one code byte different: left alone, the notify puts the clock back', dxe, dict(store=lm(CARD), nb_variant='code', want_nbp='unpatched', want_pclk='notify'), 0, True, MAC, True),
         ('the same code under another file GUID: left alone', dxe, dict(store=lm(CARD), nb_variant='guid', want_nbp='unpatched', want_pclk='notify'), 0, True, MAC, True),
@@ -1735,10 +1740,10 @@ def main():
                 p.append('sample timestamps not in order')
         # NBDXE patch
         if want_nbp == 'patched':
-            if r['nb_imm'] != GOP_DPLL or [i for i in r['nb_changed'] if not NB_IMM <= i < NB_IMM + 4]:
-                p.append('NBDXE value %#x, bytes changed %s' % (r['nb_imm'], r['nb_changed'][:8]))
-            if any(v != GOP_DPLL for v in r['nb_wrote']):
-                p.append('NBDXE still wrote %s' % ['%#x' % v for v in r['nb_wrote']])
+            if r['nb_changed'] != [0x3ca] or r['nb_first'] != 0xc3:
+                p.append('NBDXE first byte %#x, bytes changed %s' % (r['nb_first'], r['nb_changed'][:8]))
+            if any(v is not None for v in r['nb_wrote']):
+                p.append('NBDXE still wrote %s' % ['%#x' % v for v in r['nb_wrote'] if v is not None])
         elif r['nb_changed']:
             p.append('NBDXE image changed at %s' % r['nb_changed'][:8])
         # USBRT's waits (usbrt.inc): per copy, A (500 ms -> 10 ms) and B+C (1 s -> 200 ms, tries x5)
@@ -1861,6 +1866,8 @@ def main():
         elif want_pclk == 'untouched':
             if w:
                 p.append('display registers written: %s' % ['%#x=%#x' % (o, v) for o, v, _ in w])
+            if want_nbp == 'patched' and kw.get('nb_stage', True) and r['dpll'] != kw.get('gop_dpll', GOP_DPLL):
+                p.append('DPLL_B %#x at the end, expected the display driver\'s own %#x' % (r['dpll'] or 0, kw.get('gop_dpll', GOP_DPLL)))
         else:
             if r['dpll'] != GOP_DPLL:
                 p.append('DPLL_B %#x at the end, expected the GOP\'s %#x' % (r['dpll'] or 0, GOP_DPLL))

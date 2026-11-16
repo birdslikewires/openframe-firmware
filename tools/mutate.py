@@ -5,7 +5,7 @@
 
 MUTATIONS.py (any path) defines MUTATIONS = [(label, file, old, new), ...]: in `file` (relative to
 the repository), `old` (which must occur exactly once) becomes `new`. Each mutation gets its own
-copy of driver/ and tools/ in a temporary directory, so the source tree is never touched and the
+copy of driver/, tools/ and logo/ in a temporary directory, so the source tree is never touched and the
 mutations run in parallel. Each is built with build_ucode_driver.py and run through
 emu_platform.py --first-fail (with --<mode>, if given). The unmutated source runs first: if it
 fails, nothing below means anything. A mutation is CAUGHT if the emulator fails, SURVIVED if it
@@ -26,7 +26,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def run_one(label, file, old, new, a, tmp_root):
     tmp = tempfile.mkdtemp(prefix='mut-', dir=tmp_root)
     try:
-        for d in ('driver', 'tools'):
+        for d in ('driver', 'tools', 'logo'):       # (logo: the splash the driver build includes)
             shutil.copytree(os.path.join(ROOT, d), os.path.join(tmp, d))
         if file:
             p = os.path.join(tmp, file)
