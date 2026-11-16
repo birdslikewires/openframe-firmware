@@ -15,6 +15,7 @@
 ##  of its own for a write that didn't verify. (OpenFrame Flash runs the updater itself, on
 ##  its own screen, and clears the pending mark: this isn't used during a flash.)
 
+VERSION="26.11.2"
 PENDING=/var/lib/openframe-firmware/pending
 LOCKREBOOT=/var/lib/openframe-firmware/lock-reboot
 UPDATE=/usr/local/sbin/of-firmware-update
@@ -36,8 +37,11 @@ B_BLU=$'\033[44m'; B_RED=$'\033[41m'
 
 STEPS=("Bring the firmware up to date" "Restart on the new firmware")
 # Rows: the band (two deep, its title on the second), two blank lines, the intro, the
-# steps (three rows each), the line and this unit's details at the bottom.
+# steps (four rows each: the step, its working line, the blocks, a blank), the line and
+# this unit's details at the bottom.
 BAND_ROWS=2; BAND_TITLE=2; R_INTRO=5; R_STEPS=9; R_SEP=24; R_FOOT=29
+# Set once the firmware is written: the blocks line stays, all ticked, under step 1.
+WRITTEN=""
 # Seconds for each part of the update (reading the chip, then each block written and
 # read back twice), until the first part done says how this unit's chip is getting on.
 PART_EST=4
@@ -128,7 +132,7 @@ draw() {
 	STEP=$1; LABEL=$2; T0=$(uptime_s)
 	console_hush
 	[ -n "$DRAWN" ] || { panel_clear; DRAWN=1; }
-	OUT=$(band "$B_BLU" "OpenFrame Firmware Update" "${NEW:+Release $NEW}")
+	OUT=$(band "$B_BLU" "OpenFrame Firmware Update v$VERSION" "${NEW:+Release $NEW}")
 	OUT+=$(at $R_INTRO 4 "Updating this OpenFrame's firmware${NEW:+ to $NEW}." "$C_WHT" 1)
 	if (( STEP == 0 )); then
 		OUT+=$(at $((R_INTRO + 1)) 4 "Please don't switch it off or unplug it: its firmware is being written." "$C_YEL" 1)
@@ -136,7 +140,7 @@ draw() {
 		OUT+=$(at $((R_INTRO + 1)) 4 "Please leave it switched on: it carries on starting up after the restart." "$C_YEL" 1)
 	fi
 	for i in "${!STEPS[@]}"; do
-		R=$((R_STEPS + 3 * i))
+		R=$((R_STEPS + 4 * i))
 		if (( i < STEP )); then MARK="√"; COL="$C_LGN"
 		elif (( i == STEP )); then MARK="►"; COL="$C_YEL"
 		else MARK="·"; COL="$C_DGR"; fi
@@ -152,6 +156,7 @@ draw() {
 	MAC=$(cat /var/lib/of-netplan/lan.mac 2>/dev/null)
 	OUT+=$(at $R_FOOT 4 "This OpenFrame: ${MAC:+${MAC^^}   }Firmware: $(fw_name)" "$C_GRY" 1)
 	tty_out "$OUT"
+	[ -n "$WRITTEN" ] && blocks_row ${#PARTS_LIST[@]} ""
 }
 
 # The update's detail, from what its check said ($1), for the line under its bar
@@ -195,7 +200,7 @@ blocks_row() {
 show() {
 	local F R OUT EL LEFT
 	console_hush
-	R=$((R_STEPS + 1 + 3 * STEP))
+	R=$((R_STEPS + 1 + 4 * STEP))
 	OUT=$(at $R 10 "$LABEL" "$C_LCY" 1)
 	if [ -n "${2:-}" ]; then
 		F=$(( $2 > 0 ? $1 * 1000 / $2 : 0 )); (( F > 1000 )) && F=1000
@@ -234,7 +239,7 @@ screen_retry() {
 	local OUT ROW=$R_INTRO L COL TXT
 	console_hush
 	panel_clear; DRAWN=1
-	OUT=$(band "$B_RED" "OpenFrame Firmware Update" "Don't switch off")
+	OUT=$(band "$B_RED" "OpenFrame Firmware Update v$VERSION" "Don't switch off")
 	for L in "${C_LRD}The firmware didn't write correctly, so it's being written again." "" \
 		"${C_YEL}Please don't switch off or unplug this OpenFrame: it may not start if it's switched off now." "" \
 		"${C_GRY}It keeps trying until the firmware writes correctly (try $1 next)."; do
@@ -311,6 +316,7 @@ while :; do
 		0)
 			rm -f $PENDING $LOCKREBOOT
 			sync
+			WRITTEN=1
 			restart "The firmware is up to date." ;;
 		4)
 			# Flash locked until the next reset (BlwMac.efi stored a MAC this boot). Once.
