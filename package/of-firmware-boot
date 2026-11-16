@@ -117,13 +117,25 @@ seconds_left() {
 	if (( $1 >= 60 )); then printf '%d min %02d s left' $(($1 / 60)) $(($1 % 60)); else printf '%d s left' "$1"; fi
 }
 
-# The firmware the unit started with: ours by its version, or "stock".
+# The firmware the unit started with, for the bottom line: ours by its version, stock by
+# the carrier it came from ("O2": it has no version of its own), going by FWCHECK, what
+# of-firmware-update's check said: a block it gave one stock image's name alone says
+# which (blocks 5 and 6 are the same in all three: "5:o2-stock+"). Plain "stock" if it
+# named none.
+FWCHECK=""
 fw_name() {
-	local V
+	local V L
 	V=$(cat /sys/class/dmi/id/bios_version 2>/dev/null)
-	if [ -n "$V" ]; then echo "$V"
-	elif [ "$(cat /sys/class/dmi/id/bios_vendor 2>/dev/null)" != "BirdsLikeWires" ]; then echo "stock"
-	else echo "unknown"; fi
+	if [ -n "$V" ]; then echo "$V"; return; fi
+	if [ "$(cat /sys/class/dmi/id/bios_vendor 2>/dev/null)" = "BirdsLikeWires" ]; then echo "unknown"; return; fi
+	L=$(printf '%s\n' "$FWCHECK" | sed -n 's/.*blocks that differ from [^:]*: //p' | tr ' ' '\n' |
+		sed -n 's/^[0-9]*:\(o2-stock\|verizon\|telstra\)$/\1/p' | head -1)
+	case "$L" in
+		o2-stock) echo "O2" ;;
+		verizon) echo "Verizon" ;;
+		telstra) echo "Telstra" ;;
+		*) echo "stock" ;;
+	esac
 }
 
 # The working screen, drawn afresh, step $1 (0 or 1) current, its line saying $2.
@@ -162,10 +174,9 @@ draw() {
 # The update's detail, from what its check said ($1), for the line under its bar
 # (blocks_row): PARTS_LIST, the blocks it writes in order from its plan line ("plan:
 # write blocks 10 5 6 7 8 9"; block 10 written headers last is three writes, "10
-# bodies", "10 driver header", "10 marker header"), and FROM, what the blocks it writes
-# are now, from its "firmware now" line ("5:o2-stock+ ... 10:blank": o2-stock), less
-# the blank and torn ones.
-PARTS_LIST=(); FROM=""
+# bodies", "10 driver header", "10 marker header"). What the firmware is now goes on the
+# bottom line (fw_name).
+PARTS_LIST=()
 detail() {
 	local B
 	PARTS_LIST=()
@@ -176,13 +187,11 @@ detail() {
 			PARTS_LIST+=("$B")
 		fi
 	done
-	FROM=$(printf '%s\n' "$1" | sed -n 's/.*blocks that differ from [^:]*: //p' | tr ' ' '\n' |
-		sed -n 's/^[0-9]*://p' | tr -d '+' | grep -vxE 'blank|ours|torn' | sort -u | paste -sd, - | sed 's/,/, /g')
 }
 
 # The line under step 1's bar: each block the update writes, in order, with a tick once
 # written and ► while it's being written; $1 is how many are written, $2 set while the
-# next one is being written. Then what they were.
+# next one is being written.
 blocks_row() {
 	local i S="" R=$((R_STEPS + 2))
 	(( ${#PARTS_LIST[@]} > 0 )) || return 0
@@ -191,7 +200,6 @@ blocks_row() {
 		elif (( i == $1 )) && [ -n "$2" ]; then S+="$C_WHT${PARTS_LIST[$i]} $C_YEL►$C_RST   "
 		else S+="$C_DGR${PARTS_LIST[$i]}$C_RST     "; fi
 	done
-	[ -n "$FROM" ] && S+="  ${C_GRY}from $FROM$C_RST"
 	tty_out "$(at $R 10 "Blocks" "$C_GRY" 1)$(at $R 18 "$S")"
 }
 
@@ -271,6 +279,7 @@ esac
 NEW=$(grep -aoE 'BirdsLikeWires OpenFrame EFI [0-9]+\.[0-9]+\.[0-9]+(-dev[0-9]+)? \(OF1\)' "$IMG" 2>/dev/null | head -1 | awk '{print $4}')
 # The parts: reading the chip, then each block's write (block 10 headers last is three).
 detail "$CHECK"
+FWCHECK="$CHECK"
 PARTS=${#PARTS_LIST[@]}
 (( PARTS > 0 )) || PARTS=6
 PARTS=$((PARTS + 1))
