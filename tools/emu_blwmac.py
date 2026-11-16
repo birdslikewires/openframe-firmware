@@ -10,6 +10,11 @@ Any write to the flash data space (0xFFF00000-0xFFFFFFFF) faults the run, and an
 write other than 0x03 to blocks 1-15 is an error. So is any port write outside config space and
 the NIC's MAC0/Cfg9346 registers.
 
+The flash's block 0 holds the NVRAM as AMI keeps it (NVAR records, the GUID store at the end:
+see tools/nvar.py), with BlwMac's records as the store has them; a SetVariable that succeeds
+appends a record and links it, as AMI does, unless the scenario says the flash doesn't take it
+('lies': the copy in memory changes, the chip doesn't) or the link is never set ('torn').
+
 Usage: emu_blwmac.py <BlwMac.efi>
 """
 import struct, sys, uuid
@@ -35,7 +40,7 @@ NIC_IO = 0xE000
 
 F = dict(ARG_LOADOPT=0x1, ARG_SHELLIF=0x2, ARG_NONE=0x4, HW_MAC=0x8, NV_SAME=0x10, NV_WRITTEN=0x20,
          NV_FAILED=0x40, LOCKDOWN_OK=0x80, LOCKDOWN_BAD=0x100, NV_READ_OK=0x200, SMBIOS_DONE=0x400, RESET=0x800,
-         NIC_MISSING=0x1000, NIC_DONE=0x2000, NIC_VERIFY=0x4000, FOREIGN_FW=0x8000)
+         NIC_MISSING=0x1000, NIC_DONE=0x2000, NIC_VERIFY=0x4000, FOREIGN_FW=0x8000, NV_UNPERSISTED=0x10000)
 
 
 def flags_str(v):
@@ -45,9 +50,51 @@ def flags_str(v):
 SMB = DATA + 0x4000              # SMBIOS entry point; the structure table follows at +32
 
 
+# The GUID store at the end of the NVRAM block, as on the test unit: index 2 is AMI's GUID BlwMac uses.
+NV_GUIDS = [uuid.UUID(g).bytes_le for g in ('4599d26f-1a11-49b8-b91f-858745cff824',
+            '8be4df61-93ca-11d2-aa0d-00e098032b8c', 'ec87d643-eba4-4bb5-a1e5-3f3e36b20da9')]
+
+
+class Nvram:
+    """Block 0 of the flash as AMI keeps it: NVAR records from 0x60, the GUID store at the end."""
+    def __init__(self, wide=False):
+        self.img = bytearray(b'\xff' * 0x10000)
+        for i, g in enumerate(NV_GUIDS):
+            self.img[0x10000 - 16 * (i + 1):0x10000 - 16 * i] = g
+        self.pos, self.end, self.wide = 0x60, None, wide
+        mc = self.put(0x83, bytes([1]) + b'MonotonicCounter\0' + struct.pack('<I', 5))   # another, to step over
+        self.link(mc, self.put(0x88, struct.pack('<I', 6)))
+
+    def put(self, attr, body):
+        rec = b'NVAR' + struct.pack('<H', 10 + len(body)) + b'\xff\xff\xff' + bytes([attr]) + body
+        self.img[self.pos:self.pos + len(rec)] = rec
+        self.pos += len(rec)
+        return self.pos - len(rec)
+
+    def link(self, a, b):
+        self.img[a + 6:a + 9] = (b - a).to_bytes(3, 'little')
+
+    def blwmac(self, data, linked=True):
+        """BlwMac set to data: its head record the first time, then a data record on its chain."""
+        if self.end is None:
+            if self.wide:                       # GUID in full, UTF-16 name
+                self.end = self.put(0x84 | 0x01, BLW + 'BlwMac\0'.encode('utf-16le') + data)
+            else:                               # GUID store index, ASCII name (as the test unit has it)
+                self.end = self.put(0x83, bytes([2]) + b'BlwMac\0' + data)
+            return
+        r = self.put(0x88, data)
+        if linked:
+            self.link(self.end, r)
+            self.end = r
+
+
 def run(pe, loadopts=None, argv=None, store=None, lock_ignores=False, nic_present=True,
-        setvar_fails=False, nic_mac_readonly=False, smbios=None, vendor='BirdsLikeWires', setvar_lies=False):
+        setvar_fails=False, nic_mac_readonly=False, smbios=None, vendor='BirdsLikeWires', setvar_lies=False,
+        flash='ok', nv_wide=False):
     store = dict(store or {})
+    nv = Nvram(wide=nv_wide)
+    if ('BlwMac', BLW) in store:
+        nv.blwmac(store[('BlwMac', BLW)][1])
     errors, events = [], []
     mu = Uc(UC_ARCH_X86, UC_MODE_32)
     peo = struct.unpack_from('<I', pe, 0x3c)[0]
@@ -61,6 +108,7 @@ def run(pe, loadopts=None, argv=None, store=None, lock_ignores=False, nic_presen
     for b in range(16):
         mu.mem_write(FWH_REG + b * 0x10000 + 2, b'\x01')           # power-on: write-locked
     mu.mem_map(FLASH, 0x100000, UC_PROT_READ)                       # writes here fault
+    mu.mem_write(FLASH, bytes(nv.img))
     mu.mem_write(ST + 0x38, struct.pack('<I', RT))
     mu.mem_write(ST + 0x3c, struct.pack('<I', BS))
     mu.mem_write(BS + 0x58, struct.pack('<I', STUBS + 0x10))        # HandleProtocol
@@ -167,6 +215,9 @@ def run(pe, loadopts=None, argv=None, store=None, lock_ignores=False, nic_presen
                 del store[(name, g)]
             else:
                 store[(name, g)] = (a[2], data)
+                if name == 'BlwMac' and g == BLW and a[2] & 1 and flash != 'lies':
+                    nv.blwmac(data, linked=(flash != 'torn'))
+                    uc.mem_write(FLASH, bytes(nv.img))
             uc.reg_write(UC_X86_REG_EAX, 0)
         elif addr == STUBS + 0x40:                                  # ResetSystem(type, status, size, data)
             events.append('ResetSystem(%d, %#x, %d, %#x)' % tuple(a[:4]))
@@ -364,9 +415,21 @@ def main():
         ('SetVariable fails: NIC untouched, no reset', dict(loadopts=cl, setvar_fails=True, smbios=NEW),
          LO | F['LOCKDOWN_OK'] | F['NV_FAILED'], None, None, UNFILLED),
         ('SetVariable says success, stores nothing: no reset', dict(loadopts=cl, setvar_lies=True, smbios=NEW),
-         LO | F['LOCKDOWN_OK'] | F['NV_WRITTEN'], 'tried', None, UNFILLED),
-        ('... with an old card stored: it is applied, no reset', dict(loadopts=cl, setvar_lies=True, store=lm(CARD2), smbios=NEW),
-         LO | F['LOCKDOWN_OK'] | F['NV_WRITTEN'] | R | HW | SM | ND, 'tried', b'\x02' + CARD2[1:], filled(CARD2)),
+         LO | F['LOCKDOWN_OK'] | F['NV_WRITTEN'] | F['NV_UNPERSISTED'], 'tried', None, UNFILLED),
+        ('... with an old card stored: NIC from it, SMBIOS left, no reset', dict(loadopts=cl, setvar_lies=True, store=lm(CARD2), smbios=NEW),
+         LO | F['LOCKDOWN_OK'] | F['NV_WRITTEN'] | F['NV_UNPERSISTED'] | R | HW | ND, 'tried', b'\x02' + CARD2[1:], 'same'),
+        # The store reads back right from AMI's copy in memory, but the chip doesn't have it: a reset
+        # would bring the same store back at every boot, never reaching an OS.
+        ('reads back right, never reaches the chip: no reset, SMBIOS left', dict(loadopts=cl, flash='lies', smbios=NEW),
+         LO | F['LOCKDOWN_OK'] | F['NV_WRITTEN'] | F['NV_UNPERSISTED'] | R | HW | ND, CARD, MAC, 'same'),
+        ('... over an old card: no reset, SMBIOS left', dict(loadopts=cl, flash='lies', store=lm(CARD2), smbios=NEW),
+         LO | F['LOCKDOWN_OK'] | F['NV_WRITTEN'] | F['NV_UNPERSISTED'] | R | HW | ND, CARD, MAC, 'same'),
+        ('new record on the chip, its link never set: no reset', dict(loadopts=cl, flash='torn', store=lm(CARD2), smbios=NEW),
+         LO | F['LOCKDOWN_OK'] | F['NV_WRITTEN'] | F['NV_UNPERSISTED'] | R | HW | ND, CARD, MAC, 'same'),
+        ('NVRAM with full GUIDs and UTF-16 names: found, reset', dict(loadopts=cl, nv_wide=True, smbios=NEW),
+         LO | W | R | HW | SM | ND, CARD, MAC, filled(CARD)),
+        ('... updating an old card there: found, reset', dict(loadopts=cl, nv_wide=True, store=lm(CARD2), smbios=NEW),
+         LO | W | R | HW | SM | ND, CARD, MAC, filled(CARD)),
         ('no RTL8168 behind 00:1c.0', dict(loadopts=cl, store=lm(CARD), nic_present=False, smbios=NEW),
          LO | S | R | HW | SM | F['NIC_MISSING'], None, None, filled(CARD)),
         ('MAC0 does not take the write', dict(loadopts=cl, store=lm(CARD), nic_mac_readonly=True, smbios=NEW),

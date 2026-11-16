@@ -43,6 +43,11 @@
 ;    the write failed or reads back wrong it carries on too, so a store that keeps failing can't
 ;    reset the unit over and over (openframe-linux's of-bootnsh only asks for a store when NVRAM
 ;    doesn't hold the unit's MAC, and gives up if the next boot still doesn't).
+;    "Reads back" is from the chip itself, too (flash_has): AMI's GetVariable answers from its
+;    copy in memory, so a write that never reached the flash would read back right, reset, and
+;    be asked for again at every boot, never reaching an OS to give up. Not in the flash: no
+;    reset, and SMBIOS isn't given the MAC either (F_NV_UNPERSISTED), so Linux sees the store
+;    didn't take and gives up as above.
 ;
 ; Always returns EFI_SUCCESS so boot.nsh carries on. Position-independent; assembled with
 ; `nasm -f bin`, wrapped as a PE32 application by build_blwmac_app.py.
@@ -65,6 +70,7 @@ F_NIC_MISSING   equ 0x1000          ; no 10ec:8168 behind 00:1c.0, or no I/O BAR
 F_NIC_DONE      equ 0x2000          ; MAC0 written and read back correctly
 F_NIC_VERIFY    equ 0x4000          ; MAC0 read back wrong
 F_FOREIGN_FW    equ 0x8000          ; not BirdsLikeWires firmware: nothing done
+F_NV_UNPERSISTED equ 0x10000        ; SetVariable succeeded, but the chip's NVRAM doesn't hold it
 
 FWH_LOCK        equ 0xFFB00002      ; block-lock register of block 0; block n is + n * 0x10000
 NV_SIZE         equ 6               ; BlwMac: one MAC
@@ -163,6 +169,11 @@ entry:
         test    eax, eax
         jnz     .setfail
         or      dword [ebp + L_STATUS], F_NV_WRITTEN
+        lea     esi, [ebp + L_ARGMAC]
+        call    flash_has                       ; in the chip itself, not only AMI's copy?
+        test    eax, eax
+        jz      .apply
+        or      dword [ebp + L_STATUS], F_NV_UNPERSISTED
         jmp     .apply
 .setfail:
         or      dword [ebp + L_STATUS], F_NV_FAILED
@@ -187,6 +198,8 @@ entry:
         lea     edi, [ebp + L_STATUS + 8]
         movsd
         movsw
+        test    dword [ebp + L_STATUS], F_NV_UNPERSISTED
+        jnz     .nic                            ; not stored: SMBIOS keeps what the firmware gave it
         call    find_smbios                     ; eax = SMBIOS entry point or 0
         test    eax, eax
         jz      .nic
@@ -209,6 +222,8 @@ entry:
         jz      .status
         test    dword [ebp + L_STATUS], F_NV_READ_OK
         jz      .status
+        test    dword [ebp + L_STATUS], F_NV_UNPERSISTED
+        jnz     .status
         lea     esi, [ebp + L_ARGMAC]
         lea     edi, [ebp + L_NVMAC]
         mov     ecx, NV_SIZE
@@ -473,6 +488,130 @@ lockdown:
 %include "smbios_id.inc"
 
         align   4, db 0
+; flash_has: eax = 0 if the chip itself holds the 6 bytes at esi as BlwMac's newest value under
+; blw_guid, else 1: block 0, the NVRAM, read straight from the firmware hub (after a wbinvd, so
+; not from the cache), rather than from the copy in memory AMI's GetVariable answers from. AMI's
+; NVAR records: 'NVAR', size (2 bytes), next (3, relative; FFFFFF: none), attributes (1: 0x80
+; valid, 0x08 data only, 0x04 GUID in full, else a 1-byte index into the GUID store, whose 16-byte
+; GUIDs run down from the block's end; 0x02 ASCII name, else UTF-16), then the GUID, the name and
+; the data. An update is a new data-only record that the previous one's next is set to once the
+; new one is whole, so the newest value is at the end of the chain (tools/nvar.py reads the
+; same). Keeps ebx, esi, edi, ebp.
+NV_BASE         equ 0xFFF00000
+NV_END          equ 0xFFF10000
+flash_has:
+        push    ebp
+        push    esi
+        push    edi
+        mov     ebp, esp
+        sub     esp, 12
+        mov     [ebp - 4], esi                  ; the MAC
+        mov     dword [ebp - 8], 0              ; the last valid BlwMac head record
+        mov     dword [ebp - 12], 0             ; where its data starts
+        wbinvd
+        mov     edi, NV_BASE
+.find:  cmp     edi, NV_END - 16                ; the first record
+        jae     .no
+        cmp     dword [edi], 'NVAR'
+        je      .rec
+        inc     edi
+        jmp     .find
+.rec:   cmp     edi, NV_END - 10
+        jae     .chain
+        cmp     dword [edi], 'NVAR'
+        jne     .chain
+        movzx   ecx, word [edi + 4]             ; size
+        cmp     ecx, 10
+        jbe     .chain
+        cmp     ecx, 0xFFFF
+        je      .chain
+        mov     al, [edi + 9]                   ; attributes
+        test    al, 0x80
+        jz      .next
+        test    al, 0x08
+        jnz     .next
+        lea     esi, [edi + 10]
+        test    al, 0x04
+        jz      .index
+        mov     edx, esi                        ; the GUID in full
+        add     esi, 16
+        jmp     .guid
+.index: movzx   edx, byte [esi]                 ; its index in the GUID store
+        inc     esi
+        inc     edx
+        shl     edx, 4
+        neg     edx
+        add     edx, NV_END                     ; NV_END - 16 * (index + 1)
+.guid:  push    ecx
+        push    esi
+        push    edi
+        mov     esi, edx
+        lea     edi, [ebx + (blw_guid - entry.here)]
+        mov     ecx, 16
+        repe cmpsb
+        pop     edi
+        pop     esi
+        pop     ecx
+        jne     .next
+        push    ecx
+        push    edi
+        test    al, 0x02
+        jz      .wide
+        lea     edi, [ebx + (name_ascii - entry.here)]
+        mov     ecx, 7
+        jmp     .name
+.wide:  lea     edi, [ebx + (name_blwmac - entry.here)]
+        mov     ecx, 14
+.name:  repe cmpsb                              ; esi ends past the name: the data
+        pop     edi
+        pop     ecx
+        jne     .next
+        mov     [ebp - 8], edi
+        mov     [ebp - 12], esi
+.next:  add     edi, ecx
+        jmp     .rec
+.chain: mov     edi, [ebp - 8]                  ; its chain, to the newest record
+        test    edi, edi
+        jz      .no
+        mov     ecx, 4096                       ; (a damaged chain can't loop for ever)
+.hop:   mov     eax, [edi + 6]
+        and     eax, 0x00FFFFFF
+        cmp     eax, 0x00FFFFFF
+        je      .end
+        test    eax, eax
+        jz      .end
+        add     eax, edi
+        cmp     eax, NV_END - 10
+        jae     .end
+        cmp     dword [eax], 'NVAR'
+        jne     .end
+        mov     edi, eax
+        mov     dword [ebp - 12], 0             ; a data-only record: data after its header
+        loop    .hop
+.end:   test    byte [edi + 9], 0x80
+        jz      .no
+        mov     esi, [ebp - 12]
+        test    esi, esi
+        jnz     .data
+        lea     esi, [edi + 10]
+.data:  movzx   ecx, word [edi + 4]
+        add     ecx, edi                        ; the record's end
+        lea     eax, [esi + NV_SIZE]
+        cmp     eax, ecx
+        ja      .no
+        mov     edi, [ebp - 4]
+        mov     ecx, NV_SIZE
+        repe cmpsb
+        jne     .no
+        xor     eax, eax
+        jmp     .out
+.no:    mov     eax, 1
+.out:   mov     esp, ebp
+        pop     edi
+        pop     esi
+        pop     ebp
+        ret
+
 blw_guid:                                       ; EC87D643-EBA4-4BB5-A1E5-3F3E36B20DA9: AMI's, already in
         dd      0xec87d643                      ; this firmware's GUID store. Creating a NEW vendor GUID
         dw      0xeba4, 0x4bb5                  ; hits an AMI bug that half-writes NVRAM (2026-11-08).
@@ -491,6 +630,8 @@ smbios_guid:                                    ; EB9D2D31-2D88-11D3-9A16-009027
         db      0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d
 name_blwmac:
         dw      __utf16__('BlwMac'), 0
+name_ascii:
+        db      'BlwMac', 0
 name_status:
         dw      __utf16__('BlwMacStatus'), 0
 vendor_blw:

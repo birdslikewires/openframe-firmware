@@ -11,8 +11,9 @@ Everything here was measured on the test unit's dumps.
   a reclaim on this unit.
 - **Deleting** clears the record's valid bit in place: attribute byte `0x83` → `0x03`. No erase,
   no new space.
-- **GUIDs** are kept in a table growing down from `0xEFF0`; each record stores a one-byte index
-  into it.
+- **GUIDs** are kept in a table growing down from the block's end (index 0 at `0xFFF0`, index 1 at
+  `0xFFE0`, and so on); each record stores a one-byte index into it. (BlwMac's is index 2, AMI's
+  setup-vendor GUID. Read straight from the chip, BlwMac.efi checks it.)
 - **Every boot** the firmware appends a `MonotonicCounter` record (14 bytes). That is the only
   change between boots unless something else writes.
 - The test unit, at BootCount ~1,620, had ~35.6 KB blank: ~2,500 boots of counter records before
@@ -73,7 +74,14 @@ write-lock alone, AMI's code could lift. So once BlwMac.efi has stored a MAC and
 exactly, it resets the unit at once (RT->ResetSystem, cold; since 2026-11-13): the boot that wrote
 NVRAM never reaches an OS, and every OS session starts with the flash unlocked, ready for an update.
 Proven on the test Joggler: after the reset the lock registers read 01. A write that fails or
-reads back wrong doesn't reset, so a store that keeps failing can't loop. openframe-linux's
+reads back wrong doesn't reset, so a store that keeps failing can't loop. "Reads back" means from
+the chip itself (since 2026-11-16): AMI's GetVariable answers from its copy in memory, so a write
+that never reached the flash would read back right there, reset, and be asked for again at every
+boot without an OS ever starting to give up. BlwMac.efi reads block 0 straight from the firmware
+hub (after a `wbinvd`) and resets only if BlwMac's chain of records ends in the MAC it stored; if
+not, it doesn't reset or give SMBIOS the MAC (`F_NV_UNPERSISTED` in BlwMacStatus), so Linux sees the
+store didn't take. Proven on the test Joggler: two stores (another MAC, then its own), each found
+in the chip and followed by the reset, BlwMac's chain 16 updates long, then 18. openframe-linux's
 of-bootnsh only puts the BlwMac.efi line in boot.nsh while NVRAM doesn't hold the unit's MAC (it
 reads it back from the SMBIOS UUID), and reboots for it during boot, so a stick moved between units
 doesn't carry one unit's MAC to the other, and an ordinary boot writes nothing (`tools/lockregs.py`
