@@ -15,6 +15,7 @@ on:
     branches: [main]
     paths:
       - 'tools/of-firmware-update'
+      - 'tools/fwplan.py'
       - 'tools/firmware-manifest.txt'
       - 'tools/test_of_firmware_update.sh'
       - 'package/**'
@@ -55,26 +56,47 @@ jobs:
           GOT=$(md5sum "${IMG}" | cut -d' ' -f1)
           [ -n "${WANT}" ] && [ "${WANT}" = "${GOT}" ] || { echo "${IMG}: md5 ${GOT}, releases/MD5SUMS says '${WANT}'"; exit 1; }
           git fetch --tags --quiet
-          REV=$(( $(git rev-list --count "${TAG}..HEAD" -- tools/of-firmware-update tools/firmware-manifest.txt package) + 1 ))
+          REV=$(( $(git rev-list --count "${TAG}..HEAD" -- tools/of-firmware-update tools/fwplan.py tools/firmware-manifest.txt package) + 1 ))
           echo "TAG=${TAG}" >> $GITHUB_ENV
           echo "IMG=${IMG}" >> $GITHUB_ENV
           echo "VERSION=${TAG}-${REV}" >> $GITHUB_ENV
           echo "Release ${TAG} (md5 ${GOT}), package version ${TAG}-${REV}"
+
+      # From 26.11.31 the updater writes only blocks 9-11, in the block-11 layout
+      # (docs/flash-order.md), and refuses an image of the old layout: so no package until the
+      # latest release is of that layout, or units would get an updater that refuses its image.
+      - name: Check the release is of the block-11 layout
+        run: |
+          OUT=$(python3 -I tools/fwplan.py canon "${IMG}" work/canon.bin) || { echo "${OUT}"; exit 1; }
+          case "${OUT}" in *"layout=block11"*) echo "${TAG}: ${OUT}" ;;
+            *) echo "${TAG} is not of the block-11 layout (${OUT}): not packaging"; exit 1 ;; esac
+          python3 -I - "${IMG}" tools/firmware-manifest.txt "${TAG}" <<'EOF'
+          import hashlib, sys
+          sys.path.insert(0, 'tools')
+          import fwplan
+          img = fwplan.canon(open(sys.argv[1], 'rb').read())[0]
+          have = {(int(n), h): l.split(',') for n, h, l in (x.split() for x in open(sys.argv[2]) if x[0] != '#')}
+          for n in range(1, 16):
+              k = (n, hashlib.md5(img[n * 65536:(n + 1) * 65536]).hexdigest())
+              if sys.argv[3] not in have.get(k, []):
+                  sys.exit('tools/firmware-manifest.txt does not list block %d of %s (mkmanifest.py)' % (n, sys.argv[3]))
+          EOF
 
       # The updater against fake chips: from each stock firmware (the openbeak.net collection,
       # checked against its md5s) to this release, with power cuts and failing writes.
       - name: Test of-firmware-update
         run: |
           T=work/test; mkdir -p "${T}"
-          cp tools/of-firmware-update tools/firmware-manifest.txt tools/mkmanifest.py "${T}/"
-          cp "${IMG}" "${T}/of1-blw-${TAG}.bin"
+          cp tools/of-firmware-update tools/fwplan.py tools/mkmanifest.py "${T}/"
+          cp "${IMG}" "${T}/release.bin"
           E=https://openbeak.net/openframe/firmware/efi
           get() { curl -fsSL --retry 3 -o "${T}/$2" "$E/$1"; echo "$3  ${T}/$2" | md5sum -c --quiet; }
           get of1_efi_o2.img o2-stock.bin eeb32d85e8b8c63ccc00429e083a88b8
           get of1_efi_openpeak_verizon.img verizon.bin dbfeeb9e7e943ee0c46986995d4b383c
           get of1_efi_telstra.img telstra.bin 8903c18f882cbde3b98c793f7e827a40
           get untested/op1.rom op1.rom 7fde2784f48486570e7c5927c2a9b71e
-          sudo bash tools/test_of_firmware_update.sh "${T}" "${TAG}"
+          get of2_efi_cisco.img of2-cisco.bin 07a8fb52aedbf967cbcb1f2acc837d87
+          sudo bash tools/test_of_firmware_update.sh "${T}"
 
       # The boot-time update (of-firmware-boot) against a stand-in updater: what it does after
       # each try, never letting the boot carry on once one hasn't verified, and the updater's
@@ -92,12 +114,13 @@ jobs:
           install -m 644 "${IMG}" "${L}/of1-blw.bin"
           (cd "${L}" && md5sum of1-blw.bin > of1-blw.bin.md5 && chmod 644 of1-blw.bin.md5)
           install -m 644 tools/firmware-manifest.txt "${L}/manifest.txt"
+          install -m 644 tools/fwplan.py "${L}/fwplan.py"
           install -m 755 package/of-firmware-boot "${L}/of-firmware-boot"
           install -m 755 tools/of-firmware-update "${PKG}/usr/local/sbin/of-firmware-update"
           install -m 644 package/of-firmware.service "${PKG}/usr/lib/systemd/system/of-firmware.service"
           install -m 755 package/postinst package/prerm "${PKG}/DEBIAN/"
           find "${PKG}" -type d -exec chmod 755 {} +
-          printf 'Package: openframe-firmware\nVersion: %s\nArchitecture: all\nSection: admin\nPriority: optional\nMaintainer: OpenFrame Project <noreply@openbeak.net>\nDepends: bash, coreutils, kmod, python3, systemd\nHomepage: https://github.com/birdslikewires/openframe-firmware\nDescription: BirdsLikeWires firmware for the OpenFrame 1 (%s)\n The OpenFrame 1 EFI firmware release %s, and of-firmware-update, which brings\n the chip to it from stock O2, Verizon or Telstra firmware or an earlier\n release at the next boot (of-firmware.service). Firmware it does not\n recognise is left alone.\n' \
+          printf 'Package: openframe-firmware\nVersion: %s\nArchitecture: all\nSection: admin\nPriority: optional\nMaintainer: OpenFrame Project <noreply@openbeak.net>\nDepends: bash, coreutils, kmod, python3, systemd\nHomepage: https://github.com/birdslikewires/openframe-firmware\nDescription: BirdsLikeWires firmware for the OpenFrame 1 (%s)\n The OpenFrame 1 EFI firmware release %s, and of-firmware-update, which brings\n the chip to it from stock O2, Verizon or Telstra firmware or an earlier\n release at the next boot (of-firmware.service), in an order where a power\n cut at any point leaves a chip that starts. Firmware it does not\n recognise is left alone.\n' \
             "${VERSION}" "${TAG}" "${TAG}" > "${PKG}/DEBIAN/control"
           dpkg-deb --build --root-owner-group "${PKG}"
           dpkg-deb --info "${PKG}.deb" | sed -n '1,20p'

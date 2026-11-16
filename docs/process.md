@@ -18,10 +18,11 @@ openframe-linux stick, reachable over SSH (`tools/of.sh`), with a smart plug for
   header to see whether the firmware would cope. It didn't: **a part-written FFS header stops the
   firmware booting**, so writing a header last is not enough by itself.
 - **Never write NVRAM (block 0) or the boot block (blocks 14-15) with a flash.** Releases change
-  block 10 only (block 9 up to 26.11.28; 26.11.29 was the one move, blocks 9 and 10), and only
-  in an order where a power cut at any point leaves a chip that boots. Step 6's order does
-  not yet meet that (its erase and its marker header can each be cut into a chip that won't
-  start): see [flash-order.md](flash-order.md) for what does, checked with `tools/emu_fvwalk.py`. `tools/repair-block0.sh` exists for one emergency and needs a known-good image.
+  blocks 9-11 only (signposts in 9 and 10, our files in 11), and only
+  in an order where a power cut at any point leaves a chip that boots: from 26.11.31 the
+  block-11 layout and `tools/fwplan.py`'s plans ([flash-order.md](flash-order.md), checked with
+  `tools/emu_fvwalk.py`). The old layout's order (26.11.29/30's flash scripts) does not meet it:
+  its erase and its marker header can each be cut into a chip that won't start. `tools/repair-block0.sh` exists for one emergency and needs a known-good image.
 - **Never create an NVRAM variable under a vendor GUID the store doesn't already have.** AMI's
   NVRAM code half-writes the store when it adds a GUID (see [nvram.md](nvram.md)). Our variables
   use AMI's own `EC87D643-…` GUID.
@@ -97,65 +98,51 @@ matches `dmidecode --dump-bin` from a unit running the release byte for byte.
 
 ## 5. Build the release
 
-The previous release comes from GitHub Releases (`gh release download <prev> -D releases/`, or the
-download link); check it against `releases/MD5SUMS`.
+From 26.11.31 a release is built from the stock O2 image, with no earlier release needed (the
+chain of releases must never depend on a binary only we hold): `tools/build_patched.py --block11`
+then `tools/build_ucode_driver.py`, as in the README. Blocks 1-9 and 12-15 come out as 26.11.30's
+(block 9 but for its signpost: compare with `tools/fwplan.py canon`); block 10 is one spacer
+header reaching block 11; block 11 is the version marker and BlwPlatformDxe. Check that, and that
+`tools/fwplan.py show` on the image lists the files in block 11. Run `tools/emu_platform.py` on the
+driver (`--pe`, `--app`). Build it twice and check the two are byte for byte the same. Record the md5
+of the image and of block 11, and add the image to `releases/MD5SUMS`.
+
+(26.11.29 and 26.11.30, the old layout, had our files in block 10, with no signposts; up to
+26.11.28 they were in block 9. Those were built from the release before with `tools/mkbase.py`.)
+
+## 6. Update the manifest and test the updater
+
+Releases reach units through `tools/of-firmware-update`, which writes only blocks 9-11 by the plan
+`tools/fwplan.py` makes and proves for that chip ([flash-order.md](flash-order.md)). Regenerate its
+manifest with `tools/mkmanifest.py` (every release from 26.11.29 on, plus the stock images: it
+lists their blocks with our signposts blanked), then, as root on Linux, with the release as
+`release.bin` beside the updater, `fwplan.py`, `mkmanifest.py` and the stock images (see its top):
 
 ```
-venv/bin/python -I tools/mkbase.py releases/of1-blw-<prev>.bin <new> /tmp/base.bin --core-pe /tmp/core.pe
-venv/bin/python -I tools/build_ucode_driver.py /tmp/base.bin releases/of1-blw-<new>.bin \
-    --microcode third_party/intel-ucode/06-1c-02 --bios-version <new> --bios-date MM/DD/YYYY \
-    --check-with-core /tmp/core.pe --previous releases/of1-blw-<prev>.bin --expect-blocks 10
+sudo bash tools/test_of_firmware_update.sh D        # all passed
+venv/bin/python -I tools/test_fwplan.py of1_efi_o2.img of2_efi_cisco.img   # all pass (~10 min)
+venv/bin/python -I tools/emu_fvwalk.py of1_efi_o2.img of2_efi_cisco.img [more OF2 images]
 ```
-`mkbase.py` swaps the version marker and removes the old driver; `build_ucode_driver.py` appends
-the new driver, checks the firmware's own decompressor accepts it, and refuses to write the image
-unless the blocks that differ from the previous release are exactly `--expect-blocks`. From 26.11.29
-our files are alone in block 10, so a release changes block 10 only. (26.11.29 itself was the one
-move: `mkbase.py --move-to-block10` and `--expect-blocks 9,10`; up to 26.11.28 it was block 9.)
-Run `tools/emu_platform.py` on the driver (`--pe`, `--app`). Then build the same release from
-the stock O2 image (`tools/build_patched.py --block10`, as in the README) and check it comes out
-byte for byte the same: the chain of releases must never depend on a binary only we hold. Record the md5 of the image, of blocks
-1-15 and of block 10, check blocks 1-9 and 11-15 are still `d11b766a…`, and add the image to
-`releases/MD5SUMS`.
-
-## 6. Stage the flash script
-
-Copy `tools/flash/flash-block10-<prev>.sh` to `flash-block10-<new>.sh` and change the version labels
-(`NEW`, `FROM`, the header) and the hashes: the image's md5; `FROM10` and `NEW10`, block 10 of each.
-`OUT10` (blocks 1-9 and 11-15) stays `d11b766a…`. Diff the two: nothing else may differ. Test it on a
-fake chip (`FH=/tmp/fake.bin`, a copy of the previous release, as root) including
-`FLASH_TEST_FAULT=1` (repaired on a retry), `=3` (exit 2, then a re-run completes) and
-`FLASH_TEST_STOP=1` and `=2` (a power cut after each step: a re-run completes).
-
-The script refuses unless blocks 1-9 and 11-15 are the block-10 layout's, checks the lock registers,
-the kernel's panel fix and that fh has `/dev/fhp`, then writes block 10 in three steps, each read
-back twice: erase and write both files' bodies with both headers blank (the chip then boots like
-stock firmware: the firmware's file list stops at a blank header); the driver's header; the
-marker's header, State byte last (the last two through `/dev/fhp`, programming without an erase).
-Exit status: 0 verified (or already there); 1 refused, nothing written (rebooting is safe); 2 not
-verified (**don't reboot**: run it again, it starts again from step 1). `FH_KO=` points it at an fh.ko
-with `/dev/fhp` if the installed one has none.
-
-Releases reach users through `tools/of-firmware-update` (from stock firmware or any earlier
-release; it writes block 10 the same way). After a release, regenerate its manifest with
-`tools/mkmanifest.py` (every release from 26.11.29 on, plus the stock images) and run
-`tools/test_of_firmware_update.sh` against it. The flash scripts for releases before 26.11.29
-were removed with those releases on 2026-11-13.
+The package workflow refuses to publish unless the latest release is of the block-11 layout and
+the manifest lists its blocks as its own.
 
 ## 7. Flash (only with the owner's OK)
 
-The unit needs the `fh` module (openframe-kernel's `fh/`). OpenFrame kernels
-built after 2026-11-10 include it, with `/dev/fhp` (needed by block-10 updates) from the first build
-after 2026-11-13; for another kernel build it out of tree against that kernel (its README), or point
-the scripts at a built copy with `FH_KO`. `fh` only reads unless it's loaded with `writable=1`, and even then refuses to change
-NVRAM or the boot block without `unprotect=1`; the flash script loads it with `writable=1` only.
+The unit needs the `fh` module with `/dev/fhp` (openframe-kernel's `fh/`, kernels built after
+2026-11-13); `FH_KO=` points the updater at a built copy if the installed one has none. `fh` only
+reads unless it's loaded with `writable=1` (the updater does that), and even then refuses to change
+NVRAM or the boot block without `unprotect=1`.
 
 ```
-scp releases/of1-blw-<new>.bin tools/flash/flash-block10-<new>.sh tools/lockregs.py of@unit:/tmp/
-sudo python3 /tmp/lockregs.py          # all 01, or reboot first
-sudo bash /tmp/flash-block10-<new>.sh  # exit 0 and "FLASH VERIFIED"; prints where it kept its dumps
+scp releases/of1-blw-<new>.bin tools/of-firmware-update tools/fwplan.py tools/firmware-manifest.txt of@unit:/tmp/
+sudo OF_FW_IMAGE=/tmp/of1-blw-<new>.bin OF_FW_MANIFEST=/tmp/firmware-manifest.txt OF_FW_PLAN=/tmp/fwplan.py \
+    bash /tmp/of-firmware-update --check     # what it would write, and how many states it proved
+sudo OF_FW_IMAGE=... OF_FW_MANIFEST=... OF_FW_PLAN=... bash /tmp/of-firmware-update   # "UPDATED", exit 0
 ```
-Keep the post-flash dump (`post1.bin` in the directory it names) and a copy of its block 0
-(`head -c 65536 …/post1.bin`) for the NVRAM diff after the boot.
+Before the first write, a unit that boots straight from its internal memory must have its
+`boot.nsh` in its fallback mode: between closing one signpost and opening the next, the chip starts
+like stock firmware, which can't boot the internal memory directly. Keep the post-update dump
+(`post1.bin` in the directory it names) and a copy of its block 0 for the NVRAM diff after the boot.
 
 ## 8. Cold boot
 

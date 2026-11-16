@@ -1,127 +1,139 @@
 #!/bin/bash
 # test_of_firmware_update.sh: of-firmware-update against fake chips, from every known starting
-# firmware, with interrupted and failing writes. Run as root on a Linux box (GNU dd), with:
-#   D/ of-firmware-update, firmware-manifest.txt, mkmanifest.py, of1-blw-TARGET.bin,
-#      o2-stock.bin, verizon.bin, telstra.bin, op1.rom (from openbeak.net/openframe/firmware/efi/),
-#   and optionally old-release.bin (any earlier BirdsLikeWires release: not in the manifest, so
-#   refused) and a block-10 development build as dev-block10.bin
-#     sudo bash test_of_firmware_update.sh D TARGET-VERSION
+# firmware, with power cuts after every step and failing writes. Run as root on a Linux box (GNU
+# dd, Python 3), with:
+#   D/ of-firmware-update, fwplan.py, mkmanifest.py, release.bin (the release under test, of the
+#      block-11 layout), o2-stock.bin, verizon.bin, telstra.bin, op1.rom (from
+#      openbeak.net/openframe/firmware/efi/); optionally r30.bin (release 26.11.30, the old
+#      layout), of2-cisco.bin (an OpenFrame 2: not ours to update yet) and old-release.bin (an
+#      earlier release that isn't in the manifest)
+#     sudo bash test_of_firmware_update.sh D
+# Made here from the release: "old", its files moved into block 10 as releases up to 26.11.30 had
+# them (its version's digits all 0), and "next", one byte of its driver changed (digits all 9).
 # Prints one line per case; exits non-zero if any case fails.
 set -u
-D=$(cd "$1" && pwd); V=$2
-U=$D/of-firmware-update; F=$(mktemp -d)/chip.bin; DUMPS=$(dirname $F)/dumps
-export OF_FW_IMAGE=$D/of1-blw-$V.bin OF_FW_MANIFEST=$D/firmware-manifest.txt OF_FW_DUMPDIR=$DUMPS FH=$F
+D=$(cd "$1" && pwd)
+U=$D/of-firmware-update; T=$(mktemp -d); F=$T/chip.bin; DUMPS=$T/dumps
+export OF_FW_PLAN=$D/fwplan.py OF_FW_DUMPDIR=$DUMPS FH=$F
 FAILS=0
+
+# The releases, and a checker: "ours.py CHIP START REL" = the chip runs REL's files, and every
+# block but 9-11 is START's (block 9 only by its spacer headers).
+cat > $T/mk.py <<'PY'
+import re, sys
+sys.path.insert(0, sys.argv[1])
+import fwplan as fp
+D, T = sys.argv[1], sys.argv[2]
+rel = bytearray(open(D + '/release.bin', 'rb').read())
+fp.release_files(rel)
+m = re.search(rb'BirdsLikeWires OpenFrame EFI ([0-9.]+(-dev[0-9]+)?) \(OF1\)', rel)
+v = m.group(1).decode()
+
+
+def mark(img, ver):
+    i = img.find(m.group(0))
+    img[i:i + len(m.group(0))] = m.group(0).replace(v.encode(), ver.encode())
+
+
+old, nxt = bytearray(rel), bytearray(rel)
+old[fp.GATE:fp.FILES] = rel[fp.FILES:fp.FILES + fp.BLOCK]
+old[fp.FILES:fp.FILES + fp.BLOCK] = b'\xff' * fp.BLOCK
+mark(old, re.sub(r'[0-9]', '0', v))
+mark(nxt, re.sub(r'[0-9]', '9', v))
+o = fp.FILES + ((fp.size(nxt, fp.FILES) + 7) & ~7)
+sz = fp.size(nxt, o)
+nxt[o + sz // 2] ^= 0x55
+nxt[o + 17] = 0
+nxt[o + 17] = -sum(nxt[o + 24:o + sz]) & 0xFF      # the driver has a data checksum
+assert fp.state(bytes(old))['old_layout'] and fp.state(bytes(nxt))['files_reached']
+open(T + '/old.bin', 'wb').write(old)
+open(T + '/rel.bin', 'wb').write(rel)
+open(T + '/next.bin', 'wb').write(nxt)
+print(v)
+PY
+cat > $T/ours.py <<'PY'
+import sys
+sys.path.insert(0, sys.argv[4])
+import fwplan as fp
+chip, start, rel = (open(p, 'rb').read() for p in sys.argv[1:4])
+B = fp.BLOCK
+st = fp.state(chip)
+c, s = fp.canon(chip)[0], fp.canon(start)[0]
+bad = [n for n in (1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 14, 15) if c[n * B:(n + 1) * B] != s[n * B:(n + 1) * B]]
+ok = st['files_reached'] and not st['old_layout'] and chip[11 * B:12 * B] == rel[11 * B:12 * B] and not bad
+print('ok' if ok else 'files %s, blocks changed %s' % (st['files_reached'], bad))
+PY
+V=$(python3 -I $T/mk.py "$D" "$T") || { echo "FAIL: could not make the test releases from $D/release.bin"; exit 1; }
+VO=$(echo "$V" | tr '0-9' '0'); VN=$(echo "$V" | tr '0-9' '9')
+STOCK="o2-stock=$D/o2-stock.bin verizon=$D/verizon.bin telstra=$D/telstra.bin"
+[ -f $D/r30.bin ] && STOCK="$STOCK 26.11.30=$D/r30.bin"
+python3 -I $D/mkmanifest.py $T/mrel.txt $STOCK $VO=$T/old.bin $V=$T/rel.bin >/dev/null
+python3 -I $D/mkmanifest.py $T/mnext.txt $STOCK $VO=$T/old.bin $V=$T/rel.bin $VN=$T/next.bin >/dev/null
+echo "release under test: $V (made here: $VO in the old layout, $VN)"
+to() { export OF_FW_IMAGE=$T/$1.bin OF_FW_MANIFEST=$T/m$1.txt; }
+
 b() { dd if="$1" bs=64k skip=$2 count=$3 status=none | md5sum | cut -c1-32; }
-T15=$(b $OF_FW_IMAGE 1 15)
-# run <name> <expected exit> <expected blocks 1-15: md5 | same | target | any> [VAR=value ...]
+# run <name> <expected exit> <expected end: same | ours | any> [VAR=value ...]
 run() {
 	local name=$1 want=$2 end=$3; shift 3
-	local before; before=$(b $F 1 15)
-	env "$@" bash $U ${ARGS:-} > /tmp/oftest.out 2>&1; local rc=$?
-	local now; now=$(b $F 1 15)
-	case $end in same) end=$before ;; target) end=$T15 ;; any) end=$now ;; esac
-	if [ $rc = $want ] && [ $now = $end ]; then echo "ok   $name (exit $rc)"
-	else echo "FAIL $name: exit $rc (want $want), blocks 1-15 $now (want $end)"; sed 's/^/       /' /tmp/oftest.out; FAILS=$((FAILS + 1)); fi
+	local before; before=$(b $F 0 16)
+	env "$@" bash $U ${ARGS:-} > $T/out 2>&1; local rc=$?
+	local got=ok
+	case $end in
+		same) [ "$(b $F 0 16)" = $before ] || got="the chip changed" ;;
+		ours) got=$(python3 -I $T/ours.py $F $START $OF_FW_IMAGE $D) ;;
+	esac
+	if [ $rc = $want ] && [ "$got" = ok ]; then echo "ok   $name (exit $rc)"
+	else echo "FAIL $name: exit $rc (want $want), $got"; sed 's/^/       /' $T/out; FAILS=$((FAILS + 1)); fi
 }
-start() { cp "$1" $F; }
+start() { cp "$1" $F; cp "$1" $T/start.bin; START=$T/start.bin; }
+steps() { rm -rf $T/p; python3 -I $D/fwplan.py plan $F $OF_FW_IMAGE $T/p >/dev/null && wc -l < $T/p/steps.txt; }
 
-for s in o2-stock verizon telstra; do start $D/$s.bin; run "$s -> $V" 0 target; done
-[ -f $D/old-release.bin ] && { start $D/old-release.bin; run "an earlier release (not in the manifest): refused" 3 same; }
-start $OF_FW_IMAGE; run "$V -> $V: nothing to do" 0 same
-if [ -f $D/old-release.bin ]; then
-	OLDV=$(grep -aoE 'BirdsLikeWires OpenFrame EFI [0-9.]+ \(OF1\)' $D/old-release.bin | head -1 | awk '{print $4}')
-	python3 -I $D/mkmanifest.py $(dirname $F)/old-manifest.txt $OLDV=$D/old-release.bin $V=$OF_FW_IMAGE >/dev/null
-	start $OF_FW_IMAGE; run "$V with an older image ($OLDV): left alone" 0 same OF_FW_IMAGE=$D/old-release.bin OF_FW_MANIFEST=$(dirname $F)/old-manifest.txt
-fi
-[ -f $D/dev-block10.bin ] && { start $D/dev-block10.bin; run "block-10 dev build -> $V (headers last)" 0 target; }
+to rel
+for s in o2-stock verizon telstra; do start $D/$s.bin; run "$s -> $V" 0 ours; done
+start $T/old.bin; run "$VO (old layout: files in block 10) -> $V" 0 ours
+[ -f $D/r30.bin ] && { start $D/r30.bin; run "26.11.30 -> $V" 0 ours; }
+start $T/rel.bin; run "$V -> $V: nothing to do" 0 same
+grep -q "nothing to do" $T/out || { echo "FAIL   ... it didn't say so"; FAILS=$((FAILS + 1)); }
+start $D/o2-stock.bin; bash $U >/dev/null 2>&1; cp $F $T/c-rel.bin
+to next; start $T/c-rel.bin; run "$V -> $VN (block 10 steps)" 0 ours
+[ "$(b $F 9 1)" = "$(b $T/c-rel.bin 9 1)" ] && echo "ok     ... block 9 unchanged" || { echo "FAIL   ... block 9 changed"; FAILS=$((FAILS + 1)); }
+cp $F $T/c-next.bin
+to rel; start $T/c-next.bin; run "$VN with the $V image: left alone" 0 same OF_FW_MANIFEST=$T/mnext.txt
+to next; start $T/old.bin; run "$VO -> $VN" 0 ours
 
+to rel
 start $D/op1.rom; run "op1: boot block differs, refused" 3 same
 ls $DUMPS/of1-firmware-*.bin >/dev/null 2>&1 && echo "ok   op1: dump saved" || { echo "FAIL op1: no dump"; FAILS=$((FAILS + 1)); }
-start $D/o2-stock.bin; printf 'X' | dd of=$F bs=1 seek=$((7 * 65536 + 4000)) conv=notrunc status=none
+[ -f $D/of2-cisco.bin ] && { start $D/of2-cisco.bin; run "an OpenFrame 2: not known yet, refused" 3 same; }
+[ -f $D/old-release.bin ] && { start $D/old-release.bin; run "an earlier release (not in the manifest): refused" 3 same; }
+start $D/o2-stock.bin; printf 'X' | dd of=$F bs=1 seek=$((7 * 65536 + 4000)) conv=notrunc status=none; cp $F $START
 run "stock with an unknown block 7: refused" 3 same
-start $D/o2-stock.bin; head -c 100 /dev/urandom | dd of=$F bs=1 seek=$((10 * 65536 + 500)) conv=notrunc status=none
-run "stock with junk in block 10 (an earlier first write, cut off): rewritten" 0 target
-start $D/o2-stock.bin; head -c 100 /dev/urandom | dd of=$F bs=1 seek=$((10 * 65536 + 500)) conv=notrunc status=none
-run "  ... and it never verifies: put back blank, as stock has it, safe" 1 $(b $D/o2-stock.bin 1 15) FLASH_TEST_FAULT_BLOCK=10 FLASH_TEST_FAULT=3
+start $T/old.bin; printf 'X' | dd of=$F bs=1 seek=$((10 * 65536 + 4000)) conv=notrunc status=none; cp $F $START
+run "old layout with files we don't know in block 10: refused" 3 same
+start $D/o2-stock.bin; head -c 3000 /dev/urandom | dd of=$F bs=1 seek=$((10 * 65536 + 500)) conv=notrunc status=none
+head -c 3000 /dev/urandom | dd of=$F bs=1 seek=$((11 * 65536 + 9000)) conv=notrunc status=none
+run "stock with junk in blocks 10 and 11 (out of reach): rewritten" 0 ours
+start $D/o2-stock.bin; run "an image of the old layout: refused" 1 same OF_FW_IMAGE=$T/old.bin
 
 ARGS=--check; start $D/o2-stock.bin; run "--check on stock: update needed" 5 same
-start $OF_FW_IMAGE; run "--check on $V: up to date" 0 same; ARGS=
+start $T/c-rel.bin; run "--check on $V: up to date" 0 same; ARGS=
 
-start $D/o2-stock.bin; run "stock, power cut after block 10" 9 any FLASH_TEST_STOP=10
-run "  ... re-run completes" 0 target
-start $D/o2-stock.bin; run "stock, power cut after block 6" 9 any FLASH_TEST_STOP=6
-head -c 30000 /dev/urandom | dd of=$F bs=1 seek=$((7 * 65536 + 100)) conv=notrunc status=none
-run "  ... block 7 torn too: re-run rewrites it" 0 target
-start $D/o2-stock.bin; run "stock, block 10 never verifies: put back blank, safe" 1 same FLASH_TEST_FAULT_BLOCK=10 FLASH_TEST_FAULT=3
-start $D/o2-stock.bin; run "stock, block 10 and the blank never verify" 2 any FLASH_TEST_FAULT_BLOCK=10 FLASH_TEST_FAULT=3 FLASH_TEST_FAULT_BLANK=3
-start $D/o2-stock.bin; run "stock, block 7 fails once, retried" 0 target FLASH_TEST_FAULT_BLOCK=7 FLASH_TEST_FAULT=1
-start $D/o2-stock.bin; run "stock, block 7 never verifies" 2 any FLASH_TEST_FAULT_BLOCK=7 FLASH_TEST_FAULT=3
-run "  ... re-run completes" 0 target
-if [ -f $D/dev-block10.bin ]; then
-	for s in 10.1 10.2; do
-		start $D/dev-block10.bin; run "block-10 dev build, power cut after step $s" 9 any FLASH_TEST_STOP=$s
-		run "  ... re-run completes" 0 target
+# A power cut after every step, then a re-run, from each kind of start.
+for s in o2-stock:rel:$D/o2-stock.bin $VO:rel:$T/old.bin $V:next:$T/c-rel.bin; do
+	n=${s%%:*}; v=$(echo $s | cut -d: -f2); p=${s#*:*:}
+	to $v; cp $p $F; N=$(steps)
+	for k in $(seq 1 $N); do
+		start $p; run "$n -> $v, power cut after step $k of $N" 9 any FLASH_TEST_STOP=$k
+		run "  ... re-run completes" 0 ours
 	done
-	start $D/dev-block10.bin; run "block-10 dev build, bodies never verify" 2 any FLASH_TEST_FAULT_BLOCK=10 FLASH_TEST_FAULT=3
-	run "  ... re-run completes" 0 target
-fi
-cp $OF_FW_IMAGE $(dirname $F)/img.bin; printf 'X' | dd of=$(dirname $F)/img.bin bs=1 seek=$((5 * 65536)) conv=notrunc status=none
-start $D/o2-stock.bin; run "an image whose blocks aren't in the manifest: refused" 1 same OF_FW_IMAGE=$(dirname $F)/img.bin
-md5sum $OF_FW_IMAGE | sed 's/^0/1/;t;s/^./0/' > $(dirname $F)/img2.bin.md5; cp $OF_FW_IMAGE $(dirname $F)/img2.bin   # (first digit changed)
-start $D/o2-stock.bin; run "an image that doesn't match its .md5: refused" 1 same OF_FW_IMAGE=$(dirname $F)/img2.bin
+done
+to rel
+start $D/o2-stock.bin; run "stock, step 2 lost once, retried" 0 ours FLASH_TEST_FAULT_STEP=2 FLASH_TEST_FAULT=1
+start $T/old.bin; run "old layout, step 1 (closing the gate) never verifies" 2 any FLASH_TEST_FAULT_STEP=1 FLASH_TEST_FAULT=3
+run "  ... re-run completes" 0 ours
+start $T/old.bin; run "old layout, step 4 never verifies" 2 any FLASH_TEST_FAULT_STEP=4 FLASH_TEST_FAULT=3
+run "  ... re-run completes" 0 ours
 
-# Later releases of the block-10 layout, from this one: the next (its marker's version one on)
-# with block 9 changed too, and another with block 7 changed. Block 10 goes headers last around
-# the other block: its bodies (headers blank), the other block, the driver's header, the marker's.
-NV=$(echo $V | awk -F. '{ printf "%s.%s.%d", $1, $2, $3 + 1 }')
-mknext() {	# <out> <the other block to change>
-	cp $OF_FW_IMAGE $1
-	python3 -I - "$1" "$2" "$V" "$NV" <<-'EOF'
-	import sys
-	p, blk, v, nv = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
-	d = bytearray(open(p, 'rb').read())
-	old, new = [('BirdsLikeWires OpenFrame EFI %s (OF1)' % x).encode() for x in (v, nv)]
-	if len(old) != len(new) or d.count(old) != 1: sys.exit('no next release from this one')
-	i = d.index(old); d[i:i + len(new)] = new
-	o = blk * 65536 + 4096; d[o:o + 16] = bytes(x ^ 0x5a for x in d[o:o + 16])
-	open(p, 'wb').write(d)
-	EOF
-}
-X=$(dirname $F)
-if mknext $X/next9.bin 9 && mknext $X/next7.bin 7; then
-	for k in 9 7; do
-		python3 -I $D/mkmanifest.py $X/next$k.txt $V=$OF_FW_IMAGE $NV=$X/next$k.bin >/dev/null
-		NX="OF_FW_IMAGE=$X/next$k.bin OF_FW_MANIFEST=$X/next$k.txt"
-		WANT=$(b $X/next$k.bin 1 15)
-		start $OF_FW_IMAGE; run "$V -> $NV with block $k changed" 0 $WANT $NX
-		# In order: bodies, block k, driver header, marker header.
-		ORDERSEEN=$(grep -oE 'block 10: (bodies|driver header|marker header) written|block [0-9]+ written and verified' /tmp/oftest.out | sed -E 's/block 10: //; s/ written.*//; s/^block ([0-9]+)$/\1/' | paste -sd, -)
-		if [ "$ORDERSEEN" = "bodies,$k,driver header,marker header" ]; then echo "ok     ... in order: $ORDERSEEN"
-		else echo "FAIL   ... in order: $ORDERSEEN (want bodies,$k,driver header,marker header)"; FAILS=$((FAILS + 1)); fi
-		for s in 10.1 $k 10.2; do
-			start $OF_FW_IMAGE; run "$V -> $NV (block $k), power cut after step $s" 9 any $NX FLASH_TEST_STOP=$s
-			run "  ... re-run completes" 0 $WANT $NX
-		done
-		start $OF_FW_IMAGE; run "$V -> $NV (block $k), cut after the bodies" 9 any $NX FLASH_TEST_STOP=10.1
-		head -c 3000 /dev/urandom | dd of=$F bs=1 seek=$((k * 65536 + 200)) conv=notrunc status=none
-		run "  ... and block $k torn too: re-run rewrites it" 0 $WANT $NX
-	done
-else
-	echo "note: no next release could be made from $V (its version's length would change): skipped"
-fi
-
-# Stop signals part way through (a shutdown, a Ctrl-C, a dropped session): once writing, the
-# updater (and its writes) ignore them and finish. A second a block, so they land mid-update.
-start $D/o2-stock.bin
-env FLASH_TEST_PAUSE=1 bash $U > /tmp/oftest.out 2>&1 &
-P=$!
-for i in $(seq 100); do grep -q "block 10 written" /tmp/oftest.out && break; sleep 0.1; done
-for SIG in TERM INT HUP; do kill -s $SIG $P 2>/dev/null; pkill --signal $SIG -P $P 2>/dev/null; done
-wait $P; rc=$?
-if [ $rc = 0 ] && [ "$(b $F 1 15)" = $T15 ]; then echo "ok   stock, stop signals after block 10: finished anyway (exit 0)"
-else echo "FAIL stock, stop signals after block 10: exit $rc, blocks 1-15 $(b $F 1 15) (want 0, $T15)"; sed 's/^/       /' /tmp/oftest.out; FAILS=$((FAILS + 1)); fi
-
-rm -rf $(dirname $F) /tmp/of-firmware-update.*
-[ $FAILS = 0 ] && echo "all passed" || echo "$FAILS FAILED"
-exit $FAILS
+rm -rf $T
+[ $FAILS = 0 ] && echo "all passed" || { echo "$FAILS FAILED"; exit 1; }
