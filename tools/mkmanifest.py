@@ -12,10 +12,15 @@ know: O2, Verizon, Telstra), writes one line per block 1-15:
 of-firmware-update writes a block that differs from its target image only if that block's md5 is
 listed here for that block number (or the chip shows an update of its own was under way). So a
 chip whose firmware isn't listed is never written: its owner gets a dump instead. Block 0 (NVRAM)
-is per unit and left out.
+is per unit and left out. Each image is read as fwplan.py canon reads a chip (our spacer region
+in block 9 blanked), so a chip matches whatever spacer headers its updates have used.
 """
 import hashlib
+import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import fwplan  # noqa: E402
 
 
 def main():
@@ -30,6 +35,7 @@ def main():
         data = open(path, 'rb').read()
         if len(data) != 0x100000:
             sys.exit('%s is %d bytes, not 1 MB' % (path, len(data)))
+        data = fwplan.canon(data)[0]
         for n in range(1, 16):
             h = hashlib.md5(data[n * 0x10000:(n + 1) * 0x10000]).hexdigest()
             key = (n, h)

@@ -572,18 +572,23 @@ def main():
         nxt[0xA0000:0xB0000] = rel30[0xA0000:0xB0000]
         for p, ok in update_plans(new, nxt):
             failures += bool(check_plan(w, p, ok))
-    print('fwplan.py\'s plans on the real walkers:')
+    print('fwplan.py\'s plans (block-11 layout) on the real walkers:')
+    import test_fwplan
+    r30, rel, nxt = test_fwplan.releases()
     for path in a.images:
         stock = bytes(open(path, 'rb').read())
         w = Walkers(stock)
-        p, after = fwplan_plans(stock, bytes(rel30), os.path.basename(path) + ' -> 26.11.30')
+        n = os.path.basename(path)
+        p, after = fwplan_plans(stock, test_fwplan.on_stock(stock, rel), n + ' -> release')
         failures += bool(check_plan(w, p))
-        p, after2 = fwplan_plans(bytes(after), bytes(nxt_of1), 'then -> next')
+        p, after2 = fwplan_plans(after, test_fwplan.on_stock(stock, nxt), 'then -> next (block 10 steps)')
         failures += bool(check_plan(w, p))
-        p, _ = fwplan_plans(bytes(after2), bytes(rel30), 'then -> 26.11.30 again')
+        p, _ = fwplan_plans(after2, test_fwplan.on_stock(stock, rel), 'then -> back again')
         failures += bool(check_plan(w, p))
     w = Walkers(rel30)
-    p, _ = fwplan_plans(bytes(rel30), bytes(nxt_of1), '26.11.30 release chip -> next')
+    p, after = fwplan_plans(bytes(rel30), rel, '26.11.30 (files in block 10) -> release')
+    failures += bool(check_plan(w, p))
+    p, _ = fwplan_plans(after, nxt, 'then -> next')
     failures += bool(check_plan(w, p))
     print('FAIL: %d' % failures if failures else 'all as expected')
     sys.exit(1 if failures else 0)

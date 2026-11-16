@@ -1,37 +1,43 @@
 #!/usr/bin/env python3
-"""Plans the flash writes that bring a chip's block 10 (our version marker and BlwPlatformDxe) to a
-release's, in an order where a power cut at any moment leaves a chip that boots
+"""Plans the flash writes that put a release's files (our version marker and BlwPlatformDxe) on
+a chip, in an order where a power cut at any moment leaves a chip that boots
 (docs/flash-order.md), and proves it before anything is written.
 
     fwplan.py plan CHIP.bin RELEASE.bin OUTDIR   # write OUTDIR/steps.txt and one 64 KB file per step
-    fwplan.py show CHIP.bin                       # what the firmware's file list holds, gates included
+    fwplan.py show CHIP.bin                       # the firmware's file list, spacer headers included
+    fwplan.py canon CHIP.bin OUT.bin              # the chip with our spacer headers blanked (for md5s)
 
 Pure Python 3, no third-party modules: it runs on the unit. Exit status: 0 planned (steps.txt may
 be empty: nothing to do), 1 refused (nothing to write would be safe; the reason is printed).
 
-The chip's main volume is read with the rules of the firmware's own walkers (`walk`, checked
-against the real PEI and DXE cores under Unicorn by emu_fvwalk.py). Then:
-- If the list reaches block 10 through an open spacer (one of our releases) and block 10 is the
-  release's already: nothing to do. Otherwise the spacer is closed first (State F8 -> D8: the walk
-  then stops in its own FF data, short of block 10).
-- With block 10 out of reach (stock firmware; a closed spacer; a cut-off earlier run), block 10 is
-  written whole: programmed if blank, else erased and programmed.
-- Then a spacer header is opened at the first free 24-byte slot, reaching 0xA0000: State FE, the
-  other 23 bytes, State FA, State F8. A header an earlier run left part way is carried on.
+The layout (from 26.11.31): after the stock files, our spacer (a RAW file of FF) runs to block 10;
+block 10 holds spacer headers only, the open one reaching block 11; block 11 holds our files.
+A spacer header is a signpost the firmware's walk follows. Clearing one bit of its State (F8 ->
+D8) turns it into "skip 24 bytes", which lands in the spacer's own FF data: the walk ends there,
+and whatever is beyond is out of the firmware's reach. A new header goes in the next 24 bytes,
+State first (FE, the other 23 bytes, FA, F8), which every walker state allows.
+
+- An update (our layout, block 11 to change): close block 10's open header, write block 11 (out
+  of reach), open the next header in block 10. Block 9 never changes. About 2,700 updates.
+- Block 10 to (re)build (stock firmware; 26.11.29/30's layout, our files in block 10; block 10
+  full; anything cut off before block 10 was finished): the same one level up. Close block 9's
+  open spacer header if there is one, write block 10 (its first header, complete) and block 11,
+  then open the next header in block 9. Block 9 changes by 24 bytes each time this happens.
+- A chip part way through either (a power cut): carried on from where it is.
 
 Each step is a whole 64 KB block, 'fh' (erase and program) or 'fhp' (program only, bits only
 cleared). The plan is then walked state by state, as emu_fvwalk.py does with the real code: after
 each step, every value a byte the walk reads can hold part way through programming, and for an
 erase, that nothing in the block is read. Any state that wouldn't boot, or that lists anything
-but the chip's files as they were, the release's, or the files before our spacer alone (stock),
-refuses the whole plan.
+but the chip's files as they were, the release's, or the stock files alone, refuses the plan.
 """
 import os
 import struct
 import sys
 import uuid
 
-FV_MAIN, FV_END, BLOCK10, BLOCK = 0x10000, 0xD0000, 0xA0000, 0x10000
+FV_MAIN, FV_END, BLOCK = 0x10000, 0xD0000, 0x10000
+GATE, FILES = 0xA0000, 0xB0000          # block 10: spacer headers; block 11: our files
 SPACER = uuid.UUID('8e9d1954-ef62-4aa4-b8e5-88602b186161').bytes_le
 MARKER = uuid.UUID('d1728e0b-d49f-480e-a48d-d0b4ec5768f4').bytes_le
 FIXED_CHECKSUM = 0x5A
@@ -91,42 +97,76 @@ def config(img, offs):
     return tuple(out)
 
 
-def spacer_header(at):
-    """Our spacer's header at `at`, reaching BLOCK10: RAW, no data checksum, State F8."""
-    n = BLOCK10 - at
-    h = bytearray(SPACER + b'\0\0' + bytes([0x01, 0x00]) + n.to_bytes(3, 'little') + b'\x00')
+def spacer_header(at, end):
+    """Our spacer's header at `at`, reaching `end`: RAW, no data checksum, State F8."""
+    h = bytearray(SPACER + b'\0\0' + bytes([0x01, 0x00]) + (end - at).to_bytes(3, 'little') + b'\x00')
     h[16] = -sum(h) & 0xFF
     h[17] = FIXED_CHECKSUM
     h[23] = 0xF8
     return bytes(h)
 
 
-def state(img):
-    """Where the chip stands: dict with 'open' (offset of the open spacer, or None), 'slot' (where
-    the next spacer header goes, if block 10 is out of reach), 'b10_reached'."""
+def chain(img, lo, hi):
+    """Spacer headers from lo, each reaching hi: closed ones (D8), then at most one open (F8/FA)
+    or part way (State FF/FE/FA with the rest on its way), then FF to hi. Returns
+    {'closed': n, 'cur': offset of the last header or None, 'open': bool, 'next': first free slot}
+    or None if [lo, hi) holds anything else."""
+    slot, closed, cur, opened = lo, 0, None, False
+    while slot + 24 <= hi:
+        h, t = bytes(img[slot:slot + 24]), spacer_header(slot, hi)
+        if h == b'\xff' * 24:
+            break
+        if h[:23] == t[:23] and h[23] == 0xD8:
+            closed += 1
+            slot += 24
+            continue
+        if any(a & b != b for a, b in zip(h[:23], t[:23])) or h[23] not in (0xFF, 0xFE, 0xFA, 0xF8):
+            return None
+        cur, opened = slot, h[:23] == t[:23] and h[23] in (0xFA, 0xF8)
+        slot += 24
+        break
+    if set(img[slot:hi]) - {0xFF}:
+        return None
+    return {'closed': closed, 'cur': cur, 'open': opened, 'next': slot}
+
+
+def first_slot(img):
+    """Where our spacer starts: the walk's first spacer header, skip or end."""
     ok, files, ev = walk(img)
     if not ok:
         raise Refused('the firmware would reject this chip\'s file list as it is')
-    opened = [o for o in files if bytes(img[o:o + 16]) == SPACER]
-    if opened:
-        o = opened[-1]
-        if o + size(img, o) != BLOCK10 or opened[:-1]:
-            raise Refused('a spacer that does not end at 0x%x' % BLOCK10)
-        if not any(f >= BLOCK10 for f in files):
-            raise Refused('the spacer leads to an empty block 10')
-        return {'open': o, 'slot': None, 'b10_reached': True}
-    end = ev[-1][0]
-    if any(f >= BLOCK10 for f in files) or end >= BLOCK10:
-        raise Refused('the file list reaches block 10 without our spacer')
-    # A header an earlier run left under construction: skipped (State FE), its slot is 24 back.
-    slot = end
-    if len(ev) >= 2 and ev[-2][1] == 'skip' and ev[-2][0] == end - 24 and img[end - 1] in (0xFE, 0xFA):
-        slot = end - 24
-    elif img[slot + 23] != 0xFF:
-        raise Refused('unexpected bytes at 0x%x' % slot)
-    if slot & 7 or slot + 48 > BLOCK10:
-        raise Refused('no room for a spacer header at 0x%x' % slot)
-    return {'open': None, 'slot': slot, 'b10_reached': False}
+    for o, k in ev:
+        if k in ('end', 'skip') or (k == 'file' and bytes(img[o:o + 16]) == SPACER):
+            if o >= GATE:
+                raise Refused('the stock files run into block 10')
+            return o
+        if k != 'file':
+            raise Refused('a deleted file at 0x%x' % o)
+    raise Refused('no end to the file list')
+
+
+def state(img):
+    """Where the chip stands."""
+    s0 = first_slot(img)
+    c9 = chain(img, s0, GATE)
+    if c9 is None:
+        raise Refused('unexpected bytes in our spacer in block 9 (from 0x%x)' % s0)
+    c10 = chain(img, GATE, FILES) if c9['open'] else None
+    return {'s0': s0, 'c9': c9, 'c10': c10,
+            'old_layout': c9['open'] and bytes(img[GATE:GATE + 16]) == MARKER,
+            'files_reached': bool(c10 and c10['open'])}
+
+
+def canon(img):
+    """The chip with our spacer headers blanked: block 9 (and block 10, if it holds only spacer
+    headers) as they would be without them, so their md5s can be looked up whatever headers
+    updates have used."""
+    st = state(img)
+    c = bytearray(img)
+    c[st['s0']:GATE] = b'\xff' * (GATE - st['s0'])
+    if chain(img, GATE, FILES) is not None:
+        c[GATE:FILES] = b'\xff' * BLOCK
+    return bytes(c), st
 
 
 def program(img, at, data):
@@ -136,43 +176,72 @@ def program(img, at, data):
         img[at + i] = v
 
 
+def release_files(release):
+    """Block 11 of a release of our layout, checked."""
+    ok, files, _ = walk(release)
+    st = state(release)
+    if not ok or not st['files_reached'] or st['c10']['closed'] or st['c10']['cur'] != GATE:
+        raise Refused('the release is not of the block-11 layout')
+    if bytes(release[FILES:FILES + 16]) != MARKER or not any(f > FILES for f in files):
+        raise Refused('the release has no marker and driver in block 11')
+    return bytes(release[FILES:FILES + BLOCK])
+
+
 def plan(chip, release):
-    """[(op, block, 64 KB bytes)] taking chip's block 10 to release's, with the spacer handling."""
-    chip, new10 = bytearray(chip), bytes(release[BLOCK10:BLOCK10 + BLOCK])
-    if not any(o >= BLOCK10 for o in walk(release)[1]) or bytes(release[BLOCK10:BLOCK10 + 16]) != MARKER:
-        raise Refused('the release has no block-10 files')
+    """[(op, block, 64 KB bytes)] putting release's block 11 on the chip (see the top)."""
+    new11 = release_files(release)
     st = state(chip)
     steps, cur = [], bytearray(chip)
 
     def step(op, blk):
         steps.append((op, blk, bytes(cur[blk * BLOCK:(blk + 1) * BLOCK])))
 
-    if st['open'] is not None:
-        if bytes(chip[BLOCK10:BLOCK10 + BLOCK]) == new10:
-            return []
-        g = st['open']
-        program(cur, g + 23, b'\xd8')
-        step('fhp', g // BLOCK)
-        slot = g + 24
-        if set(cur[slot:slot + 48]) != {0xFF}:
-            raise Refused('no free room after the spacer at 0x%x' % g)
-    else:
-        slot = st['slot']
-    if bytes(cur[BLOCK10:BLOCK10 + BLOCK]) != new10:
-        blank = set(cur[BLOCK10:BLOCK10 + BLOCK]) == {0xFF}
-        cur[BLOCK10:BLOCK10 + BLOCK] = new10
-        step('fhp' if blank else 'fh', 10)
-    h = spacer_header(slot)
-    if cur[slot + 23] == 0xFF:
-        program(cur, slot + 23, b'\xfe')
-        step('fhp', slot // BLOCK)
-    if bytes(cur[slot:slot + 23]) != h[:23]:
-        program(cur, slot, h[:23])
-        step('fhp', slot // BLOCK)
-    for s in (0xFA, 0xF8):
-        if cur[slot + 23] != s:
-            program(cur, slot + 23, bytes([s]))
+    def put(blk, data):
+        base = blk * BLOCK
+        if bytes(cur[base:base + BLOCK]) == data:
+            return
+        blank = set(cur[base:base + BLOCK]) == {0xFF}
+        cur[base:base + BLOCK] = data
+        step('fhp' if blank else 'fh', blk)
+
+    def open_at(slot, end):
+        h = spacer_header(slot, end)
+        if cur[slot + 23] == 0xFF:
+            program(cur, slot + 23, b'\xfe')
             step('fhp', slot // BLOCK)
+        if bytes(cur[slot:slot + 23]) != h[:23]:
+            program(cur, slot, h[:23])
+            step('fhp', slot // BLOCK)
+        for s in (0xFA, 0xF8):
+            if cur[slot + 23] != s:
+                program(cur, slot + 23, bytes([s]))
+                step('fhp', slot // BLOCK)
+
+    c9, c10 = st['c9'], st['c10']
+    if c10 is not None and c10['open'] and bytes(chip[FILES:FILES + BLOCK]) == new11:
+        return []
+    if c10 is not None:
+        slot10 = c10['next'] if c10['open'] or c10['cur'] is None else c10['cur']
+    if c10 is not None and slot10 + 48 <= FILES:
+        # Block 10 is ours and has room: step there; block 9 stays as it is.
+        if c10['open']:
+            program(cur, c10['cur'] + 23, b'\xd8')
+            step('fhp', GATE // BLOCK)
+        put(11, new11)
+        open_at(slot10, FILES)
+    else:
+        # Block 10 to (re)build, out of the firmware's reach behind block 9's spacer.
+        if c9['open']:
+            program(cur, c9['cur'] + 23, b'\xd8')
+            step('fhp', 9)
+            slot = c9['next']
+        else:
+            slot = c9['cur'] if c9['cur'] is not None else c9['next']
+        if slot + 48 > GATE:
+            raise Refused('no room left for a spacer header in block 9')
+        put(10, spacer_header(GATE, FILES) + b'\xff' * (BLOCK - 24))
+        put(11, new11)
+        open_at(slot, GATE)
     return steps
 
 
@@ -230,40 +299,67 @@ def prove(chip, steps, goods):
 
 
 def goods_for(chip, release):
-    """What a boot may see along the way: the chip as it is, the result, and its files before our
-    spacer (stock firmware's)."""
+    """What a boot may see along the way: the chip as it is, the result, and the stock files
+    alone. Returns (goods, after)."""
     after = bytearray(chip)
     for op, blk, data in plan(chip, release):
         after[blk * BLOCK:(blk + 1) * BLOCK] = data
-    ok, files, ev = walk(chip)
-    first = next((o for o, k in ev if bytes(chip[o:o + 16]) == SPACER), ev[-1][0])
-    stock = bytes(chip[:first]) + b'\xff' * (FV_END - first) + bytes(chip[FV_END:])
+    s0 = first_slot(chip)
+    stock = bytes(chip[:s0]) + b'\xff' * (FV_END - s0) + bytes(chip[FV_END:])
     return [bytes(chip), bytes(after), stock], bytes(after)
 
 
+def check_after(after, release):
+    st = state(after)
+    if not st['files_reached'] or bytes(after[FILES:FILES + BLOCK]) != release_files(release):
+        raise Refused('the plan does not end with the firmware running the release\'s files')
+
+
+def full(chip, release):
+    """plan + prove + check: (steps, states proven, after). Raises Refused."""
+    steps = plan(chip, release)
+    goods, after = goods_for(chip, release)
+    n = prove(chip, steps, goods)
+    check_after(after, release)
+    return steps, n, after
+
+
+def parts(steps):
+    """The plan as the screen shows it: consecutive steps on one block are one part."""
+    out = []
+    for op, blk, data in steps:
+        if not out or out[-1][0] != blk:
+            out.append([blk, 0])
+        out[-1][1] += 1
+    return out
+
+
 def main(argv):
-    if len(argv) == 3 and argv[1] == 'show':
-        img = open(argv[2], 'rb').read()
-        ok, files, ev = walk(img)
-        for o, k in ev:
-            g = str(uuid.UUID(bytes_le=bytes(img[o:o + 16]))) if k != 'end' else ''
-            print('0x%06x %-7s %s %s' % (o, k, g, 'state %02x size 0x%x' % (img[o + 23], size(img, o)) if k != 'end' else ''))
-        print('file list %s; %s' % ('ok' if ok else 'REJECTED by the DXE core', state(img) if ok else ''))
-        return 0
-    if len(argv) != 5 or argv[1] != 'plan':
-        print(__doc__.split('\n\n')[1])
-        return 1
-    chip, release = open(argv[2], 'rb').read(), open(argv[3], 'rb').read()
     try:
+        if len(argv) == 3 and argv[1] == 'show':
+            img = open(argv[2], 'rb').read()
+            ok, files, ev = walk(img)
+            for o, k in ev:
+                g = str(uuid.UUID(bytes_le=bytes(img[o:o + 16]))) if k != 'end' else ''
+                print('0x%06x %-7s %s %s' % (o, k, g, 'state %02x size 0x%x' % (img[o + 23], size(img, o)) if k != 'end' else ''))
+            print('file list %s' % ('ok' if ok else 'REJECTED by the DXE core'))
+            if ok:
+                print(state(img))
+            return 0
+        if len(argv) == 4 and argv[1] == 'canon':
+            c, st = canon(open(argv[2], 'rb').read())
+            open(argv[3], 'wb').write(c)
+            reached = st['files_reached'] or st['old_layout']
+            print('spacer=0x%x files=%s layout=%s' % (st['s0'], 'reached' if reached else 'unreached',
+                                                     'old' if st['old_layout'] else 'block11'))
+            return 0
+        if len(argv) != 5 or argv[1] != 'plan':
+            print(__doc__.split('\n\n')[1])
+            return 1
+        chip, release = open(argv[2], 'rb').read(), open(argv[3], 'rb').read()
         if len(chip) != 1 << 20 or len(release) != 1 << 20:
             raise Refused('chip and release must be 1 MB')
-        steps = plan(chip, release)
-        goods, after = goods_for(chip, release)
-        n = prove(chip, steps, goods)
-        ok, files, _ = walk(after)
-        if bytes(after[BLOCK10:BLOCK10 + BLOCK]) != release[BLOCK10:BLOCK10 + BLOCK] or \
-                [f for f in files if f >= BLOCK10] != [f for f in walk(release)[1] if f >= BLOCK10]:
-            raise Refused('the plan does not end with the firmware running the release\'s block 10')
+        steps, n, after = full(chip, release)
     except Refused as e:
         print('fwplan: refused: %s' % e)
         return 1
@@ -273,7 +369,8 @@ def main(argv):
             name = 'step%d.bin' % i
             open(os.path.join(argv[4], name), 'wb').write(data)
             f.write('%s %d %s\n' % (op, blk, name))
-    print('fwplan: %d step%s, %d states proven' % (len(steps), '' if len(steps) == 1 else 's', n))
+    print('fwplan: %d step%s (%s), %d states proven' % (len(steps), '' if len(steps) == 1 else 's',
+                                                       ' '.join(str(b) for b, k in parts(steps)) or 'nothing to do', n))
     return 0
 
 

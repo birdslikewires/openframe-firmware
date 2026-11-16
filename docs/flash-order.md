@@ -58,38 +58,55 @@ so its header can always go in this way; the marker's and the driver's can't.
 at the blank spacer header before it), then the spacer's header State first. No erase at all: the
 stock chip's free space is already FF. Passes on the O2 image and all four OF2 images.
 
-**Updating: the spacer as a gate.** The spacer's body is ~59 KB of FF, so it can be closed and
-opened again many times:
+**Updating: a gate.** A spacer header can be turned into a gate. Clear one bit of its State
+(F8 -> D8, HEADER_INVALID) and the walk skips 24 bytes, into the spacer's own FF data, and stops:
+whatever lies beyond is out of the firmware's reach and can be erased and rewritten at any moment
+without risk. A new header in the next 24 bytes, State first, opens the way again.
 
-1. Close: the open spacer header's State F8 -> D8 (one bit: HEADER_INVALID). The walk now skips 24
-   bytes, into the spacer's own FF data, and stops: block 10 is out of reach, the chip boots like
-   stock firmware.
-2. Erase block 10 and write the release's block 10 whole (out of reach, so safe at any moment).
-3. Open: a new spacer header 24 bytes after the closed one, reaching 0xA0000, State first.
+**The layout from 26.11.31** (Andy's idea, 2026-11-16), so that block 9 stays as it is:
 
-Passes on the OF1 from 26.11.30 and on every OF2 image, twice in a row (the second from the first's
-result). Each update uses 24 bytes of the spacer: about 2,400 updates. Block 9 is only ever
-programmed (bits cleared), never erased; nothing the firmware reads is ever erased.
+| Block | Holds | Changes |
+|---|---|---|
+| 9 | the end of the stock files, then our spacer (FF) to 0xA0000 | 24 bytes at install; never again (bar below) |
+| 10 | spacer headers only: closed ones, then the open one reaching 0xB0000 | 24 bytes per update, never erased |
+| 11 | our files: the version marker and BlwPlatformDxe | erased and rewritten each update, only while out of reach |
 
-What it changes: block 9 differs by 24 bytes per update, so a chip is no longer identified by
-block 9's hash alone (the closed headers have to be read past); and between steps 1 and 3 the chip
-boots like stock firmware, so an OS that relies on our driver (direct boot from the internal memory
-needs our MMC fix) must be in its fallback mode first. That also applies to today's order.
+- **An update** closes block 10's open header, writes block 11, and opens the next header in block
+  10. Block 9 never changes; block 11 is the release's byte for byte. About 2,700 updates.
+- **An install, or block 10 to rebuild** (stock firmware; the 26.11.29/30 layout with our files in
+  block 10; block 10 full; junk in it): the same one level up. Close block 9's open spacer header
+  if there is one, write block 10 (its first header, complete) and block 11 out of reach, then open
+  the next header in block 9. On stock firmware nothing is erased at all; the chip's free space is
+  already FF. A 26.11.30 unit does this once, using 24 bytes of block 9.
+
+Every state of every such plan passes, on the OF1 and all four OF2 images, chained (stock ->
+release -> next -> back; 26.11.30 -> release -> next). Block 11's files are the same for both
+boards but for the marker's text. Nothing the firmware reads is ever erased.
+
+Between closing a gate and opening the next, the chip boots like stock firmware, so an OS that
+relies on our driver (direct boot from the internal memory needs our MMC fix) must be in its
+fallback mode first. That applies to today's order too.
 
 ## The planner
 
 `tools/fwplan.py` (pure Python, runs on the unit) reads the chip as the walkers do, finds where it
-stands (stock, our release with its open spacer, or an earlier run cut off anywhere along the
-way), plans the gate order above as whole-block `fh`/`fhp` writes, and proves every state of the
+stands (stock, the old layout, ours, or an earlier run cut off anywhere along the way), plans
+the order above as whole-block `fh`/`fhp` writes, and proves every state of the
 plan with the walkers' rules before anything is written; it refuses rather than write anything it
-can't prove. `tools/test_fwplan.py` cuts its plans off at 557 points (between and inside steps,
+can't prove. `tools/test_fwplan.py` cuts its plans off at hundreds of points (between and inside steps,
 part-programmed bytes, part-erased blocks as garbage) and checks each re-run finishes the job;
 `emu_fvwalk.py` runs its plans on the real PEI and DXE code. Removing the State-first step or
-the gate's close makes its own proof refuse. Not yet used by `of-firmware-update`.
+the gate's close makes its own proof refuse. `of-firmware-update` (from v26.11.5) runs it on every
+unit and executes its plan step by step, each block read back twice; a re-run after a cut or a
+failed write plans again from what is on the chip. Its fake-chip tests
+(`tools/test_of_firmware_update.sh`) cut it off after every step from stock, the old layout and
+the new, and all re-runs finish.
 
-## Still to confirm on hardware
+## Confirmed on hardware
 
-One physical assumption isn't in the emulation: that the SST 49LF008A takes a second program of a
-byte already programmed (FE -> FA -> F8, F8 -> D8), clearing just the new bits. It can be checked
-with no risk in a part of block 11 or 12 that the walk never reaches (it stops at the first blank
-header after the driver, 0xA2B78 on 26.11.30).
+The one physical assumption the emulation can't cover: that the SST 49LF008A takes a second
+program of a byte already programmed, clearing just the new bits. Tested 2026-11-16 on the unknown
+Joggler (26.11.30) in block 12, which its walk never reaches (it ends at 0xA2B78, checked with the
+real walkers on that chip's dump): the gate's own sequence FE -> FA -> F8 -> D8, and one byte
+cleared a bit at a time over eight programs, each read back right with every other block
+unchanged. Block 12 was then erased; the chip read back byte for byte as before (a5261ecb...).

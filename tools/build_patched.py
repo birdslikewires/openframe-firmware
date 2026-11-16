@@ -19,7 +19,9 @@ Changes, each optional (the shell fix unless --no-shell):
      --block10 (the layout from 26.11.29) a RAW spacer of FF bytes first fills the
      rest of block 9, so the marker starts block 10 at 0xA0000; build_ucode_driver.py
      then puts BlwPlatformDxe after it. This builds a release from the stock O2 image
-     with no earlier release needed: stock O2 + the bird (--logo, --pos 274,199) +
+     with no earlier release needed (--block11, from 26.11.31: a second spacer header
+     fills block 10, the marker starts block 11 at 0xB0000, and block 10 is where updates
+     step, see fwplan.py): stock O2 + the bird (--logo, --pos 274,199) +
      --block10 + the release's marker text, then build_ucode_driver.py, reproduces
      26.11.29 byte for byte.
 
@@ -44,6 +46,7 @@ UCODE_GUID = '17088572-377f-44ef-8f4e-b09fff46a070'
 MARKER_GUID = 'd1728e0b-d49f-480e-a48d-d0b4ec5768f4'   # BirdsLikeWires version marker
 SPACER_GUID = '8e9d1954-ef62-4aa4-b8e5-88602b186161'   # BirdsLikeWires spacer: fills block 9 after the GOP
 BLOCK10 = 0xA0000                 # from 26.11.29 the marker and BlwPlatformDxe start here
+BLOCK11 = 0xB0000                 # from 26.11.31 they start here; block 10 holds spacer headers
 SHELL_PATCHES = [(0x1856, b'\x6a\x32', b'\x6a\x00'), (0x187E, b'\x6a\x32', b'\x6a\x00')]
 ALIAS_HELP = (0x235E2, 0x2404C)   # ALIAS help text, UTF-16, inside the shell PE
 SPLASH_OFF = 0x1696               # first pixel byte, right after `$ssd`
@@ -277,6 +280,8 @@ def main():
     ap.add_argument('--microcode', help='Intel microcode file containing a newer entry for this CPU')
     ap.add_argument('--version', help='version marker text')
     ap.add_argument('--block10', action='store_true', help='spacer to 0xA0000, then the marker there (needs --version)')
+    ap.add_argument('--block11', action='store_true', help='spacer to 0xA0000, a spacer header there reaching 0xB0000, '
+                    'then the marker at 0xB0000: the layout from 26.11.31 (fwplan.py; needs --version)')
     ap.add_argument('--core-pe', help='also write the DXE core PE32 here (for build_ucode_driver.py --check-with-core)')
     ap.add_argument('--no-shell', action='store_true', help="leave the shell as it is (an OpenFrame 2's: another build)")
     ap.add_argument('--allow-large-splash', action='store_true', help='allow a splash over 16,800 px, the largest proven on this IEGD build (Verizon OF1, 300x56)')
@@ -304,12 +309,20 @@ def main():
         pos = tuple(int(v) for v in a.pos.split(',')) if a.pos else None
         later = [f for f in files if f[0] > g_off]
         notes.append(patch_gop(img, g_off, g_size, a.logo, pos, fv_end, later, a.allow_large_splash))
-    if a.block10 and not a.version:
-        fail('--block10 needs --version')
+    if (a.block10 or a.block11) and not a.version:
+        fail('--block10 and --block11 need --version')
     if a.version:
         new_files, _ = fv_files(img)
         last_off, _, last_size = new_files[-1]
-        if a.block10:
+        if a.block11:
+            if last_off + last_size > BLOCK10:
+                fail('--block11: the last file ends past 0x%x' % BLOCK10)
+            notes.append(add_spacer(img, last_off + last_size, BLOCK10))
+            notes.append(add_spacer(img, BLOCK10, BLOCK11))
+            notes.append(add_marker(img, BLOCK11, fv_end, a.version))
+            if fv_files(img)[0][-1][0] != BLOCK11:
+                fail('--block11: the marker is not at 0x%x' % BLOCK11)
+        elif a.block10:
             if last_off + last_size > BLOCK10:
                 fail('--block10: the last file ends past 0x%x' % BLOCK10)
             notes.append(add_spacer(img, last_off + last_size, BLOCK10))
