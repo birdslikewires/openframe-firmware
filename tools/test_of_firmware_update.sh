@@ -41,7 +41,9 @@ ls $DUMPS/of1-firmware-*.bin >/dev/null 2>&1 && echo "ok   op1: dump saved" || {
 start $D/o2-stock.bin; printf 'X' | dd of=$F bs=1 seek=$((7 * 65536 + 4000)) conv=notrunc status=none
 run "stock with an unknown block 7: refused" 3 same
 start $D/o2-stock.bin; head -c 100 /dev/urandom | dd of=$F bs=1 seek=$((10 * 65536 + 500)) conv=notrunc status=none
-run "stock with junk in block 10: refused" 3 same
+run "stock with junk in block 10 (an earlier first write, cut off): rewritten" 0 target
+start $D/o2-stock.bin; head -c 100 /dev/urandom | dd of=$F bs=1 seek=$((10 * 65536 + 500)) conv=notrunc status=none
+run "  ... and it never verifies: put back blank, as stock has it, safe" 1 $(b $D/o2-stock.bin 1 15) FLASH_TEST_FAULT_BLOCK=10 FLASH_TEST_FAULT=3
 
 ARGS=--check; start $D/o2-stock.bin; run "--check on stock: update needed" 5 same
 start $OF_FW_IMAGE; run "--check on $V: up to date" 0 same; ARGS=
@@ -68,6 +70,46 @@ cp $OF_FW_IMAGE $(dirname $F)/img.bin; printf 'X' | dd of=$(dirname $F)/img.bin 
 start $D/o2-stock.bin; run "an image whose blocks aren't in the manifest: refused" 1 same OF_FW_IMAGE=$(dirname $F)/img.bin
 md5sum $OF_FW_IMAGE | sed 's/^0/1/;t;s/^./0/' > $(dirname $F)/img2.bin.md5; cp $OF_FW_IMAGE $(dirname $F)/img2.bin   # (first digit changed)
 start $D/o2-stock.bin; run "an image that doesn't match its .md5: refused" 1 same OF_FW_IMAGE=$(dirname $F)/img2.bin
+
+# Later releases of the block-10 layout, from this one: the next (its marker's version one on)
+# with block 9 changed too, and another with block 7 changed. Block 10 goes headers last around
+# the other block: its bodies (headers blank), the other block, the driver's header, the marker's.
+NV=$(echo $V | awk -F. '{ printf "%s.%s.%d", $1, $2, $3 + 1 }')
+mknext() {	# <out> <the other block to change>
+	cp $OF_FW_IMAGE $1
+	python3 -I - "$1" "$2" "$V" "$NV" <<-'EOF'
+	import sys
+	p, blk, v, nv = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+	d = bytearray(open(p, 'rb').read())
+	old, new = [('BirdsLikeWires OpenFrame EFI %s (OF1)' % x).encode() for x in (v, nv)]
+	if len(old) != len(new) or d.count(old) != 1: sys.exit('no next release from this one')
+	i = d.index(old); d[i:i + len(new)] = new
+	o = blk * 65536 + 4096; d[o:o + 16] = bytes(x ^ 0x5a for x in d[o:o + 16])
+	open(p, 'wb').write(d)
+	EOF
+}
+X=$(dirname $F)
+if mknext $X/next9.bin 9 && mknext $X/next7.bin 7; then
+	for k in 9 7; do
+		python3 -I $D/mkmanifest.py $X/next$k.txt $V=$OF_FW_IMAGE $NV=$X/next$k.bin >/dev/null
+		NX="OF_FW_IMAGE=$X/next$k.bin OF_FW_MANIFEST=$X/next$k.txt"
+		WANT=$(b $X/next$k.bin 1 15)
+		start $OF_FW_IMAGE; run "$V -> $NV with block $k changed" 0 $WANT $NX
+		# In order: bodies, block k, driver header, marker header.
+		ORDERSEEN=$(grep -oE 'block 10: (bodies|driver header|marker header) written|block [0-9]+ written and verified' /tmp/oftest.out | sed -E 's/block 10: //; s/ written.*//; s/^block ([0-9]+)$/\1/' | paste -sd, -)
+		if [ "$ORDERSEEN" = "bodies,$k,driver header,marker header" ]; then echo "ok     ... in order: $ORDERSEEN"
+		else echo "FAIL   ... in order: $ORDERSEEN (want bodies,$k,driver header,marker header)"; FAILS=$((FAILS + 1)); fi
+		for s in 10.1 $k 10.2; do
+			start $OF_FW_IMAGE; run "$V -> $NV (block $k), power cut after step $s" 9 any $NX FLASH_TEST_STOP=$s
+			run "  ... re-run completes" 0 $WANT $NX
+		done
+		start $OF_FW_IMAGE; run "$V -> $NV (block $k), cut after the bodies" 9 any $NX FLASH_TEST_STOP=10.1
+		head -c 3000 /dev/urandom | dd of=$F bs=1 seek=$((k * 65536 + 200)) conv=notrunc status=none
+		run "  ... and block $k torn too: re-run rewrites it" 0 $WANT $NX
+	done
+else
+	echo "note: no next release could be made from $V (its version's length would change): skipped"
+fi
 
 # Stop signals part way through (a shutdown, a Ctrl-C, a dropped session): once writing, the
 # updater (and its writes) ignore them and finish. A second a block, so they land mid-update.

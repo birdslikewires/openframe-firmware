@@ -1,6 +1,6 @@
 #!/bin/bash
 
-## of-firmware-update v26.11.3 (16th November 2026)
+## of-firmware-update v26.11.4 (16th November 2026)
 ##  Brings an OpenFrame 1's firmware to the BirdsLikeWires release in $IMG, from any firmware listed
 ##  in $MANIFEST (BirdsLikeWires releases from 26.11.29 on, and the stock firmware we know: O2,
 ##  Verizon, Telstra). Firmware it doesn't recognise is never written: a dump is saved.
@@ -18,19 +18,24 @@
 ##
 ##  How it writes, so that a power cut leaves the least at risk:
 ##    - Never block 0 (NVRAM) or the boot block (14, 15).
-##    - Block 10 (the version marker and BlwPlatformDxe) first. While block 9 is not yet the
-##      release's, the firmware's file list ends in block 9 and never reaches block 10, so the chip
-##      still boots as it was; if block 10 won't verify, it is put back to blank before a reboot is
-##      called safe. Once block 9 is the release's (from 26.11.29 on), block 10 is written headers
-##      last: erase and write both files' bodies with both 24-byte headers blank (the chip then
-##      boots like stock firmware), then the driver's header, then the marker's header, the last
-##      two through /dev/fhp (program without erasing).
+##    - Block 10 (the version marker and BlwPlatformDxe) first. While block 9 is not of the block-10
+##      layout (stock firmware), the firmware's file list ends in block 9 and never reaches block
+##      10, so the chip still boots as it was; if block 10 won't verify, it is put back to blank
+##      (as stock firmware has it) before a reboot is called safe. Anything already in block 10 on
+##      such a chip is an earlier first write, cut off: it's rewritten.
 ##    - Then any other block that differs, in order. From stock firmware that is blocks 5-9: a
 ##      power cut while one of those is being written can leave a unit that won't start. It happens
-##      once per unit; every later update writes block 10 only.
+##      once per unit.
+##    - Once the chip's block 9 is of the block-10 layout (any of our releases from 26.11.29 on),
+##      its firmware reads block 10, which is then written headers last, around any other block
+##      that differs: both files' bodies with both 24-byte headers blank (the chip boots like stock
+##      firmware, without our driver), then the other blocks, then the driver's header, then the
+##      marker's, the last two through /dev/fhp (program without erasing). The new driver never runs
+##      with the old blocks. Most updates write block 10 only.
 ##
-##  A chip part way through an update (block 10 already the release's) has its other differing
-##  blocks rewritten even if they match nothing in the manifest: they are torn writes.
+##  A chip part way through an update (block 10 already the release's, or part way there headers
+##  last) has its other differing blocks rewritten even if they match nothing in the manifest: they
+##  are torn writes.
 ##
 ##  Once the first write starts, nothing but finishing stops it: hangup, interrupt and terminate
 ##  are ignored from then on (by the writes too), so a shutdown, a Ctrl-C or a dropped SSH session
@@ -120,21 +125,48 @@ unknown() {
 	say "this firmware is not one we know ($*), so it is left alone. Nothing was written."
 	rm -rf "$W"; exit 3
 }
-OURS9=0; [ "${C[9]}" = "${T[9]}" ] && OURS9=1          # block-10 layout: block 10 is ours, whatever it holds
-UNDERWAY=0; [ "${C[10]}" = "${T[10]}" ] && UNDERWAY=1   # block 10 goes first: an update of ours was under way
+# The release's block 10: its version marker and BlwPlatformDxe, two files. Written headers last
+# it passes through two states of its own: both bodies with both 24-byte headers blank (T10B: the
+# firmware's file list ends at the first blank header, so the chip boots like stock firmware),
+# then with the driver's header too (T10D). (An image from before the block-10 layout has neither.)
+blk "$IMG" 10 1 > "$W/b10.bin"
+T10B=""; T10D=""
+MSIZE=$(u24 "$W/b10.bin" 20); DRV=$(( (MSIZE + 7) & ~7 ))
+if [ "$MSIZE" -ge 24 ] && [ $DRV -lt 65512 ] && [ "$(u24 "$W/b10.bin" $((DRV + 20)))" -ge 24 ]; then
+	cp "$W/b10.bin" "$W/bodies.bin"; blank "$W/bodies.bin" 0 24; blank "$W/bodies.bin" $DRV 24
+	cp "$W/b10.bin" "$W/drvhdr.bin"; blank "$W/drvhdr.bin" 0 24
+	T10B=$(m "$W/bodies.bin"); T10D=$(m "$W/drvhdr.bin")
+fi
+# The chip's firmware reads block 10 (its file list reaches it) when its block 9 is a release of
+# the block-10 layout: the target's, or any of ours from 26.11.29 on (the manifest labels those
+# by version; stock firmware's block 9 is labelled by carrier, and never reaches block 10).
+LAYOUT10=0
+{ [ "${C[9]}" = "${T[9]}" ] || label 9 "${C[9]}" | tr ',' '\n' | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+'; } && LAYOUT10=1
+# An update of ours was under way: block 10 goes first, so it's the release's already, or (headers
+# last) part way there.
+UNDERWAY=0
+case "${C[10]}" in "${T[10]}"|"${T10B:-none}"|"${T10D:-none}") UNDERWAY=1 ;; esac
 DESC=""
 for n in $DIFF; do
 	[ $n -ge 14 ] && unknown "its boot block (block $n) differs from ours"
-	if [ $n = 10 ] && [ $OURS9 = 1 ]; then DESC="$DESC 10:ours"; continue; fi
+	if [ $n = 10 ] && { [ $LAYOUT10 = 1 ] || [ $UNDERWAY = 1 ]; }; then DESC="$DESC 10:ours"; continue; fi
 	if [ "${C[$n]}" = $BLANK ] && known $n "${C[$n]}"; then DESC="$DESC $n:blank"
 	elif known $n "${C[$n]}"; then DESC="$DESC $n:$(label $n "${C[$n]}" | cut -d, -f1)$(label $n "${C[$n]}" | grep -q , && echo +)"
 	elif [ $UNDERWAY = 1 ]; then DESC="$DESC $n:torn"
+	# Block 10 on firmware that never reads it (stock firmware has it blank): whatever is there is
+	# an earlier update's first write, cut off. The other blocks must still be ones we know.
+	elif [ $n = 10 ]; then DESC="$DESC 10:torn"
 	else unknown "block $n matches no release or stock firmware we have"; fi
 done
 ORDER=""; for n in $DIFF; do [ $n = 10 ] && ORDER="10"; done
 for n in $DIFF; do [ $n = 10 ] || ORDER="$ORDER $n"; done
 ORDER=$(echo $ORDER)
-HDRLAST=0; case " $ORDER " in *" 10 "*) [ $OURS9 = 1 ] && HDRLAST=1 ;; esac
+# Block 10 headers last whenever the chip's firmware reads it, or it's part way there already.
+HDRLAST=0
+case " $ORDER " in *" 10 "*)
+	{ [ $LAYOUT10 = 1 ] || [ "${C[10]}" = "${T10B:-none}" ] || [ "${C[10]}" = "${T10D:-none}" ]; } && HDRLAST=1 ;;
+esac
+[ $HDRLAST = 1 ] && [ -z "$T10B" ] && refuse "block 10 of $IMG is not marker + driver"
 RISKY=""; for n in $ORDER; do [ $n != 10 ] && RISKY="$RISKY $n"; done
 say "firmware now: blocks that differ from $NEW:$DESC"
 say "plan: write block$( [ $(echo $ORDER | wc -w) -gt 1 ] && echo s) $ORDER$( [ $HDRLAST = 1 ] && echo ' (block 10 headers last)')"
@@ -196,42 +228,63 @@ writeblock() {
 }
 
 for n in $ORDER; do blk "$IMG" $n 1 > "$W/b$n.bin"; done
+OTHERS=""; for n in $ORDER; do [ $n = 10 ] || OTHERS="$OTHERS $n"; done
+pause() { [ $TEST = 1 ] && [ -n "${FLASH_TEST_PAUSE:-}" ] && sleep "$FLASH_TEST_PAUSE"; return 0; }
+# writeother <n>: a block other than 10, erased and programmed whole.
+writeother() {
+	writeblock $1 "$W/b$1.bin" ${T[$1]} || failed "block $1 does not verify after $TRIES tries"
+	say "block $1 written and verified"
+	teststop $1; pause
+}
 # From the first write on, only finishing stops this (see the top).
 trap '' HUP INT TERM
-for n in $ORDER; do
-	if [ $n = 10 ] && [ $HDRLAST = 1 ]; then
-		MSIZE=$(u24 "$W/b10.bin" 20); DRV=$(( (MSIZE + 7) & ~7 ))
-		[ "$MSIZE" -ge 24 ] && [ $DRV -lt 65512 ] && [ "$(u24 "$W/b10.bin" $((DRV + 20)))" -ge 24 ] || refuse "block 10 of $IMG is not marker + driver"
-		cp "$W/b10.bin" "$W/bodies.bin"; blank "$W/bodies.bin" 0 24; blank "$W/bodies.bin" $DRV 24
-		cp "$W/b10.bin" "$W/drvhdr.bin"; blank "$W/drvhdr.bin" 0 24
-		writeblock 10 "$W/bodies.bin" $(m "$W/bodies.bin") || failed "block 10 (bodies) does not verify after $TRIES tries"
+
+if [ $HDRLAST = 1 ]; then
+	# Headers last, around the other blocks: block 10's bodies with both headers blank (the chip
+	# boots like stock firmware, without our driver), then the other blocks, then the driver's
+	# header, then the marker's (the last two through /dev/fhp, programming without erasing). So
+	# the new driver never runs with the old blocks, and a cut at any point leaves either a chip
+	# without our driver or one part way through an update the next run carries on.
+	if [ "${C[10]}" = "$T10B" ] || { [ "${C[10]}" = "$T10D" ] && [ -z "$OTHERS" ]; }; then
+		say "block 10: bodies written already (headers blank)"
+		STATE10=${C[10]}
+	else
+		writeblock 10 "$W/bodies.bin" $T10B || failed "block 10 (bodies) does not verify after $TRIES tries"
 		say "block 10: bodies written, headers blank (the chip now boots like stock firmware)"
-		teststop 10.1
-		{ put fhp 10 "$W/drvhdr.bin" && verify 10 $(m "$W/drvhdr.bin"); } || failed "block 10's driver header does not verify"
+		STATE10=$T10B
+		teststop 10.1; pause
+	fi
+	for n in $OTHERS; do writeother $n; done
+	if [ "$STATE10" = "$T10D" ]; then
+		say "block 10: driver header written already"
+	else
+		{ put fhp 10 "$W/drvhdr.bin" && verify 10 $T10D; } || failed "block 10's driver header does not verify"
 		say "block 10: driver header written"
 		teststop 10.2
-		{ put fhp 10 "$W/b10.bin" && verify 10 ${T[10]}; } || failed "block 10's marker header does not verify"
-		say "block 10: marker header written"
-	elif [ $n = 10 ]; then
-		if ! writeblock 10 "$W/b10.bin" ${T[10]}; then
-			# Block 9 isn't ours yet, so the file list ends there: blank, block 10 is what this chip
-			# booted with. Only then is a reboot known to be safe.
-			if [ "${C[10]}" = $BLANK ]; then
+	fi
+	{ put fhp 10 "$W/b10.bin" && verify 10 ${T[10]}; } || failed "block 10's marker header does not verify"
+	say "block 10: marker header written"
+	teststop 10; pause
+else
+	for n in $ORDER; do
+		if [ $n = 10 ]; then
+			if ! writeblock 10 "$W/b10.bin" ${T[10]}; then
+				# The chip's firmware doesn't read block 10 (its block 9 isn't of the block-10
+				# layout), so blank, as stock firmware has it, is as safe as anything: put back
+				# to blank, block 9 unchanged, a reboot is known to be safe.
 				say "block 10 does not verify: putting it back to blank"
 				head -c 65536 /dev/zero | tr '\0' '\377' > "$W/blank.bin"
 				FLASH_TEST_FAULT=${FLASH_TEST_FAULT_BLANK:-0} writeblock 10 "$W/blank.bin" $BLANK && [ "$(bm "$W/r1.bin" 9)" = "${C[9]}" ] &&
-					refuse "block 10 could not be written; it is blank again, as before"
+					refuse "block 10 could not be written; it is blank, as $([ "${C[10]}" = $BLANK ] && echo before || echo "stock firmware has it")"
+				failed "block 10 does not verify after $TRIES tries"
 			fi
-			failed "block 10 does not verify after $TRIES tries"
+			say "block 10 written and verified"
+			teststop 10; pause
+		else
+			writeother $n
 		fi
-		say "block 10 written and verified"
-	else
-		writeblock $n "$W/b$n.bin" ${T[$n]} || failed "block $n does not verify after $TRIES tries"
-		say "block $n written and verified"
-	fi
-	teststop $n
-	[ $TEST = 1 ] && [ -n "${FLASH_TEST_PAUSE:-}" ] && sleep "$FLASH_TEST_PAUSE"
-done
+	done
+fi
 
 for i in 1 2; do readchip "$W/post$i.bin"; done
 [ "$(m "$W/post1.bin")" = "$(m "$W/post2.bin")" ] || failed "two reads of the chip differ after the update"
