@@ -39,7 +39,9 @@ STEPS=("Bring the firmware up to date" "Restart on the new firmware")
 # Rows: the band (two deep, its title on the second), two blank lines, the intro, the
 # steps (four rows each: the step, its working line, the blocks, a blank), the line and
 # this unit's details at the bottom.
-BAND_ROWS=2; BAND_TITLE=2; R_INTRO=5; R_STEPS=9; R_SEP=24; R_FOOT=29
+# The line two rows above this unit's details: OpenFrame Flash's screen has its overall
+# bar there, under its line, and with nothing between them the line looked high.
+BAND_ROWS=2; BAND_TITLE=2; R_INTRO=5; R_STEPS=9; R_SEP=27; R_FOOT=29
 # Set once the firmware is written: the blocks line stays, all ticked, under step 1.
 WRITTEN=""
 # Seconds for each part of the update (reading the chip, then each block written and
