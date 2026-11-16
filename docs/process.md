@@ -6,6 +6,17 @@ openframe-linux stick, reachable over SSH (`tools/of.sh`), with a smart plug for
 
 ## The rules
 
+- **If a change might stop a unit booting, say so before it is written to any chip, and wait for
+  the owner's OK.** That goes for a test unit as much as a user's, for a test write or a
+  hand-written block as much as a release, and for any chip state whose boot is in doubt: a
+  firmware change, a part-written state, or the OS losing something the firmware gave it (direct
+  boot from the internal memory needs our MMC fix, so stock-like firmware hangs there). Answer
+  questions about what the firmware does with the emulator first (step 3: its own code, run under
+  Unicorn); hardware confirms an answer, last, with the rescue (a spare chip, someone free to swap
+  it) agreed beforehand. On 2026-11-16 two test units needed their chips swapped because this
+  wasn't done: one put on stock-like firmware with a direct MMC boot, one given a part-written FFS
+  header to see whether the firmware would cope. It didn't: **a part-written FFS header stops the
+  firmware booting**, so writing a header last is not enough by itself.
 - **Never write NVRAM (block 0) or the boot block (blocks 14-15) with a flash.** Releases change
   block 10 only (block 9 up to 26.11.28; 26.11.29 was the one move, blocks 9 and 10), and only
   in the order step 6 describes: a power cut at any point must leave a chip that boots. `tools/repair-block0.sh` exists for one emergency and needs a known-good image.
