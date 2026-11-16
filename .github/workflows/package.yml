@@ -17,7 +17,6 @@ on:
       - 'tools/of-firmware-update'
       - 'tools/firmware-manifest.txt'
       - 'tools/test_of_firmware_update.sh'
-      - 'tools/test_of_firmware_boot.sh'
       - 'package/**'
       - 'releases/MD5SUMS'
       - '.github/workflows/package.yml'
@@ -80,6 +79,8 @@ jobs:
       # The boot-time update (of-firmware-boot) against a stand-in updater: what it does after
       # each try, never letting the boot carry on once one hasn't verified, and the updater's
       # dumps kept from filling /tmp.
+      # (Not a trigger: it isn't in the package's revision, so a change to it alone would
+      # rebuild the version units already have.)
       - name: Test of-firmware-boot
         run: bash tools/test_of_firmware_boot.sh
 
