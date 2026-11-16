@@ -1,6 +1,6 @@
 #!/bin/bash
 
-## of-firmware-update v26.11.5 (16th November 2026)
+## of-firmware-update v26.11.6 (16th November 2026)
 ##  Puts the BirdsLikeWires release in $IMG on an OpenFrame 1's firmware chip, from any firmware
 ##  listed in $MANIFEST (stock O2, Verizon, Telstra; our releases), in an order where a power cut
 ##  at any moment leaves a chip that starts. Firmware it doesn't recognise is never written: a
@@ -30,7 +30,15 @@
 ##    - From stock firmware, or a release of the old layout (26.11.29/30, our files in block 10),
 ##      the same happens one level up, in block 9: block 10 and 11 are written out of reach, then
 ##      a signpost in block 9 opens the way. From stock nothing is erased at all.
-##    - Between closing and opening, the chip starts like stock firmware (without our driver).
+##    - Between closing and opening, the chip starts like stock firmware (without our driver,
+##      so without its fix for the internal memory's driver). A system on the internal memory
+##      (MMC) would hang if its boot.nsh starts the kernel directly, so before the first write
+##      this sets $WRITING and has of-bootnsh (openframe-scripts, v26.11.15 on) write boot.nsh
+##      the way that starts on either firmware: BlwMmcFix.efi, then the kernel if it worked
+##      (stock-like firmware), else GRUB (ours). $WRITING outlives a power cut, so of-bootnsh
+##      keeps those lines on the boot after one; it goes once the chip is verified, and
+##      boot.nsh is written for the firmware again. A unit started from a USB stick needs none
+##      of this.
 ##    - Before anything is written, fwplan.py walks every state the chip will pass through, with
 ##      the firmware's own rules for its file list, including a byte cut off part way through
 ##      programming: if any state wouldn't start, nothing is written. A run cut off anywhere is
@@ -42,18 +50,24 @@
 ##  of-firmware.service and of-flash.service wait for it however long it takes. And a run cut off
 ##  anywhere still leaves a chip that starts.)
 ##
-##  Settings (environment): OF_FW_IMAGE, OF_FW_MANIFEST, OF_FW_DUMPDIR, OF_FW_PLAN; FH_KO=/path/to/
+##  Settings (environment): OF_FW_IMAGE, OF_FW_MANIFEST, OF_FW_DUMPDIR, OF_FW_PLAN, OF_FW_WRITING,
+##  OF_FW_BOOTNSH (of-bootnsh), OF_FW_BOOT (the boot directory); FH_KO=/path/to/
 ##  fh.ko loads a module that isn't installed. Test mode: FH=/path/to/a/1MB/file works on that file
 ##  (no module, no lock registers, /dev/fhp emulated); FLASH_TEST_FAULT_STEP=n with FLASH_TEST_FAULT=N
 ##  loses step n's write on its first N tries; FLASH_TEST_STOP=n stops (exit 9) right after step n,
 ##  as a power cut would; FLASH_TEST_PAUSE=seconds waits after each part, as a real chip's slower
-##  writes do. None of these can touch a real chip.
+##  writes do; OF_FW_TEST_MMC=1 takes the system to be on the internal memory. None of these
+##  can touch a real chip.
 
 set -u
 IMG=${OF_FW_IMAGE:-/usr/lib/openframe-firmware/of1-blw.bin}
 MANIFEST=${OF_FW_MANIFEST:-/usr/lib/openframe-firmware/manifest.txt}
 DUMPDIR=${OF_FW_DUMPDIR:-/var/lib/openframe-firmware}
 PLAN=${OF_FW_PLAN:-/usr/lib/openframe-firmware/fwplan.py}
+WRITING=${OF_FW_WRITING:-/var/lib/openframe-firmware/writing}
+BOOTNSHTOOL=${OF_FW_BOOTNSH:-/usr/local/sbin/of-bootnsh}
+BOOT=${OF_FW_BOOT:-/boot}
+MMCFIXEFI=${OF_FW_MMCFIX:-/usr/lib/openframe/BlwMmcFix.efi}
 TRIES=3
 CHECK=0
 case "${1:-}" in
@@ -76,6 +90,26 @@ readchip() { dd if="$FH" bs=64k iflag=fullblock status=none of="$1"; }
 label() { awk -v b="$1" -v h="$2" '$1 == b && $2 == h { print $3 }' "$MANIFEST" | head -1; }
 teststop() { [ $TEST = 1 ] && [ "${FLASH_TEST_STOP:-}" = "$1" ] && { say "TEST: stopped after step $1"; exit 9; }; return 0; }
 pause() { [ $TEST = 1 ] && [ -n "${FLASH_TEST_PAUSE:-}" ] && sleep "$FLASH_TEST_PAUSE"; return 0; }
+# The system's boot.nsh, held to the lines that start the internal memory on either firmware
+# while the chip is being written (see the top). Only for a system on the internal memory.
+on_mmc() {
+	if [ $TEST = 1 ]; then [ "${OF_FW_TEST_MMC:-}" = 1 ]; return; fi
+	[[ "$(lsblk -n -o PKNAME "$(findmnt -n -o SOURCE --target "$BOOT" 2>/dev/null)" 2>/dev/null | head -1)" == mmcblk* ]]
+}
+bootnsh_fallback() {
+	mkdir -p "$(dirname "$WRITING")" && touch "$WRITING" && sync || refuse "could not make $WRITING"
+	on_mmc || return 0
+	"$BOOTNSHTOOL" mac >/dev/null 2>&1
+	grep -q 'BlwMmcFix\.efi' "$BOOT/boot.nsh" && grep -q 'grubq' "$BOOT/boot.nsh" ||
+		refuse "boot.nsh did not take the lines that start on stock-like firmware too"
+	say "boot.nsh: starting through BlwMmcFix.efi (or GRUB) until the chip is written"
+}
+bootnsh_restore() {
+	rm -f "$WRITING"; sync
+	on_mmc || return 0
+	"$BOOTNSHTOOL" mac >/dev/null 2>&1 && say "boot.nsh: written for the firmware again" ||
+		say "NOTE: boot.nsh could not be written for the firmware again: of-bootnsh does it at the next start"
+}
 # canon <chip> <out>: fwplan.py's reading of a chip ("spacer=... files=reached|unreached
 # layout=block11|old"), with our spacer headers blanked in <out> so its blocks' md5s can be looked up.
 canon() { python3 -I "$PLAN" canon "$1" "$2"; }
@@ -145,10 +179,14 @@ esac
 if [ -n "$FB" ]; then
 	[ -n "$(label $FB "${R[$FB]}")" ] || unknown "block $FB (our files) matches no release we have"
 	CUR=$(blk "$W/pre1.bin" $FB 1 | grep -aoE "$MARKER_RE" | head -1 | awk '{print $4}')
-	if [ $FB = 11 ] && [ "${R[11]}" = "${T[11]}" ]; then say "the firmware is $NEW: nothing to do"; rm -rf "$W"; exit 0; fi
+	if [ $FB = 11 ] && [ "${R[11]}" = "${T[11]}" ]; then
+		[ -e "$WRITING" ] && [ $CHECK = 0 ] && bootnsh_restore    # an earlier run, cut off after its last write
+		say "the firmware is $NEW: nothing to do"; rm -rf "$W"; exit 0
+	fi
 fi
 # Never go backwards: a chip whose own marker says it is newer than this image is left alone.
 if [ -n "$CUR" ] && [ "${CUR%%-*}" != "${NEW%%-*}" ] && [ "$(printf '%s\n%s\n' "${CUR%%-*}" "${NEW%%-*}" | sort -V | tail -1)" = "${CUR%%-*}" ]; then
+	[ -e "$WRITING" ] && [ $CHECK = 0 ] && bootnsh_restore
 	say "the firmware is $CUR, newer than $NEW: left alone"; rm -rf "$W"; exit 0
 fi
 
@@ -196,6 +234,14 @@ print(" ".join(sorted(set(b for b in sys.argv[1:] if m[int(b) * 0x10000 + 2] & 2
 	[ -e "$FHP" ] || refuse "this kernel's fh has no $FHP: update the kernel (6.18.63-5 or later)"
 fi
 
+# Before anything is written, a system on the internal memory needs an of-bootnsh that knows
+# $WRITING, and BlwMmcFix.efi (without it, of-bootnsh would fall back to GRUB for good).
+if on_mmc; then
+	grep -q 'openframe-firmware/writing' "$BOOTNSHTOOL" 2>/dev/null ||
+		refuse "this system is on the internal memory and its of-bootnsh can't hold boot.nsh safe during the update: update openframe-scripts first"
+	[ -f "$MMCFIXEFI" ] || refuse "this system is on the internal memory and $MMCFIXEFI is missing"
+fi
+
 # put fh|fhp <n> <file>: write the 64 KB file to block n (fh: erase and program; fhp: program
 # only). /dev/fhp is emulated in test mode: refused (nothing written) if any bit would need
 # setting, else ANDed in. A test fault loses the write.
@@ -220,6 +266,7 @@ verify() { readchip "$W/r1.bin"; readchip "$W/r2.bin"; [ "$(bm "$W/r1.bin" $1)" 
 
 # From the first write on, only finishing stops this (see the top).
 trap '' HUP INT TERM
+bootnsh_fallback
 
 NSTEPS=$(wc -l < "$W/plan/steps.txt")
 i=0
@@ -251,5 +298,6 @@ for n in 1 2 3 4 5 6 7 8 9 12 13 14 15; do
 	[ "$(bm "$W/post.canon" $n)" = "${C[$n]}" ] || failed "block $n changed more than its spacer headers"
 done
 cmp -s <(head -c 65536 "$W/pre1.bin") <(head -c 65536 "$W/post1.bin") || say "NOTE: block 0 (NVRAM) changed while this ran"
+bootnsh_restore
 say "UPDATED: the firmware is $NEW, verified (read-back $(m "$W/post1.bin")); dumps in $W"
 exit 0

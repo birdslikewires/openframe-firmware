@@ -85,7 +85,13 @@ boards but for the marker's text. Nothing the firmware reads is ever erased.
 
 Between closing a gate and opening the next, the chip boots like stock firmware, so an OS that
 relies on our driver (direct boot from the internal memory needs our MMC fix) must be in its
-fallback mode first. That applies to today's order too.
+fallback mode first. `of-firmware-update` (v26.11.6 on) does that: before its first write it puts
+down `/var/lib/openframe-firmware/writing`, and `of-bootnsh` (openframe-scripts v26.11.15 on)
+then writes a `boot.nsh` that starts the internal memory on either firmware (BlwMmcFix.efi and the
+kernel on stock-like firmware, GRUB on ours: proven on the unknown Joggler, 2026-11-16, a reboot
+through GRUB in 24 s). The file outlives a power cut; once the chip is verified it goes and
+`boot.nsh` is written for the firmware again. On a system on the internal memory with an older
+`of-bootnsh`, or without BlwMmcFix.efi, the updater refuses to start.
 
 ## The planner
 

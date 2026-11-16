@@ -135,5 +135,47 @@ run "  ... re-run completes" 0 ours
 start $T/old.bin; run "old layout, step 4 never verifies" 2 any FLASH_TEST_FAULT_STEP=4 FLASH_TEST_FAULT=3
 run "  ... re-run completes" 0 ours
 
+# A system on the internal memory: boot.nsh held to BlwMmcFix.efi + GRUB while the chip is
+# written. A stand-in of-bootnsh writes the fallback lines while the flag is there, else the
+# direct line.
+B=$T/boot; mkdir -p $B
+cat > $T/of-bootnsh <<'SH'
+#!/bin/bash
+# stand-in: knows /var/lib/openframe-firmware/writing (as $OF_FW_WRITING)
+echo "$*" >> "$OF_FW_BOOT/calls"
+if [ -e "$OF_FW_WRITING" ]; then printf 'BlwMmcFix.efi\nif %%lasterror%% == 0 then\n  vmlinuz root=x\nendif\ngrubq\n' > "$OF_FW_BOOT/boot.nsh"
+else printf 'vmlinuz root=x\n' > "$OF_FW_BOOT/boot.nsh"; fi
+SH
+chmod +x $T/of-bootnsh; : > $T/BlwMmcFix.efi
+MMC="OF_FW_TEST_MMC=1 OF_FW_BOOTNSH=$T/of-bootnsh OF_FW_BOOT=$B OF_FW_WRITING=$T/writing OF_FW_MMCFIX=$T/BlwMmcFix.efi"
+nsh() {    # nsh <name> <direct|fallback> <flag: yes|no>
+	local mode=direct; grep -q BlwMmcFix $B/boot.nsh && mode=fallback
+	local flag=no; [ -e $T/writing ] && flag=yes
+	if [ $mode = $2 ] && [ $flag = $3 ]; then echo "ok     ... boot.nsh $mode, flag $flag"
+	else echo "FAIL   ... boot.nsh $mode (want $2), flag $flag (want $3)"; FAILS=$((FAILS + 1)); fi
+}
+to rel
+printf 'vmlinuz root=x\n' > $B/boot.nsh; rm -f $T/writing
+start $D/o2-stock.bin; run "MMC system: stock -> $V" 0 ours $MMC
+nsh "after" direct no
+grep -q "boot.nsh: starting through BlwMmcFix.efi" $T/out && echo "ok     ... it said so" || { echo "FAIL   ... no fallback line"; FAILS=$((FAILS + 1)); }
+start $T/old.bin; run "MMC system: old layout, power cut after step 3" 9 any $MMC FLASH_TEST_STOP=3
+nsh "cut" fallback yes
+run "  ... re-run completes" 0 ours $MMC
+nsh "re-run" direct no
+touch $T/writing; OF_FW_BOOT=$B OF_FW_WRITING=$T/writing $T/of-bootnsh mac
+start $T/c-rel.bin; run "MMC system: cut after the last write (flag left), chip done" 0 same $MMC
+nsh "nothing to do" direct no
+touch $T/writing; ARGS=--check; start $D/o2-stock.bin; run "MMC system: --check leaves the flag alone" 5 same $MMC; ARGS=
+[ -e $T/writing ] && echo "ok     ... flag kept" || { echo "FAIL   ... --check removed the flag"; FAILS=$((FAILS + 1)); }
+rm -f $T/writing; printf 'vmlinuz root=x\n' > $B/boot.nsh
+sed 's|/var/lib/openframe-firmware/writing|(older)|' $T/of-bootnsh > $T/old-of-bootnsh; chmod +x $T/old-of-bootnsh
+start $D/o2-stock.bin; run "MMC system with an older of-bootnsh: refused" 1 same $MMC OF_FW_BOOTNSH=$T/old-of-bootnsh
+start $D/o2-stock.bin; run "MMC system without BlwMmcFix.efi: refused" 1 same $MMC OF_FW_MMCFIX=$T/none
+printf '#!/bin/bash\n# /var/lib/openframe-firmware/writing\nexit 0\n' > $T/bad-of-bootnsh; chmod +x $T/bad-of-bootnsh
+start $D/o2-stock.bin; run "MMC system, boot.nsh won't take the fallback: refused" 1 same $MMC OF_FW_BOOTNSH=$T/bad-of-bootnsh
+start $D/o2-stock.bin; rm -f $T/writing; run "USB stick system: boot.nsh left alone" 0 ours OF_FW_BOOTNSH=$T/of-bootnsh OF_FW_BOOT=$B OF_FW_WRITING=$T/writing
+[ ! -e $T/writing ] && echo "ok     ... no flag left" || { echo "FAIL   ... flag left"; FAILS=$((FAILS + 1)); }
+
 rm -rf $T
 [ $FAILS = 0 ] && echo "all passed" || { echo "$FAILS FAILED"; exit 1; }

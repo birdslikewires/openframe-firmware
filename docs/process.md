@@ -139,9 +139,10 @@ sudo OF_FW_IMAGE=/tmp/of1-blw-<new>.bin OF_FW_MANIFEST=/tmp/firmware-manifest.tx
     bash /tmp/of-firmware-update --check     # what it would write, and how many states it proved
 sudo OF_FW_IMAGE=... OF_FW_MANIFEST=... OF_FW_PLAN=... bash /tmp/of-firmware-update   # "UPDATED", exit 0
 ```
-Before the first write, a unit that boots straight from its internal memory must have its
-`boot.nsh` in its fallback mode: between closing one signpost and opening the next, the chip starts
-like stock firmware, which can't boot the internal memory directly. Keep the post-update dump
+On a unit that boots from its internal memory the updater holds `boot.nsh` to its fallback
+(BlwMmcFix.efi, else GRUB) from before its first write until the chip is verified: between closing
+one signpost and opening the next, the chip starts like stock firmware, which can't boot the
+internal memory directly. That needs openframe-scripts with `of-bootnsh` v26.11.15 or later. Keep the post-update dump
 (`post1.bin` in the directory it names) and a copy of its block 0 for the NVRAM diff after the boot.
 
 ## 8. Cold boot
