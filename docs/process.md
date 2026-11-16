@@ -218,6 +218,9 @@ some pushed commits, test-unit dumps and scripts carry those numbers. They are, 
 | - | 26.11.30-dev4 | the drive moved in the core's handle list (read back first; the shell's numbering unchanged) |
 | - | 26.11.30-dev5 | the drive moved in SimpleFileSystem's list of instances (read back first; unchanged: the shell sorts its mapping) |
 | - | 26.11.30-dev6 | the shell's mapping sort turned round in memory: the stick is fs0 (became 26.11.30) |
+| - | 26.11.31-dev1-dev3 | the unified driver on stock O2 blocks (OF2-style build on an OF1): splash, countdown, USB-first, model in memory |
+| - | 26.11.31-dev4 | the block-11 layout from stock O2, no bird (built, not flashed) |
+| - | 26.11.31-dev5 | the block-11 layout as a release builds it (stock O2 + bird + `--block11`, md5 `a6c7a156...`): the first run of of-firmware-update v26.11.6 on hardware, the unknown Joggler from 26.11.30 (plan 9 10 11 9, all verified, boot.nsh held to its fallback meanwhile; the chip then matched the emulated end state byte for byte). Power-cycled by hand: the bird, kernel straight from the internal memory, DMI 26.11.31-dev5, microcode 0x217, panel at 60 Hz, up in about 32 s |
 
 ```
 venv/bin/python -I tools/build_ucode_driver.py /tmp/base.bin /tmp/of1-blw-26.11.26-dev1-timing.bin \
