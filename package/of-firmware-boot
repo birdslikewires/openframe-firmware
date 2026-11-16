@@ -289,12 +289,28 @@ PARTS=${#PARTS_LIST[@]}
 (( PARTS > 0 )) || PARTS=6
 PARTS=$((PARTS + 1))
 
+# Each run of of-firmware-update keeps its chip dumps (about 7 MB) in a folder of its own
+# in /tmp, which is in memory (192 MB on an OpenFrame 1). Before each try, all but the
+# newest go: a write retried for as long as it takes would otherwise fill /tmp in about
+# half an hour, and the updater, unable to make its folder, would say it had written
+# nothing. (Its own dumps go, as ever, when the unit next starts.)
+DUMPS="/tmp/of-firmware-update."
+dumps_prune() {
+	ls -1dt "$DUMPS"* 2>/dev/null | tail -n +2 | while IFS= read -r D; do rm -rf -- "$D"; done
+}
+
 console_quiet
 OUTF=$(mktemp /tmp/of-firmware-boot.XXXXXX)
 trap 'rm -f "$OUTF"' EXIT
 tries=0
+# Set once a try hasn't verified: from then on, only finishing the job counts. A later
+# try's "nothing was written, the chip is as it was" is about that try alone, and the
+# chip as it was is already part written, so it's taken as another that didn't verify,
+# whatever it says, and never lets the boot carry on.
+torn=""
 while :; do
 	tries=$((tries + 1))
+	dumps_prune
 	draw 0 "Reading the firmware chip"
 	show 0 1 $(( PARTS * PART_EST ))
 	blocks_row 0 ""
@@ -326,6 +342,10 @@ while :; do
 	done
 	wait $PID; rc=$?
 	cat "$OUTF"
+	if [ -n "$torn" ] && [ $rc != 0 ]; then
+		log "an earlier try didn't verify, so exit $rc is taken as another that didn't"
+		rc=2
+	fi
 	case $rc in
 		0)
 			rm -f $PENDING $LOCKREBOOT
@@ -354,6 +374,7 @@ while :; do
 			exit 0 ;;
 		*)
 			# 2: a write didn't verify. Never carry on booting: keep trying.
+			torn=1
 			log "the firmware didn't verify (exit $rc): trying again (attempt $((tries + 1)))"
 			screen_retry $((tries + 1))
 			if [ $tries -lt 3 ]; then sleep 5; else sleep 60; fi ;;

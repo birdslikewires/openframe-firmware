@@ -5,7 +5,8 @@ run-name: package build and publish
 # to the apt repository on the repo branch (firmware.openbeak.net). The package carries the
 # image, of-firmware-update and its manifest, and of-firmware.service, which updates the chip at
 # the next boot. It is built from the published image itself, checked against releases/MD5SUMS,
-# and only after of-firmware-update has passed its fake-chip tests against it.
+# and only after of-firmware-update has passed its fake-chip tests against it, and
+# of-firmware-boot its own.
 
 on:
   release:
@@ -16,6 +17,7 @@ on:
       - 'tools/of-firmware-update'
       - 'tools/firmware-manifest.txt'
       - 'tools/test_of_firmware_update.sh'
+      - 'tools/test_of_firmware_boot.sh'
       - 'package/**'
       - 'releases/MD5SUMS'
       - '.github/workflows/package.yml'
@@ -74,6 +76,12 @@ jobs:
           get of1_efi_telstra.img telstra.bin 8903c18f882cbde3b98c793f7e827a40
           get untested/op1.rom op1.rom 7fde2784f48486570e7c5927c2a9b71e
           sudo bash tools/test_of_firmware_update.sh "${T}" "${TAG}"
+
+      # The boot-time update (of-firmware-boot) against a stand-in updater: what it does after
+      # each try, never letting the boot carry on once one hasn't verified, and the updater's
+      # dumps kept from filling /tmp.
+      - name: Test of-firmware-boot
+        run: bash tools/test_of_firmware_boot.sh
 
       - name: Build the package
         run: |
