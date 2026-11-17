@@ -10,7 +10,8 @@
 ;   version: "OpenPeak Touchscreen S01_02" on the Cisco's Samsung panel, "...Hyup05_3" with the
 ;   Sharp panel (OF1 and OF2). OpenPeak's own system read it the same way (sysinfo: S* Samsung,
 ;   H* Sharp). Read at ReadyToBoot through USB I/O (device descriptor, then the product string,
-;   US English), read only. This is what is fitted.
+;   US English, by GET_DESCRIPTOR control transfers: the firmware's own UsbGetStringDescriptor
+;   can't be used, see pid_read_string), read only. This is what is fitted.
 ; The line: the panel (from the touch version's first letter, else the display's), then both:
 ;   "Panel: Samsung (display Samsung, touch S01_02)", "Panel: Sharp (display ?, touch Hyup05_3)".
 ; "?" for a source that can't be read; space-padded to the placeholder's fixed width, so the
@@ -19,6 +20,8 @@
 PID_LABEL_RVA   equ     0x13fb
 PID_TOUCH_MAX   equ     12                      ; the version's characters kept
 PID_WIDTH       equ     48                      ; the placeholder's characters (build_ucode_driver.py)
+PID_STR_MAX     equ     126                     ; the longest string descriptor read (62 characters)
+PID_USB_TIMEOUT equ     500                     ; ms, each control transfer
 
 ; pid_note_display: in ebp = the display driver's ImageBase (ImageSize already checked to be well
 ; past the label). Notes Sharp (1) or Samsung (2) from the label, else nothing. Keeps all but eax
@@ -41,12 +44,204 @@ pid_note_display:
         mov     [eax + (pid_display - .fh)], cl
 .r:     ret
 
+;;; DEVELOPMENT ONLY (-DPIDDIAG): what USB I/O offers, written over the panel line instead.
+; "nCC" the handle count (or "LSS" LocateHandleBuffer's status), then per handle: "hSS" or "dSS"
+; for a failing HandleProtocol or GetDeviceDescriptor (SS: the status's low byte), else the
+; product ID (4 hex digits), and for the touchscreen "[gSS LLLL cSSUU vC]": GetSupportedLanguages'
+; status and first language, the last control transfer's status and USB status (pid_read_string),
+; and the version's first character (pid_take_version's, "0" for none).
+%ifdef PIDDIAG
+pid_fill:
+        push    ebp
+        mov     ebp, esp
+        sub     esp, 184                        ; -40/-44 langs, -48 the end, -52 out, -184 string[128]
+        push    ebx
+        push    esi
+        push    edi
+        call    .here
+.here:  pop     ebx
+        mov     edi, [ebx + (panel_ptr - .here)]
+        test    edi, edi
+        jz      .out
+        cmp     byte [ebx + (pid_filled - .here)], 0
+        jne     .out
+        mov     byte [ebx + (pid_filled - .here)], 1
+        mov     [ebp - 52], edi
+        lea     eax, [edi + PID_WIDTH]
+        mov     [ebp - 48], eax
+        mov     ecx, PID_WIDTH
+        mov     al, ' '
+        rep     stosb
+        mov     esi, [ebp + 8]
+        mov     dword [ebp - 4], 0
+        mov     dword [ebp - 8], 0
+        lea     eax, [ebp - 8]
+        push    eax
+        lea     eax, [ebp - 4]
+        push    eax
+        push    0
+        lea     eax, [ebx + (pid_usbio_guid - .here)]
+        push    eax
+        push    2
+        call    [esi + 0xa8]                    ; BS->LocateHandleBuffer
+        add     esp, 20
+        test    eax, eax
+        jz      .lok
+        push    eax
+        mov     al, 'L'
+        call    .c
+        pop     eax
+        call    .hex
+        jmp     .out
+.lok:   mov     al, 'n'
+        call    .c
+        mov     al, [ebp - 4]
+        call    .hex
+        xor     edi, edi
+.dev:   cmp     edi, [ebp - 4]
+        jae     .free
+        mov     al, ' '
+        call    .c
+        mov     eax, [ebp - 8]
+        mov     dword [ebp - 12], 0
+        lea     ecx, [ebp - 12]
+        push    ecx
+        lea     ecx, [ebx + (pid_usbio_guid - .here)]
+        push    ecx
+        push    dword [eax + edi * 4]
+        call    [esi + 0x58]                    ; BS->HandleProtocol
+        add     esp, 12
+        test    eax, eax
+        jz      .hok
+        push    eax
+        mov     al, 'h'
+        call    .c
+        pop     eax
+        call    .hex
+        jmp     .next
+.hok:   mov     ecx, [ebp - 12]
+        lea     eax, [ebp - 36]
+        push    eax
+        push    ecx
+        call    [ecx + 0x18]                    ; UsbIo->UsbGetDeviceDescriptor
+        add     esp, 8
+        test    eax, eax
+        jz      .dok
+        push    eax
+        mov     al, 'd'
+        call    .c
+        pop     eax
+        call    .hex
+        jmp     .next
+.dok:   mov     al, [ebp - 36 + 11]
+        call    .hex
+        mov     al, [ebp - 36 + 10]
+        call    .hex
+        cmp     dword [ebp - 36 + 8], 0x197404b4
+        jne     .next
+        mov     al, '['
+        call    .c
+        mov     al, 'g'
+        call    .c
+        mov     dword [ebp - 40], 0
+        mov     dword [ebp - 44], 0
+        lea     eax, [ebp - 44]
+        push    eax                             ; &TableSize (UINT16)
+        lea     eax, [ebp - 40]
+        push    eax                             ; &LangIDTable
+        push    dword [ebp - 12]
+        mov     ecx, [ebp - 12]
+        call    [ecx + 0x2c]                    ; UsbIo->UsbGetSupportedLanguages
+        add     esp, 12
+        call    .hex
+        mov     al, ' '
+        call    .c
+        mov     eax, [ebp - 40]
+        test    eax, eax
+        jz      .nolang
+        cmp     word [ebp - 44], 0
+        je      .nolang
+        movzx   eax, word [eax]
+        push    eax
+        mov     al, ah
+        call    .hex
+        pop     eax
+        call    .hex
+        jmp     .str
+.nolang: mov    al, '-'
+        call    .c
+.str:   mov     al, ' '
+        call    .c
+        mov     al, 'c'
+        call    .c
+        lea     ecx, [ebp - 184]
+        push    ecx
+        movzx   eax, byte [ebp - 36 + 15]
+        push    eax
+        push    dword [ebp - 12]
+        call    pid_read_string
+        add     esp, 12
+        push    eax
+        mov     al, [ebx + (pid_xfer_efi - .here)]
+        call    .hex
+        mov     al, [ebx + (pid_xfer_usb - .here)]
+        call    .hex
+        mov     al, ' '
+        call    .c
+        mov     al, 'v'
+        call    .c
+        mov     byte [ebx + (pid_touch - .here)], '0'
+        pop     eax
+        test    eax, eax
+        jz      .v
+        lea     eax, [ebp - 184 + 2]
+        push    eax
+        call    pid_take_version
+        add     esp, 4
+        cmp     byte [ebx + (pid_touch - .here)], 0
+        jne     .v
+        mov     byte [ebx + (pid_touch - .here)], '0'
+.v:     mov     al, [ebx + (pid_touch - .here)]
+        call    .c
+        mov     al, ']'
+        call    .c
+.next:  inc     edi
+        jmp     .dev
+.free:  mov     eax, [ebp - 8]
+        test    eax, eax
+        jz      .out
+        push    eax
+        call    [esi + 0x30]                    ; BS->FreePool(Buffer)
+        add     esp, 4
+.out:   pop     edi
+        pop     esi
+        pop     ebx
+        mov     esp, ebp
+        pop     ebp
+        ret
+; .hex: al as two hex digits; .c: the character al. Both bounded by [ebp - 48]; clobber eax, ecx.
+.hex:   push    eax
+        shr     al, 4
+        call    .nib
+        pop     eax
+.nib:   and     al, 0x0f
+        add     al, '0'
+        cmp     al, '9'
+        jbe     .c
+        add     al, 7
+.c:     mov     ecx, [ebp - 52]
+        cmp     ecx, [ebp - 48]
+        jae     .cr
+        mov     [ecx], al
+        inc     dword [ebp - 52]
+.cr:    ret
+%else
 ; VOID pid_fill(EFI_BOOT_SERVICES *BS): if this driver installed the SMBIOS table, read the
 ; touchscreen's version and write the line over the Type 11 placeholder. cdecl. Keeps ebx, esi, edi.
 pid_fill:
         push    ebp
         mov     ebp, esp
-        sub     esp, 40                         ; -4 count, -8 buffer, -12 usbio, -16 string, -36 desc[18+2]
+        sub     esp, 168                        ; -4 count, -8 buffer, -12 usbio, -36 desc[18+2], -168 string[128]
         push    ebx
         push    esi
         push    edi
@@ -102,25 +297,17 @@ pid_fill:
         movzx   eax, byte [ebp - 36 + 15]       ; iProduct
         test    eax, eax
         jz      .next
-        mov     dword [ebp - 16], 0
-        lea     ecx, [ebp - 16]
-        push    ecx                             ; &String (allocated by the callee)
-        push    eax                             ; StringId
-        push    0x0409                          ; LangId: US English
-        push    dword [ebp - 12]                ; This
-        mov     ecx, [ebp - 12]
-        call    [ecx + 0x28]                    ; UsbIo->UsbGetStringDescriptor
-        add     esp, 16
-        test    eax, eax
-        jnz     .next
-        mov     eax, [ebp - 16]
+        lea     ecx, [ebp - 168]
+        push    ecx                             ; Buffer
+        push    eax                             ; Index
+        push    dword [ebp - 12]                ; UsbIo
+        call    pid_read_string
+        add     esp, 12
         test    eax, eax
         jz      .next
+        lea     eax, [ebp - 168 + 2]
         push    eax
         call    pid_take_version                ; the last word, into pid_touch
-        pop     eax
-        push    eax
-        call    [esi + 0x30]                    ; BS->FreePool(String)
         add     esp, 4
         jmp     .free                           ; one touchscreen
 .next:  inc     edi
@@ -138,6 +325,74 @@ pid_fill:
         pop     esi
         pop     ebx
         mov     esp, ebp
+        pop     ebp
+        ret
+%endif
+
+; UINT32 pid_read_string(EFI_USB_IO_PROTOCOL *UsbIo, UINT32 Index, UINT8 *Buffer): the device's
+; string Index in US English, as its string descriptor in Buffer (PID_STR_MAX + 2 bytes) with the
+; text NUL-terminated at Buffer + 2; 1 if read, else 0. By standard GET_DESCRIPTOR requests through
+; UsbControlTransfer, its length and then all of it, as an OS reads one. Not through the firmware's
+; UsbGetStringDescriptor: AMI's search of the device's languages is inverted (it stops at the first
+; language that DOESN'T match, then requires that one to match), so it fails with EFI_NOT_FOUND for
+; a device's only language. Seen on the Da Vinci OF2's touchscreen (languages 0409, NOT_FOUND).
+; Read only. cdecl. Keeps ebx, esi, edi.
+pid_read_string:
+        push    ebp
+        mov     ebp, esp
+        push    ebx
+        push    esi
+        push    edi
+        sub     esp, 12                         ; -24 the request (8 bytes), -16 the USB status
+        mov     esi, [ebp + 8]                  ; UsbIo
+        mov     edi, [ebp + 16]                 ; Buffer
+        mov     ebx, 2                          ; first its length
+.xfer:  mov     dword [ebp - 24], 0x03000680    ; device to host, GET_DESCRIPTOR, STRING
+        mov     al, [ebp + 12]
+        mov     [ebp - 22], al                  ; the string's index
+        mov     word [ebp - 20], 0x0409         ; US English
+        mov     [ebp - 18], bx                  ; wLength
+        mov     dword [ebp - 16], 0
+        lea     eax, [ebp - 16]
+        push    eax                             ; &Status
+        push    ebx                             ; DataLength
+        push    edi                             ; Data
+        push    PID_USB_TIMEOUT
+        push    0                               ; EfiUsbDataIn
+        lea     eax, [ebp - 24]
+        push    eax                             ; Request
+        push    esi                             ; This
+        call    [esi]                           ; UsbIo->UsbControlTransfer
+        add     esp, 28
+        call    .fh
+.fh:    pop     ecx
+        mov     [ecx + (pid_xfer_efi - .fh)], al
+        mov     dl, [ebp - 16]
+        mov     [ecx + (pid_xfer_usb - .fh)], dl
+        test    eax, eax
+        jnz     .no
+        movzx   eax, byte [edi]                 ; bLength
+        cmp     byte [edi + 1], 3               ; a string descriptor
+        jne     .no
+        cmp     eax, 4                          ; at least one character
+        jb      .no
+        cmp     eax, PID_STR_MAX
+        ja      .no
+        cmp     ebx, 2
+        jne     .got
+        mov     ebx, eax                        ; then all of it
+        jmp     .xfer
+.got:   cmp     eax, ebx                        ; the same length both times
+        jne     .no
+        and     eax, ~1
+        mov     word [edi + eax], 0
+        mov     eax, 1
+        jmp     .r
+.no:    xor     eax, eax
+.r:     lea     esp, [ebp - 12]
+        pop     edi
+        pop     esi
+        pop     ebx
         pop     ebp
         ret
 
@@ -263,6 +518,8 @@ pid_s_touch:    db ', touch ', 0
 pid_s_close:    db ')', 0
 pid_s_q:        db '?', 0
 pid_filled:     db 0
+pid_xfer_efi:   db 0                            ; the last control transfer's status (low byte), for -DPIDDIAG
+pid_xfer_usb:   db 0                            ; ... and its USB status
 pid_touch:      times PID_TOUCH_MAX + 1 db 0
         align   4, db 0
 pid_display:    dd 0                            ; 1 Sharp, 2 Samsung (pid_note_display), else 0

@@ -92,6 +92,11 @@ RP2_AML = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'd
 USBIO_GUID = G('2b2f68d6-0cd2-44cf-8e8b-bba20b1b5b75')
 USBIO_AREA = STUBS + 0x2d40
 USB_DESC_STUB, USB_STR_STUB, USB_OTHER_STUB = STUBS + 0xa0, STUBS + 0xa8, STUBS + 0xb0
+USB_CTRL_STUB = STUBS + 0xb8
+# A USB device: (vid, pid, iProduct, string), the string as text, None (every transfer for it fails,
+# a device error) or bytes (the whole string descriptor the device returns, for odd ones). The
+# firmware's UsbGetStringDescriptor is AMI's: it fails with NOT_FOUND for a device's only language
+# (its language search is inverted), so the driver must not call it; strings come by control transfers.
 PANEL_PREFIX, PANEL_WIDTH = 'Panel: ', 48
 PANEL_PLACEHOLDER = PANEL_PREFIX + '-' * PANEL_WIDTH
 TOUCH = lambda ver: (0x04b4, 0x1974, 2, 'OpenPeak Touchscreen ' + ver)    # (vid, pid, iProduct, string)
@@ -822,10 +827,10 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     assert len(usb_devs) <= 3
     for i_ in range(len(usb_devs)):
         slots = [USB_OTHER_STUB] * 13
-        slots[6], slots[10] = USB_DESC_STUB, USB_STR_STUB                  # +0x18, +0x28
+        slots[0], slots[6], slots[10] = USB_CTRL_STUB, USB_DESC_STUB, USB_STR_STUB   # +0x00, +0x18, +0x28
         mu.mem_write(USBIO_AREA + 0x40 * i_, struct.pack('<13I', *slots))
     acpi = dict(locates=0, sets=[])
-    usb = dict(desc=0, strs=[], allocs=[])
+    usb = dict(desc=0, ctl=[], allocs=[])
     if True:                                                      # the console's input and device paths
         mu.mem_write(CONOUT + 0x1c, struct.pack('<I', CONOUT_CUR))
         mu.mem_write(CONIN, struct.pack('<III', STUBS + 0x60, CONIN_RKS, 0))
@@ -892,7 +897,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         if addr == ACPI_OTHER_STUB:
             errors.append('ACPI Support: GetAcpiTable or PublishTables called')
             return ret(0x80000003)
-        if addr in (USB_DESC_STUB, USB_STR_STUB):
+        if addr in (USB_DESC_STUB, USB_STR_STUB, USB_CTRL_STUB):
             i_ = (a[0] - USBIO_AREA) // 0x40
             if not (0 <= i_ < len(usb_devs)) or (a[0] - USBIO_AREA) % 0x40:
                 errors.append('UsbIo call on %#x' % a[0])
@@ -902,17 +907,23 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 usb['desc'] += 1
                 uc.mem_write(a[1], struct.pack('<BBHBBBBHHHBBBB', 18, 1, 0x0110, 0, 0, 0, 8, vid, pid, 0x0100, 1, iprod, 0, 1))
                 return ret(0)
-            usb['strs'].append((i_, a[1], a[2]))                  # UsbGetStringDescriptor(This, LangId, Id, &String)
-            if (a[1] & 0xffff, a[2] & 0xff) != (0x0409, iprod):
-                errors.append('UsbGetStringDescriptor lang %#x id %d' % (a[1], a[2]))
-            if text is None:
+            if addr == USB_STR_STUB:                               # AMI's: never finds the language
+                errors.append('UsbGetStringDescriptor called (AMI\'s fails for a device\'s only language)')
+                return ret(0x8000000E)
+            # UsbControlTransfer(This, &Request, Direction, Timeout, Data, DataLength, &Status)
+            req = bytes(uc.mem_read(a[1], 8))
+            usb['ctl'].append((i_, req, a[2], a[3], a[5]))
+            want_req = bytes([0x80, 6, iprod, 3]) + struct.pack('<HH', 0x0409, a[5])
+            if (vid, pid) != (0x04b4, 0x1974):
+                errors.append('control transfer to %04x:%04x, not the touchscreen' % (vid, pid))
+            if req != want_req or a[2] != 0 or not 0 < a[3] <= 5000 or not 0 < a[5] <= 128 or not a[6]:
+                errors.append('control transfer %s dir %d timeout %d length %d status %#x' % (req.hex(), a[2], a[3], a[5], a[6]))
+            if text is None:                                       # a device error: no data
+                uc.mem_write(a[6], struct.pack('<I', 0x10))        # EFI_USB_ERR_TIMEOUT
                 return ret(0x80000007)
-            enc = text.encode('utf-16le') + b'\0\0'
-            buf = pool['next']; pool['next'] += (len(enc) + 7) & ~7
-            allocs[buf] = (4, len(enc))
-            usb['allocs'].append(buf)
-            uc.mem_write(buf, enc)
-            uc.mem_write(a[3], struct.pack('<I', buf))
+            desc = text if isinstance(text, bytes) else bytes([2 + 2 * len(text), 3]) + text.encode('utf-16le')
+            uc.mem_write(a[4], desc[:a[5]])                       # as much as asked for, or a short packet
+            uc.mem_write(a[6], struct.pack('<I', 0))
             return ret(0)
         if addr == USB_OTHER_STUB:
             errors.append('UsbIo: a transfer or other descriptor called')
@@ -1849,6 +1860,11 @@ def main():
         ('panel: no USB devices: from the display', dxe, dict(store=lm(CARD), want_panel=panel_line('Sharp (display Sharp, touch ?)')), 0, True, MAC, True),
         ('panel: a stick and Bluetooth first, then the touchscreen', dxe, dict(store=lm(CARD), usb_devs=[(0x0781, 0x5580, 2, 'Extreme'), (0x0a5c, 0x219a, 2, 'BCM2046 Bluetooth'), TOUCH('S01_02')], want_panel=panel_line('Samsung (display Sharp, touch S01_02)')), 0, True, MAC, True),
         ('panel: the touchscreen\'s string can\'t be read', dxe, dict(store=lm(CARD), usb_devs=[(0x04b4, 0x1974, 2, None)], want_panel=panel_line('Sharp (display Sharp, touch ?)')), 0, True, MAC, True),
+        ('panel: a product string of 62 characters: read', dxe, dict(store=lm(CARD), usb_devs=[(0x04b4, 0x1974, 2, 'x' * 53 + ' Hyup05_3')], want_panel=panel_line('Sharp (display Sharp, touch Hyup05_3)')), 0, True, MAC, True),
+        ('panel: a product string of 63 characters: not read', dxe, dict(store=lm(CARD), gop_variant='samsung', usb_devs=[(0x04b4, 0x1974, 2, 'x' * 54 + ' Hyup05_3')], want_panel=panel_line('Samsung (display Samsung, touch ?)')), 0, True, MAC, True),
+        ('panel: an empty product string: touch ?', dxe, dict(store=lm(CARD), usb_devs=[(0x04b4, 0x1974, 2, b'\x02\x03')], want_panel=panel_line('Sharp (display Sharp, touch ?)')), 0, True, MAC, True),
+        ('panel: a descriptor that isn\'t a string: touch ?', dxe, dict(store=lm(CARD), usb_devs=[(0x04b4, 0x1974, 2, b'\x0e\x01' + 'S01_02'.encode('utf-16le'))], want_panel=panel_line('Sharp (display Sharp, touch ?)')), 0, True, MAC, True),
+        ('panel: an odd string length: whole characters only', dxe, dict(store=lm(CARD), usb_devs=[(0x04b4, 0x1974, 2, b'\x0f\x03' + 'a S01_02'.encode('utf-16le')[:13])], want_panel=panel_line('Samsung (display Sharp, touch S01_)')), 0, True, MAC, True),
         ('panel: a version of 13 characters: not taken', dxe, dict(store=lm(CARD), gop_variant='samsung', usb_devs=[TOUCH('ABCDEFGHIJKLM')], want_panel=panel_line('Samsung (display Samsung, touch ?)')), 0, True, MAC, True),
         ('panel: a product string with no space: all of it', dxe, dict(store=lm(CARD), usb_devs=[(0x04b4, 0x1974, 2, 'H2')], want_panel=panel_line('Sharp (display Sharp, touch H2)')), 0, True, MAC, True),
         ('panel: a touchscreen version of another letter: from the display', dxe, dict(store=lm(CARD), gop_variant='samsung', usb_devs=[TOUCH('X9')], want_panel=panel_line('Samsung (display Samsung, touch X9)')), 0, True, MAC, True),
