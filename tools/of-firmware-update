@@ -1,6 +1,6 @@
 #!/bin/bash
 
-## of-firmware-update v26.11.7 (17th November 2026)
+## of-firmware-update v26.11.8 (17th November 2026)
 ##  Puts the BirdsLikeWires release in $IMG on an OpenFrame's firmware chip, from any firmware
 ##  listed in $MANIFEST (OF1: stock O2, Verizon, Telstra; OF2: whichever stock builds it lists;
 ##  our releases), in an order where a power cut at any moment leaves a chip that starts.
@@ -253,6 +253,13 @@ if [ $TEST = 0 ]; then
 	# grep -q stops reading at the first match, so the decompressor's write fails with
 	# "Broken pipe": harmless (it means the fix is there), but alarming on the screen.
 	[ -n "$KO" ] && $KCAT "$KO" 2>/dev/null | grep -aq "pre-programmed mode is" || refuse "this kernel's gma500 lacks the 60 Hz panel fix: install 6.18.63-4 or later first"
+	# On an OpenFrame 2 our firmware leaves the panel PLL as its display driver set it, and the
+	# Samsung panel's (Cisco) uses a divider older gma500s read as 0: a divide error as it
+	# loads, and no display in Linux. Kernel patch 09 reads it right (and warns, once, if one
+	# still reads 0: the string looked for here).
+	if [ "$IMODEL" = 2 ]; then
+		$KCAT "$KO" 2>/dev/null | grep -aq "PLL reads back no clock" || refuse "this kernel's gma500 lacks the OpenFrame 2 panel divider fix: install 6.18.63-9 or later first"
+	fi
 	LOCKED=$(python3 -c '
 import mmap, os, sys
 f = os.open("/dev/mem", os.O_RDONLY | os.O_SYNC)
