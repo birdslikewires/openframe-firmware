@@ -290,7 +290,10 @@ case $rc in
 	*) log "could not check the firmware (exit $rc): will try at the next boot"; exit 0 ;;
 esac
 
-NEW=$(grep -aoE 'BirdsLikeWires OpenFrame EFI [0-9]+\.[0-9]+\.[0-9]+(-dev[0-9]+)? \(OF1\)' "$IMG" 2>/dev/null | head -1 | awk '{print $4}')
+# The release, as the updater named it (it picks the image for this chip's model, OF1 or OF2),
+# else from the OF1 image.
+NEW=$(echo "$CHECK" | sed -n 's/.*blocks that differ from \([^: ]*\):.*/\1/p' | head -1)
+[ -n "$NEW" ] || NEW=$(grep -aoE 'BirdsLikeWires OpenFrame EFI [0-9]+\.[0-9]+\.[0-9]+(-dev[0-9]+)? \(OF[12]\)' "$IMG" 2>/dev/null | head -1 | awk '{print $4}')
 # The parts: reading the chip, then each block's write (block 10 headers last is three).
 detail "$CHECK"
 FWCHECK="$CHECK"

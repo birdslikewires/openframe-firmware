@@ -1,10 +1,14 @@
 #!/bin/bash
 
-## of-firmware-update v26.11.6 (16th November 2026)
-##  Puts the BirdsLikeWires release in $IMG on an OpenFrame 1's firmware chip, from any firmware
-##  listed in $MANIFEST (stock O2, Verizon, Telstra; our releases), in an order where a power cut
-##  at any moment leaves a chip that starts. Firmware it doesn't recognise is never written: a
-##  dump is saved.
+## of-firmware-update v26.11.7 (17th November 2026)
+##  Puts the BirdsLikeWires release in $IMG on an OpenFrame's firmware chip, from any firmware
+##  listed in $MANIFEST (OF1: stock O2, Verizon, Telstra; OF2: whichever stock builds it lists;
+##  our releases), in an order where a power cut at any moment leaves a chip that starts.
+##  Firmware it doesn't recognise is never written: a dump is saved. The model (OpenFrame 1 or
+##  2) is the one the chip's boot block names; the image must be for it (of1-blw.bin or
+##  of2-blw.bin beside this, unless $IMG is given). An OF2 keeps its own stock blocks 1-9 (its
+##  display driver is set up for its panel, Sharp or Samsung): only blocks 9-11 are written, and
+##  from stock nothing at all is erased.
 ##
 ##  of-firmware-update [--check]
 ##    --check  say what would be done and write nothing (exit 0 up to date, 5 update needed).
@@ -50,7 +54,7 @@
 ##  of-firmware.service and of-flash.service wait for it however long it takes. And a run cut off
 ##  anywhere still leaves a chip that starts.)
 ##
-##  Settings (environment): OF_FW_IMAGE, OF_FW_MANIFEST, OF_FW_DUMPDIR, OF_FW_PLAN, OF_FW_WRITING,
+##  Settings (environment): OF_FW_IMAGE (else OF_FW_LIB/of<model>-blw.bin), OF_FW_MANIFEST, OF_FW_DUMPDIR, OF_FW_PLAN, OF_FW_WRITING,
 ##  OF_FW_BOOTNSH (of-bootnsh), OF_FW_BOOT (the boot directory); FH_KO=/path/to/
 ##  fh.ko loads a module that isn't installed. Test mode: FH=/path/to/a/1MB/file works on that file
 ##  (no module, no lock registers, /dev/fhp emulated); FLASH_TEST_FAULT_STEP=n with FLASH_TEST_FAULT=N
@@ -60,7 +64,10 @@
 ##  can touch a real chip.
 
 set -u
-IMG=${OF_FW_IMAGE:-/usr/lib/openframe-firmware/of1-blw.bin}
+# The image: OF_FW_IMAGE, else the one for the model the chip's boot block names (of1-blw.bin,
+# of2-blw.bin), chosen once the chip is read.
+IMG=${OF_FW_IMAGE:-}
+LIB=${OF_FW_LIB:-/usr/lib/openframe-firmware}
 MANIFEST=${OF_FW_MANIFEST:-/usr/lib/openframe-firmware/manifest.txt}
 DUMPDIR=${OF_FW_DUMPDIR:-/var/lib/openframe-firmware}
 PLAN=${OF_FW_PLAN:-/usr/lib/openframe-firmware/fwplan.py}
@@ -77,7 +84,7 @@ case "${1:-}" in
 esac
 FH=${FH:-/dev/fh}; FHP=${FHP:-/dev/fhp}; TEST=0; [ -f "$FH" ] && { TEST=1; FHP=$FH; }
 W=""
-MARKER_RE='BirdsLikeWires OpenFrame EFI [0-9]+\.[0-9]+\.[0-9]+(-dev[0-9]+)? \(OF1\)'
+MARKER_RE='BirdsLikeWires OpenFrame EFI [0-9]+\.[0-9]+\.[0-9]+(-dev[0-9]+)? \(OF[12]\)'
 
 say() { echo "of-firmware-update: $*"; }
 refuse() { [ -n "$W" ] && rm -rf "$W"; say "STOP: $*. Nothing was written; the chip is as it was."; exit 1; }
@@ -113,30 +120,20 @@ bootnsh_restore() {
 # canon <chip> <out>: fwplan.py's reading of a chip ("spacer=... files=reached|unreached
 # layout=block11|old"), with our spacer headers blanked in <out> so its blocks' md5s can be looked up.
 canon() { python3 -I "$PLAN" canon "$1" "$2"; }
+# model <image>: 1 or 2, the OpenFrame its boot block is built for, by the ROM name AMI's PEI
+# core carries at 0xEA268 (driver/model.inc): 0ABPW400 on every OF1, 0ABPW005 on every good OF2.
+# Nothing for anything else (the do-not-use OF2 builds say 006 and 007).
+model() {
+	case "$(dd if="$1" bs=1 skip=$((0xEA268)) count=8 status=none)" in
+		0ABPW400) echo 1 ;; 0ABPW005) echo 2 ;;
+	esac
+}
 
 [ "$(id -u)" = 0 ] || refuse "run it as root (sudo)"
-[ -f "$IMG" ] || refuse "no firmware image at $IMG"
 [ -f "$MANIFEST" ] || refuse "no manifest at $MANIFEST"
 [ -f "$PLAN" ] || refuse "no fwplan.py at $PLAN"
+[ -z "$IMG" ] || [ -f "$IMG" ] || refuse "no firmware image at $IMG"
 W=$(mktemp -d /tmp/of-firmware-update.XXXXXX) || { W=""; refuse "could not make a work directory"; }
-
-# The image: 1 MB, its md5 as shipped beside it, a BirdsLikeWires marker, of the block-11 layout,
-# and every block 1-15 (spacer headers blanked) listed in the manifest as this release's.
-[ "$(stat -c %s "$IMG")" = 1048576 ] || refuse "$IMG is not 1 MB"
-if [ -f "$IMG.md5" ]; then
-	[ "$(cut -d' ' -f1 "$IMG.md5")" = "$(m "$IMG")" ] || refuse "$IMG does not match $IMG.md5"
-fi
-NEW=$(grep -aoE "$MARKER_RE" "$IMG" | head -1 | awk '{print $4}')
-[ -n "$NEW" ] || refuse "$IMG has no BirdsLikeWires version marker"
-IC=$(canon "$IMG" "$W/img.canon") || refuse "$IMG: $IC"
-case "$IC" in *"files=reached layout=block11"*) ;; *) refuse "$IMG is not of the block-11 layout (26.11.31 on)" ;; esac
-declare -a T C R
-for n in $(seq 1 15); do
-	[ "$(label $n "$(bm "$W/img.canon" $n)" | tr ',' '\n' | grep -cx "$NEW")" = 1 ] ||
-		refuse "the manifest does not list block $n of $IMG as $NEW's"
-	T[$n]=$(bm "$IMG" $n)
-done
-BLANK=$(head -c 65536 /dev/zero | tr '\0' '\377' | md5sum | cut -d' ' -f1)
 
 if [ $TEST = 0 ]; then
 	[ -e /sys/module/fh ] || modprobe fh 2>/dev/null || { [ -n "${FH_KO:-}" ] && insmod "$FH_KO"; } || refuse "could not load fh"
@@ -147,14 +144,46 @@ fi
 
 for i in 1 2; do readchip "$W/pre$i.bin" || refuse "could not read the chip"; done
 [ "$(m "$W/pre1.bin")" = "$(m "$W/pre2.bin")" ] || refuse "two reads of the chip differ"
+MODEL=$(model "$W/pre1.bin")
 
 unknown() {
 	mkdir -p "$DUMPDIR" 2>/dev/null
-	D="$DUMPDIR/of1-firmware-$(date -u +%Y%m%d)-$(m "$W/pre1.bin" | cut -c1-8).bin"
+	D="$DUMPDIR/of${MODEL:-x}-firmware-$(date -u +%Y%m%d)-$(m "$W/pre1.bin" | cut -c1-8).bin"
 	if cp "$W/pre1.bin" "$D" 2>/dev/null; then say "saved a dump of this firmware to $D"; else say "could not save a dump in $DUMPDIR"; fi
 	say "this firmware is not one we know ($*), so it is left alone. Nothing was written."
 	rm -rf "$W"; exit 3
 }
+[ -n "$MODEL" ] || unknown "its boot block names no OpenFrame we know"
+if [ -z "$IMG" ]; then
+	IMG=$LIB/of$MODEL-blw.bin
+	[ -f "$IMG" ] || { rm -rf "$W"; say "there is no firmware image for an OpenFrame $MODEL here ($IMG), so it is left alone. Nothing was written."; exit 3; }
+fi
+
+# The image: 1 MB, its md5 as shipped beside it, a BirdsLikeWires marker naming the model its
+# boot block is built for, of the block-11 layout, and every block 1-15 (spacer headers blanked)
+# listed in the manifest as this release's. An OF1 release is listed by its version (26.11.31),
+# an OF2 release as of2-<version>, so the blocks of the two never mix. (That it is for this
+# chip's model is checked once the chip is known.)
+[ "$(stat -c %s "$IMG")" = 1048576 ] || refuse "$IMG is not 1 MB"
+if [ -f "$IMG.md5" ]; then
+	[ "$(cut -d' ' -f1 "$IMG.md5")" = "$(m "$IMG")" ] || refuse "$IMG does not match $IMG.md5"
+fi
+MK=$(grep -aoE "$MARKER_RE" "$IMG" | head -1)
+NEW=$(echo "$MK" | awk '{print $4}')
+[ -n "$NEW" ] || refuse "$IMG has no BirdsLikeWires version marker"
+IMODEL=${MK##*(OF}; IMODEL=${IMODEL%)}
+[ "$(model "$IMG")" = "$IMODEL" ] || refuse "$IMG says it is for an OpenFrame $IMODEL, but its boot block isn't one's"
+LNEW=$NEW; [ $IMODEL = 2 ] && LNEW=of2-$NEW
+IC=$(canon "$IMG" "$W/img.canon") || refuse "$IMG: $IC"
+case "$IC" in *"files=reached layout=block11"*) ;; *) refuse "$IMG is not of the block-11 layout (26.11.31 on)" ;; esac
+declare -a T C R
+for n in $(seq 1 15); do
+	[ "$(label $n "$(bm "$W/img.canon" $n)" | tr ',' '\n' | grep -cx "$LNEW")" = 1 ] ||
+		refuse "the manifest does not list block $n of $IMG as $LNEW's"
+	T[$n]=$(bm "$IMG" $n)
+done
+BLANK=$(head -c 65536 /dev/zero | tr '\0' '\377' | md5sum | cut -d' ' -f1)
+
 CC=$(canon "$W/pre1.bin" "$W/chip.canon") || unknown "its file list: ${CC#fwplan: refused: }"
 for n in $(seq 1 15); do C[$n]=$(bm "$W/chip.canon" $n); R[$n]=$(bm "$W/pre1.bin" $n); done
 
@@ -184,6 +213,8 @@ if [ -n "$FB" ]; then
 		say "the firmware is $NEW: nothing to do"; rm -rf "$W"; exit 0
 	fi
 fi
+# The image must be for this model (an OF1's release on an OF2 would start, but say OF1).
+[ "$IMODEL" = "$MODEL" ] || refuse "$IMG is for an OpenFrame $IMODEL and this is an OpenFrame $MODEL"
 # Never go backwards: a chip whose own marker says it is newer than this image is left alone.
 if [ -n "$CUR" ] && [ "${CUR%%-*}" != "${NEW%%-*}" ] && [ "$(printf '%s\n%s\n' "${CUR%%-*}" "${NEW%%-*}" | sort -V | tail -1)" = "${CUR%%-*}" ]; then
 	[ -e "$WRITING" ] && [ $CHECK = 0 ] && bootnsh_restore
@@ -209,7 +240,10 @@ POUT=$(python3 -I "$PLAN" plan "$W/pre1.bin" "$IMG" "$W/plan") || refuse "no wri
 PARTS=$(echo "$POUT" | sed -n 's/^fwplan: [0-9]* steps* (\([0-9 ]*\)).*/\1/p')
 PROVEN=$(echo "$POUT" | sed -n 's/.*, \([0-9]*\) states proven.*/\1/p')
 [ -s "$W/plan/steps.txt" ] && [ -n "$PARTS" ] || refuse "fwplan.py made no plan ($POUT)"
-say "firmware now ($( [ -n "$CUR" ] && echo "$CUR" || echo "$(echo "$BASE" | head -1)")): blocks that differ from $NEW:$DESC"
+# Named by our marker where the firmware reaches it, else by the stock firmware it is built on
+# (an OF2 release shares its blocks 1-9 with the stock image it was made from).
+NOW=$CUR; [ -n "$NOW" ] || NOW=$(echo "$BASE" | grep -vE '^(of2-)?[0-9]+\.[0-9]+\.[0-9]+' | head -1); [ -n "$NOW" ] || NOW=$(echo "$BASE" | head -1)
+say "firmware now ($NOW): blocks that differ from $NEW:$DESC"
 say "plan: write blocks $PARTS ($PROVEN states checked: a power cut at any point leaves a chip that starts)"
 if [ $CHECK = 1 ]; then rm -rf "$W"; exit 5; fi
 

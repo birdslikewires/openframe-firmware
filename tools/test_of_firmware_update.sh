@@ -5,8 +5,10 @@
 #   D/ of-firmware-update, fwplan.py, mkmanifest.py, release.bin (the release under test, of the
 #      block-11 layout), o2-stock.bin, verizon.bin, telstra.bin, op1.rom (from
 #      openbeak.net/openframe/firmware/efi/); optionally r30.bin (release 26.11.30, the old
-#      layout), of2-cisco.bin (an OpenFrame 2: not ours to update yet) and old-release.bin (an
-#      earlier release that isn't in the manifest)
+#      layout), of2-cisco.bin (an OpenFrame 2), old-release.bin (an earlier release that isn't
+#      in the manifest), and for the OpenFrame 2: of2-release.bin (an OF2 release of the
+#      block-11 layout), of2-telio.bin, of2-avaya.bin, of2-openpeak.bin (stock, beside
+#      of2-cisco.bin) and of2-swisscom.bin (the do-not-use build, boot block 0ABPW006)
 #     sudo bash test_of_firmware_update.sh D
 # Made here from the release: "old", its files moved into block 10 as releases up to 26.11.30 had
 # them (its version's digits all 0), and "next", one byte of its driver changed (digits all 9).
@@ -24,9 +26,10 @@ import re, sys
 sys.path.insert(0, sys.argv[1])
 import fwplan as fp
 D, T = sys.argv[1], sys.argv[2]
-rel = bytearray(open(D + '/release.bin', 'rb').read())
+src, pre = (sys.argv[3], sys.argv[4]) if len(sys.argv) > 4 else (D + '/release.bin', '')
+rel = bytearray(open(src, 'rb').read())
 fp.release_files(rel)
-m = re.search(rb'BirdsLikeWires OpenFrame EFI ([0-9.]+(-dev[0-9]+)?) \(OF1\)', rel)
+m = re.search(rb'BirdsLikeWires OpenFrame EFI ([0-9.]+(-dev[0-9]+)?) \(OF[12]\)', rel)
 v = m.group(1).decode()
 
 
@@ -46,9 +49,9 @@ nxt[o + sz // 2] ^= 0x55
 nxt[o + 17] = 0
 nxt[o + 17] = -sum(nxt[o + 24:o + sz]) & 0xFF      # the driver has a data checksum
 assert fp.state(bytes(old))['old_layout'] and fp.state(bytes(nxt))['files_reached']
-open(T + '/old.bin', 'wb').write(old)
-open(T + '/rel.bin', 'wb').write(rel)
-open(T + '/next.bin', 'wb').write(nxt)
+open(T + '/' + pre + 'old.bin', 'wb').write(old)
+open(T + '/' + pre + 'rel.bin', 'wb').write(rel)
+open(T + '/' + pre + 'next.bin', 'wb').write(nxt)
 print(v)
 PY
 cat > $T/ours.py <<'PY'
@@ -104,7 +107,7 @@ to next; start $T/old.bin; run "$VO -> $VN" 0 ours
 
 to rel
 start $D/op1.rom; run "op1: boot block differs, refused" 3 same
-ls $DUMPS/of1-firmware-*.bin >/dev/null 2>&1 && echo "ok   op1: dump saved" || { echo "FAIL op1: no dump"; FAILS=$((FAILS + 1)); }
+ls $DUMPS/of*-firmware-*.bin >/dev/null 2>&1 && echo "ok   op1: dump saved" || { echo "FAIL op1: no dump"; FAILS=$((FAILS + 1)); }
 [ -f $D/of2-cisco.bin ] && { start $D/of2-cisco.bin; run "an OpenFrame 2: not known yet, refused" 3 same; }
 [ -f $D/old-release.bin ] && { start $D/old-release.bin; run "an earlier release (not in the manifest): refused" 3 same; }
 start $D/o2-stock.bin; printf 'X' | dd of=$F bs=1 seek=$((7 * 65536 + 4000)) conv=notrunc status=none; cp $F $START
@@ -134,6 +137,52 @@ start $T/old.bin; run "old layout, step 1 (closing the gate) never verifies" 2 a
 run "  ... re-run completes" 0 ours
 start $T/old.bin; run "old layout, step 4 never verifies" 2 any FLASH_TEST_FAULT_STEP=4 FLASH_TEST_FAULT=3
 run "  ... re-run completes" 0 ours
+
+
+# The OpenFrame 2: each stock firmware we know to the OF2 release (program only: nothing is
+# erased), power cuts, the wrong model's image, and the image chosen by the chip's model.
+if [ -f $D/of2-release.bin ]; then
+	V2=$(python3 -I $T/mk.py "$D" "$T" $D/of2-release.bin of2-) || { echo "FAIL: could not make the OF2 test releases"; exit 1; }
+	VN2=$(echo "$V2" | tr '0-9' '9')
+	S2=""; for s in cisco telio avaya openpeak; do [ -f $D/of2-$s.bin ] && S2="$S2 of2-$s=$D/of2-$s.bin"; done
+	python3 -I $D/mkmanifest.py $T/mof2-rel.txt $STOCK $V=$T/rel.bin $S2 of2-$V2=$T/of2-rel.bin >/dev/null
+	python3 -I $D/mkmanifest.py $T/mof2-next.txt $STOCK $V=$T/rel.bin $S2 of2-$V2=$T/of2-rel.bin of2-$VN2=$T/of2-next.bin >/dev/null
+	echo "OF2 release under test: $V2 (and $VN2 made here)"
+	for s in cisco telio avaya openpeak; do
+		[ -f $D/of2-$s.bin ] || continue
+		to of2-rel; start $D/of2-$s.bin; run "OF2 of2-$s -> $V2" 0 ours
+		grep -q "plan: write blocks 10 11 9 " $T/out && echo "ok     ... blocks 10 11 9" || { echo "FAIL   ... plan: $(grep plan: $T/out)"; FAILS=$((FAILS + 1)); }
+		cp $D/of2-$s.bin $F; rm -rf $T/p; python3 -I $D/fwplan.py plan $F $OF_FW_IMAGE $T/p >/dev/null
+		grep -qv '^fhp ' $T/p/steps.txt && { echo "FAIL   ... the plan erases: $(tr '\n' ' ' < $T/p/steps.txt)"; FAILS=$((FAILS + 1)); } || echo "ok     ... program only, nothing erased"
+	done
+	to of2-rel; start $D/of2-cisco.bin; bash $U >/dev/null 2>&1; cp $F $T/c2-rel.bin
+	start $T/c2-rel.bin; run "OF2 $V2 -> $V2: nothing to do" 0 same
+	to of2-next; start $T/c2-rel.bin; run "OF2 $V2 -> $VN2 (block 10 steps)" 0 ours
+	[ "$(b $F 9 1)" = "$(b $T/c2-rel.bin 9 1)" ] && echo "ok     ... block 9 unchanged" || { echo "FAIL   ... block 9 changed"; FAILS=$((FAILS + 1)); }
+	for s in cisco:of2-rel:$D/of2-cisco.bin telio:of2-rel:$D/of2-telio.bin $V2:of2-next:$T/c2-rel.bin; do
+		n=${s%%:*}; v=$(echo $s | cut -d: -f2); p=${s#*:*:}
+		[ -f $p ] || continue
+		to $v; cp $p $F; N=$(steps)
+		for k in $(seq 1 $N); do
+			start $p; run "OF2 $n -> $v, power cut after step $k of $N" 9 any FLASH_TEST_STOP=$k
+			run "  ... re-run completes" 0 ours
+		done
+	done
+	to of2-rel
+	start $D/of2-cisco.bin; run "OF2 stock, step 1 lost once, retried" 0 ours FLASH_TEST_FAULT_STEP=1 FLASH_TEST_FAULT=1
+	start $D/of2-cisco.bin; run "OF2 stock, step 6 (the gate's State) never verifies" 2 any FLASH_TEST_FAULT_STEP=6 FLASH_TEST_FAULT=3
+	run "  ... re-run completes" 0 ours
+	start $D/of2-cisco.bin; run "OF2 chip, the OF1 image: refused" 1 same OF_FW_IMAGE=$T/rel.bin
+	start $D/o2-stock.bin; run "OF1 chip, the OF2 image: refused" 1 same
+	ARGS=--check; start $D/of2-cisco.bin; run "OF2 --check on stock: update needed" 5 same; ARGS=
+	mkdir -p $T/lib1 $T/lib2; cp $T/rel.bin $T/lib1/of1-blw.bin; cp $T/rel.bin $T/lib2/of1-blw.bin; cp $T/of2-rel.bin $T/lib2/of2-blw.bin
+	start $D/of2-cisco.bin; run "OF2 chip, no OF2 image installed: left alone" 3 same OF_FW_IMAGE= OF_FW_LIB=$T/lib1
+	start $D/of2-cisco.bin; run "OF2 chip, image chosen by model" 0 ours OF_FW_IMAGE= OF_FW_LIB=$T/lib2
+	grep -q "$V2" $T/out && echo "ok     ... it took $V2" || { echo "FAIL   ... it didn't take $V2"; FAILS=$((FAILS + 1)); }
+	to rel; start $D/o2-stock.bin; run "OF1 chip, image chosen by model" 0 ours OF_FW_IMAGE= OF_FW_LIB=$T/lib2 OF_FW_MANIFEST=$T/mof2-rel.txt
+	to of2-rel
+	[ -f $D/of2-swisscom.bin ] && { start $D/of2-swisscom.bin; run "the do-not-use Swisscom OF2 build (0ABPW006): refused" 3 same; }
+fi
 
 # A system on the internal memory: boot.nsh held to BlwMmcFix.efi + GRUB while the chip is
 # written. A stand-in of-bootnsh writes the fallback lines while the flag is there, else the
