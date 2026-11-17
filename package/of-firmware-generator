@@ -8,23 +8,50 @@
 ##  stopped for the restart that follows. On any other boot it does nothing, and the
 ##  service keeps its usual place.
 ##
-##  of-flash.service (openframe-scripts) is ordered before the update, so it's moved
-##  early too, or the two orderings would make a loop. It only does anything when its
-##  conditions hold, and a stick it would flash from (one holding the image copy) is left
-##  alone here: OpenFrame Flash runs the updater itself, in its own order.
+##  Units ordered before the update (OpenFrame Flash's of-flash.service, of-installer.service
+##  before it) would make a loop with it there, and systemd would break the loop by dropping
+##  the update. So every service that says Before=of-firmware.service is moved early too,
+##  whatever it's called. If one of them waits for anything past the start of the boot (its
+##  After=), moving it could make another loop: then nothing is moved, and the update runs in
+##  its usual place. A stick holding an installer's image copy is left alone as well: the
+##  installer runs the updater itself, in its own order.
 ##
-##  Generators run at the very start of the boot and at every daemon-reload. This only
-##  reads two paths and writes drop-ins under the directory it's given (/run, so they go
-##  with the restart).
+##  Generators run at the very start of the boot and at every daemon-reload. This only reads
+##  unit files and two paths, and writes drop-ins under the directory it's given (/run, so
+##  they go with the restart).
 
 PENDING=/var/lib/openframe-firmware/pending
-FLASHIMG=/usr/lib/openframe/flash/image.img.gz
+FLASHIMG="/usr/lib/openframe/flash/image.img.gz /usr/lib/openframe/install/image.img.gz"
+UNITDIRS="/etc/systemd/system /run/systemd/system /usr/local/lib/systemd/system /usr/lib/systemd/system /lib/systemd/system"
+# What a unit moved early may still come after: the start of the boot.
+EARLY="local-fs.target local-fs-pre.target sysinit.target systemd-udevd.service systemd-remount-fs.service systemd-journald.socket systemd-tmpfiles-setup.service systemd-modules-load.service"
 OUT="${1:-/run/systemd/generator}"
 
 [ -f "$PENDING" ] || exit 0
-[ -e "$FLASHIMG" ] && exit 0
+for F in $FLASHIMG; do [ -e "$F" ] && exit 0; done
 
-for U in of-firmware of-flash; do
+# The services ordered before the update, by name (the first file found for each).
+MOVE=""; SEEN=""
+for D in $UNITDIRS; do
+	[ -d "$D" ] || continue
+	for F in "$D"/*.service; do
+		[ -e "$F" ] || [ -L "$F" ] || continue
+		U=${F##*/}
+		case " $SEEN " in *" $U "*) continue ;; esac
+		SEEN="$SEEN $U"
+		# A masked unit (a link to /dev/null) isn't started, so it orders nothing.
+		[ -f "$F" ] && [ -s "$F" ] || continue
+		grep -E '^[[:space:]]*Before=' "$F" | grep -qw 'of-firmware\.service' || continue
+		[ "$U" = of-firmware.service ] && continue
+		# Anything it waits for must be early in the boot too.
+		for A in $(sed -n 's/^[[:space:]]*After=//p' "$F"); do
+			case " $EARLY " in *" $A "*) ;; *) exit 0 ;; esac
+		done
+		MOVE="$MOVE ${U%.service}"
+	done
+done
+
+for U in of-firmware $MOVE; do
 	mkdir -p "$OUT/$U.service.d" || exit 0
 	cat > "$OUT/$U.service.d/50-quiet-flash.conf" <<-'EOF'
 	# of-firmware-generator: a firmware update is pending, so before the ordinary services.

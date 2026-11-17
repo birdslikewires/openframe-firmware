@@ -136,29 +136,54 @@ fi
 # of-flash.service, ordered before it) ahead of basic.target; none with nothing pending, or
 # on a stick holding OpenFrame Flash's image copy (it runs the updater itself).
 GEN=${2:-$HERE/../package/of-firmware-generator}
-sed -e "s|^PENDING=.*|PENDING=$T/gpending|" -e "s|^FLASHIMG=.*|FLASHIMG=$T/gimage|" "$GEN" > "$T/gen"
+sed -e "s|^PENDING=.*|PENDING=$T/gpending|" -e "s|^FLASHIMG=.*|FLASHIMG=\"$T/gimage $T/gimage2\"|" \
+    -e "s|^UNITDIRS=.*|UNITDIRS=\"$T/getc $T/glib\"|" "$GEN" > "$T/gen"
+# The units ordered before the update in this system: of-flash (OpenFrame Flash), and the
+# of-installer it was before, as their unit files have them.
+unit_before() {	# <dir> <name> <After= line>
+	mkdir -p "$1"
+	printf '[Unit]\nDescription=test\nAfter=%s\nBefore=of-firmware.service of-mac-reboot.service getty@tty1.service\n[Service]\nExecStart=/bin/true\n' "$3" > "$1/$2.service"
+}
+# gencase <name> <pending> <image copy: no | flash | install> <want: none | units moved, in order>
+#         [units: flash | installer | both | late | masked]
 gencase() {
-	local name=$1 pending=$2 image=$3 want=$4 got out
-	rm -rf "$T/gout" "$T/gpending" "$T/gimage"; mkdir "$T/gout"
-	[ "$pending" = yes ] && touch "$T/gpending"; [ "$image" = yes ] && touch "$T/gimage"
+	local name=$1 pending=$2 image=$3 want=$4 units=${5:-flash} got out U F
+	rm -rf "$T/gout" "$T/gpending" "$T/gimage" "$T/gimage2" "$T/getc" "$T/glib"; mkdir -p "$T/gout" "$T/getc" "$T/glib"
+	printf '[Unit]\nBefore=getty@tty1.service\n[Service]\nExecStart=/bin/true\n' > "$T/glib/of-firmware.service"
+	printf '[Unit]\nAfter=of-firmware.service\n[Service]\nExecStart=/bin/true\n' > "$T/glib/of-mac-reboot.service"
+	case $units in
+		flash) unit_before "$T/glib" of-flash "local-fs.target systemd-udevd.service" ;;
+		installer) unit_before "$T/glib" of-installer "local-fs.target systemd-udevd.service" ;;
+		both) unit_before "$T/glib" of-flash "local-fs.target systemd-udevd.service"
+		      unit_before "$T/glib" of-installer "local-fs.target systemd-udevd.service" ;;
+		late) unit_before "$T/glib" of-flash "local-fs.target systemd-udevd.service"
+		      unit_before "$T/glib" late-thing "network-online.target" ;;
+		masked) unit_before "$T/glib" of-installer "local-fs.target systemd-udevd.service"
+		        ln -s /dev/null "$T/getc/of-installer.service" ;;
+	esac
+	[ "$pending" = yes ] && touch "$T/gpending"
+	[ "$image" = flash ] && touch "$T/gimage"; [ "$image" = install ] && touch "$T/gimage2"
 	sh "$T/gen" "$T/gout" "$T/gout.early" "$T/gout.late"
-	got=$(cd "$T/gout" && find . -name '*.conf' | sort | tr '\n' ' ')
-	if [ "$want" = none ]; then
-		[ -z "$got" ] && out=ok || out=FAIL
-	else
-		out=ok
-		for U in of-firmware of-flash; do
-			F="$T/gout/$U.service.d/50-quiet-flash.conf"
-			grep -qx 'DefaultDependencies=no' "$F" 2>/dev/null && grep -qx 'Before=basic.target' "$F" &&
-				grep -qx 'After=sysinit.target' "$F" && grep -qx 'Conflicts=shutdown.target' "$F" || out=FAIL
-		done
-	fi
+	got=$(cd "$T/gout" && find . -name '*.conf' | sed 's|^\./||; s|\.service\.d/50-quiet-flash\.conf||' | sort | tr '\n' ' ')
+	got=${got% }
+	out=ok
+	[ "${got:-none}" = "$want" ] || out=FAIL
+	for U in $got; do
+		F="$T/gout/$U.service.d/50-quiet-flash.conf"
+		grep -qx 'DefaultDependencies=no' "$F" && grep -qx 'Before=basic.target' "$F" &&
+			grep -qx 'After=sysinit.target' "$F" && grep -qx 'Conflicts=shutdown.target' "$F" || out=FAIL
+	done
 	[ "$out" = ok ] && echo "ok   generator, $name: ${got:-no drop-ins}" ||
 		{ echo "FAIL generator, $name: ${got:-no drop-ins} (want $want)"; FAILS=$((FAILS + 1)); }
 }
-gencase "update pending"                       yes no  early
-gencase "nothing pending"                      no  no  none
-gencase "pending, on OpenFrame Flash's stick"  yes yes none
+gencase "update pending (of-flash)"                  yes no      "of-firmware of-flash"
+gencase "update pending (of-installer, older)"       yes no      "of-firmware of-installer" installer
+gencase "update pending (both)"                      yes no      "of-firmware of-flash of-installer" both
+gencase "of-installer masked in /etc"                yes no      "of-firmware" masked
+gencase "a unit before it that waits for the network" yes no     none late
+gencase "nothing pending"                            no  no      none
+gencase "pending, on OpenFrame Flash's stick"        yes flash   none
+gencase "pending, on an older installer's stick"     yes install none installer
 
 [ $FAILS = 0 ] && echo "All passed." || echo "$FAILS failed."
 exit $FAILS
