@@ -222,6 +222,10 @@ some pushed commits, test-unit dumps and scripts carry those numbers. They are, 
 | - | 26.11.31-dev1-dev3 | the unified driver on stock O2 blocks (OF2-style build on an OF1): splash, countdown, USB-first, model in memory |
 | - | 26.11.31-dev4 | the block-11 layout from stock O2, no bird (built, not flashed) |
 | - | 26.11.31-dev5 | the block-11 layout as a release builds it (stock O2 + bird + `--block11`, md5 `a6c7a156...`): the first run of of-firmware-update v26.11.6 on hardware, the unknown Joggler from 26.11.30 (plan 9 10 11 9, all verified, boot.nsh held to its fallback meanwhile; the chip then matched the emulated end state byte for byte). Power-cycled by hand: the bird, kernel straight from the internal memory, DMI 26.11.31-dev5, microcode 0x217, panel at 60 Hz, up in about 32 s |
+| - | 26.11.31-dev6 | `-DKBDTIME` (kbdtime.inc): keyboard timing in a second SMBIOS string; the first block-10 step (10 11 10). With a USB keyboard (a 2.4 GHz receiver): readable 3.43 s after a warm reset (3.69 s cold), 0.24 s before the shell's one look for Esc; nothing pressed or held before that look reached it |
+| - | 26.11.31-dev7 | dev6 waiting 2 s at that look: mashed Esc came through at once (one waiting at the look, then 14 in the window); Esc held from the start never did (a key already down when the firmware starts reading the keyboard is never reported) |
+| - | 26.11.31-dev8 | `escwin.inc`: a 1 s window from the keyboard's arrival (no keyboard, no wait): Esc stopped at the shell every time, but its text never showed (the shell took typing blind). `ConDiag.efi` found why: the display driver's Blt draws nothing on the panel during its splash |
+| - | 26.11.31-dev9 | dev8 + on Esc, our own Blt straight into the framebuffer and the cursor at the top left: the shell's prompt shows over the bird (the console's 80x25 text centred, 80 pixels in), `map` fills the screen and scrolls the bird up; a normal boot shows only the bird |
 
 ```
 venv/bin/python -I tools/build_ucode_driver.py /tmp/base.bin /tmp/of1-blw-26.11.26-dev1-timing.bin \
