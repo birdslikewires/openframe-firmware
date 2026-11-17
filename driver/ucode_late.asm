@@ -65,7 +65,11 @@
 ;    when the boot block's ROM name (read only, at 0xFFFEA268) is the OF2's (model.inc).
 ; 16. Esc at boot: from 26.11.31, with a USB keyboard, the shell's one look for Esc waits until 1 s
 ;    after the keyboard appeared, so Esc pressed at boot reliably stops at the shell's prompt;
-;    nothing is shown for it, and with no USB keyboard nothing waits (escwin.inc).
+;    nothing is shown for it, and with no USB keyboard nothing waits (escwin.inc). The prompt it
+;    gives is drawn straight into the framebuffer (the display driver's own Blt shows nothing
+;    while its splash is up).
+; 17. Text console width: from 26.11.31 the firmware's text console has 100 columns, the panel's
+;    whole width, not 80 centred (textmode.inc).
 ;
 ; Position-independent: data is reached through call/pop, so no relocations are needed.
 ; Assembled with `nasm -f bin`; build_ucode_driver.py wraps it in a PE32 image and an FFS
@@ -819,6 +823,7 @@ mac_ok: xor     eax, eax
 %include "usbrt.inc"
 %include "splash.inc"
 %include "countdown.inc"
+%include "textmode.inc"
 %include "model.inc"
 %include "img_patch.inc"
 %ifdef TIMING

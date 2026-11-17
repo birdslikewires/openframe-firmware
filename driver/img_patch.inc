@@ -12,8 +12,10 @@
 ;   - the display driver (IEGD GOP): our splash in its configuration (splash.inc,
 ;     gsp_patch_image), from 26.11.31. It reads that only when the console starts it;
 ;   - the shell: no startup.nsh countdown (countdown.inc, cd_patch_image), from 26.11.31. It
-;     loads at BDS, from the boot option, long after the rest.
-; NBDXE is loaded before this driver, so it is patched at the entry; the others after, so
+;     loads at BDS, from the boot option, long after the rest;
+;   - the DXE core: its text console 100 columns wide, the panel's width (textmode.inc,
+;     cw_patch_image), from 26.11.31.
+; NBDXE and the DXE core are loaded before this driver, so patched at the entry; the others after, so
 ; through a LoadedImage protocol notify, before anything uses them.
 
 ; UINT32 img_patch(EFI_BOOT_SERVICES *BS): looks through every loaded image (EFI_LOADED_IMAGE)
@@ -91,11 +93,17 @@ img_patch:
         add     esp, 4
         mov     [edi + (mmw_done - .here)], al
 .urt:   cmp     byte [edi + (urt_n - .here)], 2 ; USBRT: any copy not changed yet (a changed one
-        jae     .gop                            ; no longer matches, so isn't counted twice)
+        jae     .cwp                            ; no longer matches, so isn't counted twice)
         push    dword [ebp - 12]
         call    urt_patch_image
         add     esp, 4
         add     [edi + (urt_n - .here)], al
+.cwp:   cmp     byte [edi + (cw_done - .here)], 0
+        jne     .gop
+        push    dword [ebp - 12]
+        call    cw_patch_image
+        add     esp, 4
+        mov     [edi + (cw_done - .here)], al
 .gop:   cmp     byte [edi + (gsp_done - .here)], 0
         jne     .shl
         push    dword [ebp - 12]
@@ -144,6 +152,8 @@ img_patch:
         cmp     byte [edi + (gsp_done - .here)], 0
         je      .b0
         cmp     byte [edi + (cd_done - .here)], 0
+        je      .b0
+        cmp     byte [edi + (cw_done - .here)], 0
         je      .b0
         inc     eax
 .b0:    test    eax, eax

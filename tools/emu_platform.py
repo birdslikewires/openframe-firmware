@@ -289,6 +289,9 @@ def gop_fake(variant):
 
 SHELL_FILE = G('c57ad6b7-0515-40a8-9d21-551652854e37')
 SHELL_IMG = 0x66000000            # the shell's loaded image (fake, from shell_sig.inc)
+CORE_IMG, CORE_SIZE = 0x67000000, 0x5be80   # the DXE core's loaded image (textmode.inc: its text-mode table)
+CORE_FILE = G('5ae3f37e-4eae-41ae-8240-35465b5e81eb')
+CORE_TABLE = struct.pack('<15I', 80, 25, 800, 480, 1, 80, 50, 1280, 1024, 2, 100, 31, 800, 600, 3)
 SHELL_VARIANTS = ('of1', 'of2', 'ours', 'code', 'small', 'guid', 'nopath')
 
 
@@ -459,7 +462,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         fake_tsc_hi=0, gop_img='before', gop_variant='sharp', gop_dpll=GOP_DPLL, shell_img='after', shell_variant='of1', flash_model=None,
         kbdtime=False, kt_inputs=(('split', 1900), ('usb', 2600)), kt_keys=((0x17, 0), (0, 0x61)), kt_conin=True, kt_late=(),
         kt_shell_t=4600, kt_rks_t=4700, kt_rks_error=False, kt_timer_fails=False, kt_settimer_fails=False, kt_timer_never=False,
-        kt_gop='ok', kt_blt_test=False):
+        kt_gop='ok', kt_blt_test=False, core_variant='stock'):
     """The console (every run): ST->ConIn, whose ReadKeyStroke hands out kt_keys ((ms it can be read,
     scan, char), or (scan, char) from the start) or always fails (kt_rks_error); Simple Text
     Inputs appearing at kt_inputs' times ('split': ConSplitter's, no device path; 'usb'; 'ps2':
@@ -728,6 +731,20 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             notify(LOADED_IMAGE, 'LoadedImage notify')
     make_image(0, G('a5d5b0c1-7d2f-4c3e-9b1a-26b1e0f17217'), LOAD, 0x3000)   # this driver
     make_image(1, G('99999999-8888-7777-6666-555555555555'), NB_IMG, 0x3000)  # some other image, same memory
+    if core_variant != 'none':                                    # the DXE core (textmode.inc), loaded before everything
+        mu.mem_map(CORE_IMG, (CORE_SIZE + 0xfff) & ~0xfff)
+        tbl = bytearray(CORE_TABLE)
+        if core_variant == 'table':
+            tbl[0x2c] ^= 1                                        # 100x31's height
+        if core_variant == 'done':
+            tbl[0:4] = struct.pack('<I', 100)
+        if core_variant == 'cols90':
+            tbl[0:4] = struct.pack('<I', 90)
+        mu.mem_write(CORE_IMG + 0x163ac, bytes(tbl))
+        mu.mem_write(CORE_IMG + 0x5336, b'\x8b\x88' + struct.pack('<I', CORE_IMG + 0x163ac + (4 if core_variant == 'code' else 0)) +
+                     b'\x89\x0a\x8b\x80' + struct.pack('<I', CORE_IMG + 0x163b0))
+        make_image(len(images), G('11111111-2222-3333-4444-555555555555') if core_variant == 'guid' else CORE_FILE,
+                   CORE_IMG, CORE_SIZE - (0x100 if core_variant == 'small' else 0), nopath=core_variant == 'nopath')
     if nb_img == 'before':
         load_nbdxe()
     if mmc_img == 'before':
@@ -1565,7 +1582,9 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     gop_now = bytes(mu.mem_read(GOP_IMG, GOP_SIZE))
     shell_now = bytes(mu.mem_read(SHELL_IMG, len(shell_orig)))
     rt_now = [bytes(mu.mem_read(a, 0x9f80)) for a in rt_copies]
-    return dict(kt=kt, shell_orig=shell_orig, shell_want=shell_want, shell_now=shell_now, gop_orig=gop_orig, gop_want=gop_want, gop_now=gop_now, ident=tm_var.get('ident'), rcap=tm_var.get('rcap'), rt_orig=rt_orig, rt_now=rt_now, pin_conns=pin['conns'], pin_devs=pci_devs, cea_changed=cea_changed, mmw_changed=mmw_changed, sdh_changed=sdh_changed, sdh_target=sdh_target, sdh_orig=sdh_orig, sdh_now=sdh_now, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_first=nb_now[0x3ca], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
+    core_cols = struct.unpack('<I', mu.mem_read(CORE_IMG + 0x163ac, 4))[0] if core_variant != 'none' else None
+    core_rest = bytes(mu.mem_read(CORE_IMG + 0x163b0, 56)) == CORE_TABLE[4:] if core_variant not in ('none', 'table') else None
+    return dict(kt=kt, core_cols=core_cols, core_rest=core_rest, shell_orig=shell_orig, shell_want=shell_want, shell_now=shell_now, gop_orig=gop_orig, gop_want=gop_want, gop_now=gop_now, ident=tm_var.get('ident'), rcap=tm_var.get('rcap'), rt_orig=rt_orig, rt_now=rt_now, pin_conns=pin['conns'], pin_devs=pci_devs, cea_changed=cea_changed, mmw_changed=mmw_changed, sdh_changed=sdh_changed, sdh_target=sdh_target, sdh_orig=sdh_orig, sdh_now=sdh_now, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_first=nb_now[0x3ca], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
                 mmc_ev=mmc_ev, nb_ev=nb_ev, evs=evs, mmio_writes=mmio_writes, dpll=final,
                 pp_final=struct.unpack('<I', mu.mem_read(GMA_MMIO + 0x61204, 4))[0] if gma else None,
                 nb_after_notify=nb_bad.get('after_notify'), wrapped=wrapped, entry_bio=entry_bio, late_bio=late_bio, in_image=in_image,
@@ -1773,6 +1792,21 @@ def main():
     ]
     NR = 0x80000006
     ESC, NOKEY = b'\x17\0\0\0', b'\xee' * 4
+    cases += [                                                    # textmode.inc
+        ('text console: the DXE core\'s first mode made 100 columns', dxe, dict(store=lm(CARD)), 0, True, MAC, True),
+        ('text console: already 100: left, counted done', dxe, dict(store=lm(CARD), core_variant='done'), 0, True, MAC, True),
+        ('text console: the core with no FilePath: still found by its signature', dxe, dict(store=lm(CARD), core_variant='nopath'), 0, True, MAC, True),
+        ('text console: another file GUID: left alone', dxe, dict(store=lm(CARD), core_variant='guid'), 0, True, MAC, True),
+        ('text console: a table that differs: left alone', dxe, dict(store=lm(CARD), core_variant='table'), 0, True, MAC, True),
+        ('text console: QueryMode\'s reference not the table: left alone', dxe, dict(store=lm(CARD), core_variant='code'), 0, True, MAC, True),
+        ('text console: another ImageSize: left alone', dxe, dict(store=lm(CARD), core_variant='small'), 0, True, MAC, True),
+        ('text console: no core image at all: nothing else affected', dxe, dict(store=lm(CARD), core_variant='none'), 0, True, MAC, True),
+        ('text console: a first mode of 90 columns: left alone', dxe, dict(store=lm(CARD), core_variant='cols90'), 0, True, MAC, True),
+        ('text console: already 100, everything else loaded before the driver: no LoadedImage notify', dxe,
+         dict(store=lm(CARD), core_variant='done', mmc_img='before', sdh_img='before', usbrt_img='before', shell_img='before'), 0, True, MAC, True),
+        ('text console: the core not ours, everything else loaded before the driver: the LoadedImage notify stays', dxe,
+         dict(store=lm(CARD), core_variant='guid', mmc_img='before', sdh_img='before', usbrt_img='before', shell_img='before'), 0, True, MAC, True),
+    ]
     KB = dict(store=lm(CARD), kt_inputs=(('split', 1900), ('usb', 3430)), kt_shell_t=3627, kt_rks_t=3670)
     if not kbdtime:                                               # escwin.inc: Esc at boot, reliably
         cases += [
@@ -2257,13 +2291,17 @@ def main():
                 p.append('the glue\'s call does not reach sdh_wait')
         elif r['sdh_changed']:
             p.append('SdHost changed at %s' % r['sdh_changed'][:6])
-        if not timing and want_nbp == 'patched' and want_cea == 'patched' and kw.get('nb_img', 'before') == 'before' and \
-                kw.get('mmc_img', 'after') == 'before' and kw.get('usbrt_img', 'after') == 'before' and \
-                want_gop == 'patched' and kw.get('gop_img', 'before') == 'before' and \
-                want_shell == 'patched' and kw.get('shell_img', 'after') == 'before' and \
-                (want_mmw == 'patched' or no_cmd0) and want_sdh == 'patched' and kw.get('sdh_img', 'after') == 'before' and \
-                any(e.get('guid') == LOADED_IMAGE for e in r['evs'].values()):
+        all_else = not timing and want_nbp == 'patched' and want_cea == 'patched' and kw.get('nb_img', 'before') == 'before' and \
+            kw.get('mmc_img', 'after') == 'before' and kw.get('usbrt_img', 'after') == 'before' and \
+            want_gop == 'patched' and kw.get('gop_img', 'before') == 'before' and \
+            want_shell == 'patched' and kw.get('shell_img', 'after') == 'before' and \
+            (want_mmw == 'patched' or no_cmd0) and want_sdh == 'patched' and kw.get('sdh_img', 'after') == 'before'
+        li_notify = any(e.get('guid') == LOADED_IMAGE for e in r['evs'].values())
+        cw_ok = kw.get('core_variant', 'stock') in ('stock', 'nopath', 'done')
+        if all_else and cw_ok and li_notify:
             p.append('LoadedImage notify registered although every image was patched at the entry')
+        if all_else and not cw_ok and not li_notify:
+            p.append('no LoadedImage notify although the DXE core was not patched')
         # Panel clock
         w = r['mmio_writes']
         if want_pclk == 'value':                                  # another fixed value: not ours to change
@@ -2387,6 +2425,11 @@ def main():
                 p.append('boot count filled before ReadyToBoot')
             if want_esc is not None and (r['kt'].get('rks'), r['kt'].get('rks_t')) != want_esc:
                 p.append('the shell\'s ReadKeyStroke calls %s at (ms, stalls) %s, expected %s' % (r['kt'].get('rks'), r['kt'].get('rks_t'), want_esc))
+            want_cols = {'cols90': 90}.get(kw.get('core_variant'), 100 if kw.get('core_variant', 'stock') in ('stock', 'nopath', 'done') else 80)
+            if kw.get('core_variant') != 'none' and r['core_cols'] != want_cols and img is dxe and want_ev and not kw.get('li_fails'):
+                p.append('text console %s columns, expected %s' % (r['core_cols'], want_cols))
+            if r['core_rest'] is False:
+                p.append('text-mode table changed beyond its first columns')
             if want_blt is not None and (r['kt'].get('blt'), r['kt'].get('cursor', [])) != want_blt:
                 p.append('Blt %s, cursor %s, expected %s' % (r['kt'].get('blt'), r['kt'].get('cursor', []), want_blt))
             if r['kt'].get('blt_errors'):
