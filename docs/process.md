@@ -226,6 +226,7 @@ some pushed commits, test-unit dumps and scripts carry those numbers. They are, 
 | - | 26.11.31-dev7 | dev6 waiting 2 s at that look: mashed Esc came through at once (one waiting at the look, then 14 in the window); Esc held from the start never did (a key already down when the firmware starts reading the keyboard is never reported) |
 | - | 26.11.31-dev8 | `escwin.inc`: a 1 s window from the keyboard's arrival (no keyboard, no wait): Esc stopped at the shell every time, but its text never showed (the shell took typing blind). `ConDiag.efi` found why: the display driver's Blt draws nothing on the panel during its splash |
 | - | 26.11.31-dev9 | dev8 + on Esc, our own Blt straight into the framebuffer and the cursor at the top left: the shell's prompt shows over the bird (the console's 80x25 text centred, 80 pixels in), `map` fills the screen and scrolls the bird up; a normal boot shows only the bird |
+| - | 26.11.31-dev10 | dev9 + `textmode.inc`: the text console 100 columns (the DXE core's first text mode, 80 before), so the prompt after Esc starts at the left edge and lines run the panel's full width; a normal boot unchanged (24 s to ping) |
 
 ```
 venv/bin/python -I tools/build_ucode_driver.py /tmp/base.bin /tmp/of1-blw-26.11.26-dev1-timing.bin \
