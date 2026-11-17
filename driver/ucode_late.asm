@@ -70,6 +70,11 @@
 ;    while its splash is up).
 ; 17. Text console width: from 26.11.31 the firmware's text console has 100 columns, the panel's
 ;    whole width, not 80 centred (textmode.inc).
+; 18. Mini-PCIe interrupts: from 26.11.32, on an OpenFrame 2, an SSDT describing the second PCIe
+;    root port and its slot's interrupt routing, which every OF2 DSDT leaves out (the slot's INTA
+;    is GSI 17, not 16), through the firmware's ACPI Support protocol (acpi_rp2.inc).
+; 19. Panel: from 26.11.32, SMBIOS Type 11 "Panel: ..." says which panel this is, from the display
+;    driver's configuration and the USB touchscreen's version (panel_id.inc).
 ;
 ; Position-independent: data is reached through call/pop, so no relocations are needed.
 ; Assembled with `nasm -f bin`; build_ucode_driver.py wraps it in a PE32 image and an FFS
@@ -102,6 +107,10 @@ entry:
 .here:  pop     edi                             ; edi = runtime address of .here
         call    smbios_install                  ; keeps ebx, esi, edi
         call    vendor_install                  ; keeps ebx, esi, edi
+        mov     eax, [ebp + 12]                 ; OF2: the mini-PCIe slot's interrupt routing
+        push    dword [eax + 0x3c]              ; (acpi_rp2.inc; tried again at ReadyToBoot)
+        call    acpi_rp2
+        add     esp, 4
         lea     esi, [edi + (ucode - .here)]    ; esi = embedded microcode update
 
         mov     ebx, 0x80000003                 ; EFI_UNSUPPORTED: update doesn't fit this CPU
@@ -177,6 +186,7 @@ entry:
         mov     eax, [esp]
         push    dword [eax + 0x3c]              ; BootServices
         call    panel_clock
+        call    pid_fill                        ; the panel line (panel_id.inc)
         add     esp, 8
 %else
         call    rtb_register                    ; eax = 0 if the ReadyToBoot event was created
@@ -326,6 +336,8 @@ smbios_install:
         mov     [ebx + (eps_ptr - entry.here)], edx     ; where apply_mac fills the serial and UUID
         lea     eax, [edx + 32 + SMBIOS_COUNT_OFF]
         mov     [ebx + (count_ptr - entry.here)], eax   ; where fill_count writes the boot count
+        lea     eax, [edx + 32 + SMBIOS_PANEL_OFF]
+        mov     [ebx + (panel_ptr - entry.here)], eax   ; where pid_fill writes the panel line
 %ifdef KBDTIME
         lea     eax, [edx + 32 + SMBIOS_KBD_OFF]
         mov     [ebx + (kt_ptr - entry.here)], eax      ; development build: kbdtime.inc's string
@@ -574,6 +586,8 @@ rtb_notify:
         push    dword [eax + 0x3c]              ; BootServices
         call    mmc_fix_install                 ; any MMC BlockIo the notify didn't see
         call    panel_clock                     ; in case the panel-clock notify ran too early
+        call    acpi_rp2                        ; OF2: if the entry couldn't add the SSDT
+        call    pid_fill                        ; the panel line, once USB devices are there
         call    usb_first                       ; a USB drive with startup.nsh: the shell's fs0
 %ifdef TIMING
         shl     eax, 24                         ; development build: 'UFSn', n disks reconnected
@@ -825,6 +839,8 @@ mac_ok: xor     eax, eax
 %include "countdown.inc"
 %include "textmode.inc"
 %include "model.inc"
+%include "acpi_rp2.inc"
+%include "panel_id.inc"
 %include "img_patch.inc"
 %ifdef TIMING
 %include "timing.inc"

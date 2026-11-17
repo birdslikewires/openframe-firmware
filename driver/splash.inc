@@ -50,7 +50,8 @@ gsp_patch_image:
         mov     ebp, [ebx + 0x20]               ; ImageBase
         test    ebp, ebp
         jz      .no
-        mov     edi, [esp]
+        call    pid_note_display                ; which panel it's set up for (panel_id.inc), from
+        mov     edi, [esp]                      ; any build, before the code checks below
         lea     eax, [edi + (gsp_code_sig - .here)]
         push    eax
         lea     eax, [ebp + GSP_CODE_RVA]

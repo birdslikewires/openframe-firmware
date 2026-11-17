@@ -48,6 +48,9 @@ def splash_data(png, pos):
 UCODE_FILE_OFF = 0x10048
 BOOTCOUNT_PREFIX = 'BootCount: '
 BOOTCOUNT_PLACEHOLDER = BOOTCOUNT_PREFIX + '-' * 10      # 10 digits: any 32-bit count
+PANEL_PREFIX = 'Panel: '
+PANEL_PLACEHOLDER = PANEL_PREFIX + '-' * 48               # panel_id.inc's PID_WIDTH
+ACPI_RP2 = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'driver', 'of2_rp2.aml')
 KBD_PREFIX = 'KbdTime: '                                 # the -DKBDTIME development build's (kbdtime.inc)
 KBD_PLACEHOLDER = KBD_PREFIX + 'I-----U-----R-----S-----F-----N--K--------C--u--P-----W--'
 MEMSIZE_UNKNOWN = 0xFFFF                                 # SMBIOS: size unknown
@@ -104,10 +107,11 @@ def smbios_blobs(bios_version, bios_date, release, system, kbdtime=False):
                       0x13, 0x0080,                   # DDR2; synchronous
                       0,                              # speed (MT/s): filled in
                       0, 0, 0, 0) + strings('Onboard')    # manufacturer, serial, asset tag, part: none
-    if kbdtime:                                      # development build: a second string (kbdtime.inc)
-        t11 = struct.pack('<BBHB', 11, 5, 0x0005, 2) + strings(BOOTCOUNT_PLACEHOLDER, KBD_PLACEHOLDER)
+    # Then the panel line (panel_id.inc), also filled in at ReadyToBoot.
+    if kbdtime:                                      # development build: a third string (kbdtime.inc)
+        t11 = struct.pack('<BBHB', 11, 5, 0x0005, 3) + strings(BOOTCOUNT_PLACEHOLDER, PANEL_PLACEHOLDER, KBD_PLACEHOLDER)
     else:
-        t11 = struct.pack('<BBHB', 11, 5, 0x0005, 1) + strings(BOOTCOUNT_PLACEHOLDER)
+        t11 = struct.pack('<BBHB', 11, 5, 0x0005, 2) + strings(BOOTCOUNT_PLACEHOLDER, PANEL_PLACEHOLDER)
     t127 = struct.pack('<BBH', 127, 4, 0x0006) + b'\0\0'
     structs = [t0, t1, t3, t16, t17, t11, t127]
     table = b''.join(structs)
@@ -130,8 +134,18 @@ def smbios_blobs(bios_version, bios_date, release, system, kbdtime=False):
     else:
         model1 = model2 = 0
     kbd = table.index(KBD_PLACEHOLDER.encode()) + len(KBD_PREFIX) if kbdtime else 0
+    assert table.count(PANEL_PLACEHOLDER.encode()) == 1
+    panel = table.index(PANEL_PLACEHOLDER.encode()) + len(PANEL_PREFIX)
     return bytes(eps) + b'\0', table, dict(count=digits, memsize=t17_off + 12, memspeed=t17_off + 21,
-                                          model1=model1, model2=model2, kbd=kbd)
+                                          model1=model1, model2=model2, kbd=kbd, panel=panel)
+
+
+def check_ssdt(path):
+    """of2_rp2.aml (iasl from of2_rp2.asl): an SSDT whose header length and checksum are right."""
+    d = open(path, 'rb').read()
+    if d[:4] != b'SSDT' or struct.unpack_from('<I', d, 4)[0] != len(d) or sum(d) & 0xFF:
+        bp.fail('%s: not a whole SSDT (signature, length or checksum): rebuild it with iasl' % path)
+    return d
 
 
 def pick_ucode(img, path):
@@ -250,13 +264,15 @@ def main():
             open(a.smbios_out, 'wb').write(eps + table)
         sp = os.path.join(td, 'splash.bin')
         open(sp, 'wb').write(splash_data(a.splash, a.splash_pos))
+        check_ssdt(ACPI_RP2)                    # the OF2's mini-PCIe routing (acpi_rp2.inc)
         def assemble(*defs):
             r = subprocess.run(['nasm', '-f', 'bin', '-I', os.path.dirname(ASM) + '/', '-DUCODE_FILE="%s"' % uc,
                                 '-DSMBIOS_EPS_FILE="%s"' % ef, '-DSMBIOS_FILE="%s"' % tf, '-DSPLASH_FILE="%s"' % sp,
                                 '-DSMBIOS_LEN=%d' % len(table), '-DSMBIOS_COUNT_OFF=%d' % offs['count'],
                                 '-DSMBIOS_MEMSIZE_OFF=%d' % offs['memsize'], '-DSMBIOS_MEMSPEED_OFF=%d' % offs['memspeed'],
                                 '-DSMBIOS_MODEL1_OFF=%d' % offs['model1'], '-DSMBIOS_MODEL2_OFF=%d' % offs['model2'],
-                                '-DSMBIOS_KBD_OFF=%d' % offs['kbd']] + list(defs) + ['-o', out, ASM],
+                                '-DSMBIOS_KBD_OFF=%d' % offs['kbd'], '-DSMBIOS_PANEL_OFF=%d' % offs['panel'],
+                                '-DACPI_RP2_FILE="%s"' % os.path.abspath(ACPI_RP2)] + list(defs) + ['-o', out, ASM],
                                capture_output=True, text=True)
             if r.returncode:
                 bp.fail('nasm: ' + r.stderr)

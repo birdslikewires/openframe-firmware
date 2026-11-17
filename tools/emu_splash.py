@@ -87,7 +87,12 @@ def assemble(driver=DRIVER):
     with tempfile.TemporaryDirectory() as t:
         src, out, sp = os.path.join(t, 'w.asm'), os.path.join(t, 'w.bin'), os.path.join(t, 'splash.bin')
         open(sp, 'wb').write(SPLASH)
-        open(src, 'w').write('bits 32\n        jmp gsp_patch_image\n%include "splash.inc"\n' + m.group(0))
+        # panel_id.inc (from dev2): splash.inc notes the panel configuration for it. The wrapper
+        # says where its note is: a dword after the jmp, 0 for a driver without it.
+        pid = os.path.exists(os.path.join(driver, 'panel_id.inc'))
+        open(src, 'w').write('bits 32\n        jmp near gsp_patch_image\n' +
+                             ('        dd pid_display\n%include "panel_id.inc"\n' if pid else '        dd 0\n') +
+                             '%include "splash.inc"\n' + m.group(0))
         r = subprocess.run(['nasm', '-f', 'bin', '-I', driver + '/', '-DSPLASH_FILE="%s"' % sp, '-o', out, src],
                            capture_output=True, text=True)
         if r.returncode:
@@ -165,6 +170,24 @@ def layout(image):
     return v, px, end
 
 
+def panel_note(code, image, size):
+    """What gsp_patch_image notes about the panel configuration (panel_id.inc): 1 Sharp, 2 Samsung,
+    0 neither; None for a driver without the note."""
+    at = struct.unpack_from('<I', code, 5)[0]
+    if not at:
+        return None
+    uc, bad = machine(code, image, size)
+    li, node = DATA, DATA + 0x100
+    uc.mem_write(node, b'\x04\x06\x14\x00' + uuid.UUID(GOP_GUID).bytes_le + b'\x7f\xff\x04\x00')
+    uc.mem_write(li, struct.pack('<IIIIII', 0x1000, 0, 0, 0, node, 0))
+    uc.mem_write(li + 0x20, struct.pack('<IIQ', BASE, 0, size))
+    try:
+        call(uc, CODE, [li])
+    except UcError:
+        return 'crashed'
+    return uc.mem_read(CODE + at, 1)[0]
+
+
 def run_all(code, images):
     rel_path = os.path.join(ROOT, 'releases', 'of1-blw-26.11.30.bin')
     release = gop(rel_path)[0] if os.path.exists(rel_path) else None
@@ -174,6 +197,10 @@ def run_all(code, images):
         image, size = gop(path)
         print('%s:' % name)
         h0 = handlers(image, size)
+        want_pn = {b'OpenFrame-Sh': 1, b'OpenFrame-Sa': 2}.get(bytes(image[0x13fb:0x13fb + 12]), 0)
+        pn = panel_note(code, image, size)
+        if pn is not None:
+            check(pn == want_pn, 'panel noted as %r (its label says %s)' % (pn, {1: 'Sharp', 2: 'Samsung', 0: 'neither'}[want_pn]))
         st, after, kept, balanced, bad = patch(code, image, size)
         check(st == 1 and not bad, 'patched (status %r%s)' % (st, ', bad accesses %s' % [hex(b) for b in bad[:3]] if bad else ''))
         check(kept and balanced, 'ebx, esi, edi, ebp kept and the stack balanced')
