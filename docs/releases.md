@@ -481,3 +481,12 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
   Verizon, Telstra and 26.11.30; `test_fwplan.py` (819 cut points); `test_of_firmware_update.sh` 79 cases with this
   image; the real `dmidecode` on its SMBIOS table. Development builds dev5 to dev10 on the unknown Joggler
   ([process.md](process.md)).
+  On hardware: the unknown Joggler (system on its internal memory, a USB keyboard in its one port) from 26.11.31-dev10
+  with `of-firmware-update` v26.11.6: plan 10 11 10 (1167 states proven), every part verified, boot.nsh held to its
+  fallback meanwhile; the chip then matched the plan byte for byte (NVRAM aside), block 11 the release's. Cold boot by
+  hand: `efi: EFI v2.0 by BirdsLikeWires`, `DMI: OpenPeak OpenFrame 1, BIOS 26.11.31 11/17/2026`, memory slots 1/1,
+  microcode 0x217 on both threads, the kernel straight from the internal memory, nothing failed, the panel at 60 Hz,
+  UUID from the unit's generated LAN MAC (no Wi-Fi card: no serial number), eth0 up with that MAC, BootCount 346, lock
+  registers 01; the boot changed only NVRAM's MonotonicCounter record (14 bytes). On dev9/dev10 (the same Esc code):
+  mashing Esc stops at the shell's prompt, at the top left, the full width; `map` fills the screen and scrolls the bird
+  up; `fs0:\startup.nsh` carries on into Linux; untouched, every boot shows only the bird.
