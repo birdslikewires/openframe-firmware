@@ -82,6 +82,10 @@ KBD_PREFIX = 'KbdTime: '
 TEXTIN_GUID = G('387477c1-69c7-11d2-8e39-00a0c969723b')
 DP_GUID = G('09576e91-6d3f-11d2-8e39-00a0c969723b')
 KT_TSC_KHZ = 1329993
+GOP_BLT_STUB = STUBS + 0x70       # the display driver's own Blt: succeeds, draws nothing (IEGD's, on the splash)
+CONOUT = STUBS + 0x2c00           # ST->ConOut: only SetCursorPosition is ever called
+CONOUT_CUR = STUBS + 0x80
+BLT_BUF = 0x0b000000              # a BltBuffer for the Blt checks (2 MB)
 # The OF1's PCI functions, as (bus, dev, fn, class dword at 0x08): graphics, three SD hosts (08/05), USB, the NIC.
 OF1_PCI = ((0, 0x02, 0, 0x03000007), (0, 0x1e, 0, 0x08050101), (0, 0x1e, 1, 0x08050101), (0, 0x1e, 2, 0x08050101),
            (0, 0x1d, 7, 0x0c032002), (1, 0x00, 0, 0x02000006))
@@ -369,6 +373,82 @@ SAVED = ((UC_X86_REG_EBX, 0x11111111), (UC_X86_REG_ESI, 0x22222222), (UC_X86_REG
          (UC_X86_REG_EBP, 0x44444444))
 
 
+def blt_check(mu, call, blt):
+    """Drives the Blt in place (escwin.inc's ew_blt) through random operations, each against a
+    model of Graphics Output on an 800x480 BGR8 framebuffer; returns what went wrong."""
+    import random
+    rng = random.Random(7)
+    pitch = FB_W * 4
+    fb = bytearray(mu.mem_read(FB, FB_W * FB_H * 4))
+    bad = []
+    def px(i):
+        return struct.pack('<I', (i * 2654435761) & 0xffffffff)
+    def on(x, y, w, h):
+        return 0 <= x and 0 <= y and w > 0 and h > 0 and x + w <= FB_W and y + h <= FB_H
+    def rect(fb_, x, y, w, h):
+        return b''.join(bytes(fb_[(y + r) * pitch + x * 4:(y + r) * pitch + (x + w) * 4]) for r in range(h))
+    for n in range(160):
+        op = rng.choice([0, 1, 2, 3, 3, 4]) if n % 10 else 5
+        w, h = rng.choice([1, 8, 19, 37, 160, 800]), rng.choice([1, 19, 40, 480])
+        if op != 5 and rng.random() < 0.15:
+            w = rng.choice([0, w])
+            h = rng.choice([0, h]) if w else h
+        sx, sy = rng.randrange(0, FB_W), rng.randrange(0, FB_H)
+        dx, dy = rng.randrange(0, FB_W), rng.randrange(0, FB_H)
+        if rng.random() < 0.7:                                    # mostly rectangles on the screen
+            w, h = max(0, min(w, FB_W - max(sx, dx))), max(0, min(h, FB_H - max(sy, dy)))
+        if op == 5:                                               # a console scroll: one text row up
+            op, sx, sy, dx, dy, w, h = 3, 0, 19, 0, 0, FB_W, FB_H - 19
+        delta = rng.choice([0, w * 4, w * 4 + 12]) if op in (1, 2) else 0
+        d = delta or w * 4
+        bx, by = rng.choice([0, 3]), rng.choice([0, 2])           # where in the BltBuffer
+        buf = bytearray(b''.join(px(rng.randrange(1 << 30)) for _ in range(max(1, (by + h + 1) * (d // 4 + bx + 1)))))[:0x1ff000]
+        mu.mem_write(BLT_BUF, bytes(buf))
+        if op == 0:
+            args = [GOP_INST, BLT_BUF, 0, 0, 0, dx, dy, w, h, delta]
+        elif op == 1:
+            args = [GOP_INST, BLT_BUF, 1, sx, sy, bx, by, w, h, delta]
+        elif op == 2:
+            args = [GOP_INST, BLT_BUF, 2, bx, by, dx, dy, w, h, delta]
+        else:
+            args = [GOP_INST, BLT_BUF, op, sx, sy, dx, dy, w, h, 0]
+        st = call(blt, args, 'Blt')
+        valid = op in (0, 1, 2, 3) and w > 0 and h > 0 and (on(sx, sy, w, h) if op in (1, 3) else True) and \
+            (on(dx, dy, w, h) if op in (0, 2, 3) else True)
+        want_st = 0 if valid else 0x80000002
+        if st != want_st:
+            bad.append('op %d (%d,%d)->(%d,%d) %dx%d: status %#x, expected %#x' % (op, sx, sy, dx, dy, w, h, st, want_st))
+            fb = bytearray(mu.mem_read(FB, FB_W * FB_H * 4))
+            continue
+        if valid:
+            if op == 0:
+                for r in range(h):
+                    fb[(dy + r) * pitch + dx * 4:(dy + r) * pitch + (dx + w) * 4] = buf[0:4] * w
+            elif op == 2:
+                for r in range(h):
+                    o = (by + r) * d + bx * 4
+                    fb[(dy + r) * pitch + dx * 4:(dy + r) * pitch + (dx + w) * 4] = buf[o:o + w * 4]
+            elif op == 3:
+                src = rect(fb, sx, sy, w, h)
+                for r in range(h):
+                    fb[(dy + r) * pitch + dx * 4:(dy + r) * pitch + (dx + w) * 4] = src[r * w * 4:(r + 1) * w * 4]
+            elif op == 1:
+                want_buf = bytearray(buf)
+                src = rect(fb, sx, sy, w, h)
+                for r in range(h):
+                    o = (by + r) * d + bx * 4
+                    want_buf[o:o + w * 4] = src[r * w * 4:(r + 1) * w * 4]
+                got = bytes(mu.mem_read(BLT_BUF, len(buf)))
+                if got != bytes(want_buf):
+                    bad.append('VideoToBltBuffer (%d,%d) %dx%d delta %d: buffer wrong' % (sx, sy, w, h, delta))
+        now = bytes(mu.mem_read(FB, FB_W * FB_H * 4))
+        if now != bytes(fb):
+            i = next(i for i in range(len(fb)) if now[i] != fb[i])
+            bad.append('op %d (%d,%d)->(%d,%d) %dx%d delta %d: framebuffer wrong at pixel (%d,%d)' % (op, sx, sy, dx, dy, w, h, delta, (i % pitch) // 4, i // pitch))
+            fb = bytearray(now)
+    return bad
+
+
 def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fails=False, nic_present=True,
         nic_mac_readonly=False, signals=1, enumerated_at_entry=False, mtc=0x64d, smbios_present=False,
         crc_fails=False, memmap=OF1_MAP, desc_size=48, getmap_fails=False, fsb_msr=0x111,
@@ -378,13 +458,18 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         mmc_img='after', mmc_variant='stock', mmw_variant='stock', sdh_img='after', sdh_variant='stock', pin_variant='of1', profile=False, tm_ticks=70, usbtrace=False, uhcd_variant='stock', usbrt_variant='stock', usbrt_img='after', screen=False, screen_variant='stock',
         fake_tsc_hi=0, gop_img='before', gop_variant='sharp', gop_dpll=GOP_DPLL, shell_img='after', shell_variant='of1', flash_model=None,
         kbdtime=False, kt_inputs=(('split', 1900), ('usb', 2600)), kt_keys=((0x17, 0), (0, 0x61)), kt_conin=True, kt_late=(),
-        kt_shell_t=4600, kt_rks_t=4700, kt_rks_error=False, kt_timer_fails=False, kt_settimer_fails=False, kt_timer_never=False):
+        kt_shell_t=4600, kt_rks_t=4700, kt_rks_error=False, kt_timer_fails=False, kt_settimer_fails=False, kt_timer_never=False,
+        kt_gop='ok', kt_blt_test=False):
     """The console (every run): ST->ConIn, whose ReadKeyStroke hands out kt_keys ((ms it can be read,
     scan, char), or (scan, char) from the start) or always fails (kt_rks_error); Simple Text
     Inputs appearing at kt_inputs' times ('split': ConSplitter's, no device path; 'usb'; 'ps2':
     an ACPI path); the shell loading at kt_shell_t and making its one ReadKeyStroke at kt_rks_t
     (twice: the second must go through). The clock moves with Stall; timers (EVT_TIMER, SetTimer
-    relative) go off on it (kt_timer_never: never)."""
+    relative) go off on it (kt_timer_never: never). The display (kt_gop): 'ok' an 800x480 BGR8
+    framebuffer whose own Blt draws nothing; 'none' (no Graphics Output), 'rgb' (RGB8 pixels),
+    'small' (FrameBufferSize short of the screen), 'high' (above 4 GB), 'ppsl' (a scan line
+    narrower than the screen), 'nomode'. kt_blt_test: then drive whatever Blt is in place through
+    random operations against a model of Graphics Output."""
     """gma: the Poulsbo graphics device at 00:02.0 (8086:8108), its memory decode and BAR0.
     The GOP has set pipe B's PLL (fp, GOP_DPLL). nb_stage: after the entry, the boot manager's
     stage signal, on which NBDXE writes nb_value into DPLL_B and then the stage notifies run
@@ -591,6 +676,16 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         mu.mem_write(base, b'\xff' * 0x9f80 if (usbrt_variant == 'closed' and base == rt_copies[1]) else bytes(rt))
     rt_orig = [bytes(mu.mem_read(a, 0x9f80)) for a in rt_copies]
     mu.mem_write(USB_AREA + 0x7200, struct.pack('<I', USB_AREA + 0x7000))  # the fake gUsbData pointer
+    if not screen and kt_gop != 'none':                           # the display (escwin.inc's ew_show)
+        mu.mem_map(FB, (FB_W * FB_H * 4 + 0xfff) & ~0xfff)
+        mu.mem_map(BLT_BUF, 0x200000)
+        mu.mem_write(GOP_INST + 8, struct.pack('<II', GOP_BLT_STUB, 0 if kt_gop == 'nomode' else GOP_INST + 0x100))
+        mu.mem_write(GOP_INST + 0x100, struct.pack('<IIIIQI', 1, 0, GOP_INST + 0x200, 0x24,
+                                                   FB | (1 << 32 if kt_gop == 'high' else 0),
+                                                   FB_W * FB_H * 4 - (4 if kt_gop == 'small' else 0)))
+        mu.mem_write(GOP_INST + 0x200, struct.pack('<IIII', 0, FB_W, FB_H, 0 if kt_gop == 'rgb' else 1) +
+                     b'\0' * 16 + struct.pack('<I', FB_W - 1 if kt_gop == 'ppsl' else FB_W))
+        mu.mem_write(FB, bytes(range(256)) * (FB_W * FB_H * 4 // 256))   # the splash, as far as anyone can tell
     if screen:                                                    # the framebuffer and the GOP's Mode/Info
         mu.mem_map(FB, (FB_W * FB_H * 4 + 0xfff) & ~0xfff)
         mu.mem_write(GOP_INST + 0x0c, struct.pack('<I', GOP_INST + 0x100))
@@ -678,6 +773,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     kt = dict(t=500, inputs=[], keys=[k if len(k) == 3 else (0,) + tuple(k) for k in kt_keys], stub_calls=0)
     if kt_conin:                                                  # the console's input
         mu.mem_write(ST + 0x24, struct.pack('<I', CONIN))
+    mu.mem_write(ST + 0x2c, struct.pack('<I', CONOUT))            # and output
     mu.mem_write(ST + 0x10, struct.pack('<I', st_crc()))
     st_orig = bytes(mu.mem_read(ST, 0x48))
     allocs = {}
@@ -693,6 +789,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     mu.mem_write(MP + 8, struct.pack('<I', STUBS + 0x10))     # StartupAllAPs
     mu.mem_write(STUBS, b'\xc3' * 0x3000)
     if True:                                                      # the console's input and device paths
+        mu.mem_write(CONOUT + 0x1c, struct.pack('<I', CONOUT_CUR))
         mu.mem_write(CONIN, struct.pack('<III', STUBS + 0x60, CONIN_RKS, 0))
         mu.mem_write(KT_PATHS, bytes([1, 1, 6, 0, 0, 0x1d, 3, 5, 6, 0, 1, 0, 0x7f, 0xff, 4, 0]))   # PCI, USB, end
         mu.mem_write(KT_PATHS + 0x40, bytes([2, 1, 12, 0]) + struct.pack('<II', 0x0303d041, 0) + bytes([0x7f, 0xff, 4, 0]))
@@ -745,6 +842,12 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             if pin_variant == 'read_fails':
                 return ret(0x80000007)
             uc.mem_write(a[4], struct.pack('<I', pci_devs[i_][3]))
+            return ret(0)
+        if addr == GOP_BLT_STUB:                                   # the display driver's own Blt
+            kt['own_blt'] = kt.get('own_blt', 0) + 1
+            return ret(0)
+        if addr == CONOUT_CUR:                                     # ConOut->SetCursorPosition(This, col, row)
+            kt.setdefault('cursor', []).append((a[1], a[2]))
             return ret(0)
         if addr == CONIN_RKS:                                      # ConIn->ReadKeyStroke(This, &Key)
             kt['stub_calls'] += 1
@@ -832,6 +935,11 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 return ret(0)
             if off == 0xac and usbtrace and bytes(uc.mem_read(a[0], 16)) == SMMC_GUID:
                 return ret(0x8000000E)                             # not installed yet
+            if off == 0xac and not screen and bytes(uc.mem_read(a[0], 16)) == GOP_GUID:
+                if kt_gop == 'none':
+                    return ret(0x8000000E)
+                uc.mem_write(a[2], struct.pack('<I', GOP_INST))
+                return ret(0)
             if off == 0xac:                                        # LocateProtocol(guid, reg, &if)
                 ok = bytes(uc.mem_read(a[0], 16)) == MP_GUID
                 if ok:
@@ -1403,6 +1511,9 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             kt['inputs'].append(kind)
             notify(TEXTIN_GUID, 'Simple Text Input notify')
         kt['conin_rks'] = rd(CONIN + 4)
+        kt['blt'] = 'none' if kt_gop == 'none' or screen else 'ours' if LOAD <= rd(GOP_INST + 8) < LOAD + size_img else 'own' if rd(GOP_INST + 8) == GOP_BLT_STUB else '%#x' % rd(GOP_INST + 8)
+        if kt_blt_test:
+            kt['blt_errors'] = blt_check(mu, call, rd(GOP_INST + 8))
         kt['timers'] = [(e_.get('due'), e_.get('closed', False)) for e_ in evs.values() if e_.get('type') == 0x80000000]
     for key in ((0, 0x1c, 0), (1, 0, 0)):
         if cfg[key][4] & 0xffff:
@@ -1665,13 +1776,29 @@ def main():
     KB = dict(store=lm(CARD), kt_inputs=(('split', 1900), ('usb', 3430)), kt_shell_t=3627, kt_rks_t=3670)
     if not kbdtime:                                               # escwin.inc: Esc at boot, reliably
         cases += [
-            ('Esc window: no USB keyboard: one read, no wait (as before)', dxe,
+            ('Esc window: no USB keyboard: one read, no wait (as before), the display left alone', dxe,
              dict(store=lm(CARD), kt_inputs=(('split', 1900),), kt_keys=(), kt_rks_t=3670,
-                  want_esc=([(NR, NOKEY, 1), (NR, NOKEY, 2)], [(3670, 0), (3670, 0)]), want_timers=[]), 0, True, MAC, True),
+                  want_esc=([(NR, NOKEY, 1), (NR, NOKEY, 2)], [(3670, 0), (3670, 0)]), want_timers=[], want_blt=('own', [])), 0, True, MAC, True),
+            ('Esc window: Esc caught: our Blt draws as Graphics Output\'s must (random fills and copies against a model)', dxe,
+             dict(KB, kt_keys=((0, 0x17, 0),), kt_blt_test=True, want_blt=('ours', [(0, 0)])), 0, True, MAC, True),
+            ('Esc window: Esc caught, no Graphics Output: Esc still to the shell, nothing else', dxe,
+             dict(KB, kt_keys=((0, 0x17, 0),), kt_gop='none', want_esc=([(0, ESC, 1), (NR, NOKEY, 2)], [(3670, 0), (3670, 0)]), want_blt=('none', [])), 0, True, MAC, True),
+            ('Esc window: Esc caught, RGB pixels: the display driver\'s Blt left', dxe,
+             dict(KB, kt_keys=((0, 0x17, 0),), kt_gop='rgb', want_blt=('own', [])), 0, True, MAC, True),
+            ('Esc window: Esc caught, framebuffer short of the screen: left', dxe,
+             dict(KB, kt_keys=((0, 0x17, 0),), kt_gop='small', want_blt=('own', [])), 0, True, MAC, True),
+            ('Esc window: Esc caught, framebuffer above 4 GB: left', dxe,
+             dict(KB, kt_keys=((0, 0x17, 0),), kt_gop='high', want_blt=('own', [])), 0, True, MAC, True),
+            ('Esc window: Esc caught, a scan line narrower than the screen: left', dxe,
+             dict(KB, kt_keys=((0, 0x17, 0),), kt_gop='ppsl', want_blt=('own', [])), 0, True, MAC, True),
+            ('Esc window: Esc caught, no Mode: left', dxe,
+             dict(KB, kt_keys=((0, 0x17, 0),), kt_gop='nomode', want_blt=('own', [])), 0, True, MAC, True),
             ('Esc window: keyboard, nobody presses: until 1 s after the keyboard, then on; timer closed', dxe,
-             dict(KB, kt_keys=(), want_esc=([(NR, NOKEY, 77), (NR, NOKEY, 78)], [(4430, 76), (4430, 0)]), want_timers=[(4430, True)]), 0, True, MAC, True),
+             dict(KB, kt_keys=(), want_esc=([(NR, NOKEY, 77), (NR, NOKEY, 78)], [(4430, 76), (4430, 0)]), want_timers=[(4430, True)],
+                  want_blt=('own', [])), 0, True, MAC, True),
             ('Esc window: Esc 300 ms in: handed to the shell at once', dxe,
-             dict(KB, kt_keys=((3970, 0x17, 0),), want_esc=([(0, ESC, 31), (NR, NOKEY, 32)], [(3970, 30), (3970, 0)]), want_timers=[(4430, True)]), 0, True, MAC, True),
+             dict(KB, kt_keys=((3970, 0x17, 0),), want_esc=([(0, ESC, 31), (NR, NOKEY, 32)], [(3970, 30), (3970, 0)]), want_timers=[(4430, True)],
+                  want_blt=('ours', [(0, 0)])), 0, True, MAC, True),
             ('Esc window: Esc already waiting at the look', dxe,
              dict(KB, kt_keys=((0, 0x17, 0),), want_esc=([(0, ESC, 1), (NR, NOKEY, 2)], [(3670, 0), (3670, 0)])), 0, True, MAC, True),
             ('Esc window: other keys mashed, then Esc: the others dropped, Esc to the shell', dxe,
@@ -1744,6 +1871,7 @@ def main():
         want_hooked = kw.pop('want_hooked', None)
         want_esc = kw.pop('want_esc', None)                    # escwin.inc: ([(status, key, stub calls)] x2, [(ms, stalls)] x2)
         want_timers = kw.pop('want_timers', None)
+        want_blt = kw.pop('want_blt', None)                    # (whose Blt is in place, cursor moves) after the run
         want_vendor = kw.pop('want_vendor', 'BirdsLikeWires')
         want_mem = kw.pop('want_mem', (512, 533))
         want_t1 = kw.pop('want_t1', FILLED if kw.get('store') == lm(CARD) and (want_ev or img is app) else UNFILLED)
@@ -2259,6 +2387,10 @@ def main():
                 p.append('boot count filled before ReadyToBoot')
             if want_esc is not None and (r['kt'].get('rks'), r['kt'].get('rks_t')) != want_esc:
                 p.append('the shell\'s ReadKeyStroke calls %s at (ms, stalls) %s, expected %s' % (r['kt'].get('rks'), r['kt'].get('rks_t'), want_esc))
+            if want_blt is not None and (r['kt'].get('blt'), r['kt'].get('cursor', [])) != want_blt:
+                p.append('Blt %s, cursor %s, expected %s' % (r['kt'].get('blt'), r['kt'].get('cursor', []), want_blt))
+            if r['kt'].get('blt_errors'):
+                p.append('Blt: %s' % '; '.join(r['kt']['blt_errors'][:4]))
             if want_timers is not None and r['kt'].get('timers') != want_timers:
                 p.append('timers %s, expected %s' % (r['kt'].get('timers'), want_timers))
             if kbdtime and want_rks is not None and r['kt'].get('rks') != want_rks:

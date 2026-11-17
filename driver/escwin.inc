@@ -18,6 +18,17 @@
 ; more than ESC_MAXPOLLS polls (3 s) whatever the timer does. Later calls go straight through.
 ; The screen is never touched: the bird stays, keyboard or not, until Esc brings the prompt.
 ;
+; The prompt has to be made visible. The display driver's (IEGD's) Blt, which the firmware's text
+; console draws with, reports success but draws nothing on the panel while its splash is up
+; (measured 2026-11-17: a fill through Blt never showed; the same fill written straight into the
+; framebuffer did). That keeps every boot's console text (the shell prints a device table as it
+; starts) off the bird, so it is left alone on a normal boot. Only once Esc has been caught does
+; ew_show put ew_blt in its place, which draws straight into the framebuffer (all four Blt
+; operations), and move the console's cursor to the top left: the prompt appears at the top of
+; the bird screen, the bird left where it is. Only for the framebuffer seen on the OpenFrames (one
+; Graphics Output, 32-bit Blue-Green-Red-Reserved pixels, a linear framebuffer below 4 GB that
+; holds the whole screen); otherwise Esc still stops at the shell, unseen, as before.
+;
 ; Not in the keyboard-timing build (kbdtime.inc wraps the same call) or the app build.
 
 ESC_WINDOW      equ     10000000                ; 1 s, in 100 ns units (SetTimer)
@@ -26,6 +37,7 @@ ESC_FALLBACK    equ     100                     ; polls when there is no timer (
 ESC_MAXPOLLS    equ     300                     ; at most 3 s, whatever the timer says
 ESC_MAXREAD     equ     64                      ; keys read in one go, at most
 ESC_SCAN        equ     0x17                    ; EFI scan code SCAN_ESC
+ESC_BGR8        equ     1                       ; PixelBlueGreenRedReserved8BitPerColor
 
 ; ew_start: in edi = entry.here, [ebp+12] = SystemTable. Keeps the system table for the shell's
 ; hook, watches console inputs appearing, and looks at any already there. Keeps ebx, esi, edi.
@@ -218,7 +230,8 @@ ew_rks:
         add     esp, 4
         inc     esi
         jmp     .try
-.got:   mov     eax, [ebp + 12]                 ; Esc for the shell
+.got:   call    ew_show                         ; the prompt, made visible
+        mov     eax, [ebp + 12]                 ; Esc for the shell
         mov     dword [eax], ESC_SCAN           ; ScanCode SCAN_ESC, UnicodeChar 0
         xor     eax, eax
         jmp     .ret
@@ -261,6 +274,274 @@ ew_rks:
 .yes:   pop     ecx                             ; ZF set (from the cmp)
         ret
 
+; ew_show: Esc caught. Puts ew_blt over the display's Graphics Output Blt (once, and only for the
+; framebuffer described at the top) and the console's cursor at the top left. Keeps every register.
+ew_show:
+        pushad
+        call    .here
+.here:  pop     edi
+        cmp     dword [edi + (ew_fb - .here)], 0
+        jne     .cur                            ; done already
+        mov     ebx, [edi + (ew_st - .here)]
+        mov     ebx, [ebx + 0x3c]               ; BootServices
+        push    0                               ; local: Interface
+        mov     eax, esp
+        push    eax
+        push    0
+        lea     eax, [edi + (ew_gop_guid - .here)]
+        push    eax
+        call    [ebx + 0xac]                    ; BS->LocateProtocol(&GraphicsOutput, NULL, &gop)
+        add     esp, 12
+        pop     esi                             ; esi = GOP
+        test    eax, eax
+        jnz     .out
+        test    esi, esi
+        jz      .out
+        mov     edx, [esi + 0x0c]               ; ->Mode
+        test    edx, edx
+        jz      .out
+        cmp     dword [edx + 0x14], 0           ; FrameBufferBase below 4 GB
+        jne     .out
+        mov     eax, [edx + 0x10]
+        test    eax, eax
+        jz      .out
+        mov     ecx, [edx + 8]                  ; ->Info
+        test    ecx, ecx
+        jz      .out
+        cmp     dword [ecx + 0x0c], ESC_BGR8
+        jne     .out
+        mov     eax, [ecx + 4]                  ; HorizontalResolution
+        test    eax, eax
+        jz      .out
+        cmp     eax, 4096
+        ja      .out
+        cmp     eax, [ecx + 0x20]               ; not wider than a scan line
+        ja      .out
+        mov     eax, [ecx + 8]                  ; VerticalResolution
+        test    eax, eax
+        jz      .out
+        cmp     eax, 4096
+        ja      .out
+        imul    eax, [ecx + 0x20]               ; the whole screen in the framebuffer
+        shl     eax, 2
+        cmp     eax, [edx + 0x18]               ; FrameBufferSize (UINTN: 32 bits here)
+        ja      .out
+        mov     eax, [ecx + 4]
+        mov     [edi + (ew_w - .here)], eax
+        mov     eax, [ecx + 8]
+        mov     [edi + (ew_h - .here)], eax
+        mov     eax, [ecx + 0x20]
+        shl     eax, 2
+        mov     [edi + (ew_pitch - .here)], eax
+        mov     eax, [edx + 0x10]
+        mov     [edi + (ew_fb - .here)], eax
+        lea     eax, [edi + (ew_blt - .here)]
+        mov     [esi + 8], eax                  ; GOP->Blt: ours from now on
+.cur:   mov     eax, [edi + (ew_st - .here)]
+        mov     eax, [eax + 0x2c]               ; ST->ConOut
+        test    eax, eax
+        jz      .out
+        push    0                               ; Row
+        push    0                               ; Column
+        push    eax
+        call    [eax + 0x1c]                    ; ConOut->SetCursorPosition(ConOut, 0, 0)
+        add     esp, 12
+.out:   popad
+        ret
+
+; EFI_STATUS EFIAPI ew_blt(GOP *This, PIXEL *BltBuffer, UINTN Operation, UINTN SourceX, SourceY,
+; DestinationX, DestinationY, Width, Height, Delta): Graphics Output Blt, straight on the
+; framebuffer ew_show found. Operations: 0 VideoFill (BltBuffer[0] over the destination), 1
+; VideoToBltBuffer, 2 BufferToVideo, 3 VideoToVideo (either way round: overlapping copies keep
+; their source). Delta is the BltBuffer's bytes a row (0: Width * 4). EFI_INVALID_PARAMETER for any
+; other operation, an empty rectangle, or a rectangle not wholly on the screen.
+ew_blt:
+        push    ebp
+        mov     ebp, esp
+        push    ebx
+        push    esi
+        push    edi
+        call    .here
+.here:  pop     ebx                             ; ebx = .here
+        cld
+        mov     ecx, [ebp + 36]                 ; Width
+        test    ecx, ecx
+        jz      .inval
+        cmp     dword [ebp + 40], 0             ; Height
+        je      .inval
+        cmp     dword [ebp + 44], 0             ; Delta
+        jne     .op
+        lea     eax, [ecx * 4]
+        mov     [ebp + 44], eax
+.op:    mov     eax, [ebp + 16]
+        cmp     eax, 3
+        ja      .inval
+        cmp     eax, 1
+        je      .tobuf
+        ; 0, 2, 3: the destination must be on the screen
+        mov     eax, [ebp + 28]
+        mov     edx, [ebp + 32]
+        call    .onscr
+        jc      .inval
+        cmp     dword [ebp + 16], 0
+        je      .fill
+        cmp     dword [ebp + 16], 2
+        je      .tovid
+        ; 3: VideoToVideo, the source too
+        mov     eax, [ebp + 20]
+        mov     edx, [ebp + 24]
+        call    .onscr
+        jc      .inval
+        mov     eax, [ebp + 20]                 ; esi = source, edi = destination (top-left)
+        mov     edx, [ebp + 24]
+        call    .fbat
+        mov     esi, eax
+        mov     eax, [ebp + 28]
+        mov     edx, [ebp + 32]
+        call    .fbat
+        mov     edi, eax
+        mov     edx, [ebx + (ew_pitch - .here)] ; edx = row step
+        mov     ecx, [ebp + 40]                 ; rows
+        cmp     edi, esi
+        jbe     .v2vd                           ; destination before the source: forwards
+        mov     eax, ecx                        ; else backwards: from the last row's last pixel
+        dec     eax
+        imul    eax, edx
+        add     esi, eax
+        add     edi, eax
+        mov     eax, [ebp + 36]
+        lea     esi, [esi + eax * 4 - 4]
+        lea     edi, [edi + eax * 4 - 4]
+        neg     edx
+        std
+.v2vd:  push    ecx
+        push    esi
+        push    edi
+        mov     ecx, [ebp + 36]
+        rep     movsd
+        pop     edi
+        pop     esi
+        pop     ecx
+        add     esi, edx
+        add     edi, edx
+        dec     ecx
+        jnz     .v2vd
+        cld
+        jmp     .ok
+
+.fill:  mov     eax, [ebp + 28]
+        mov     edx, [ebp + 32]
+        call    .fbat
+        mov     edi, eax
+        mov     esi, [ebp + 12]                 ; BltBuffer: the colour
+        test    esi, esi
+        jz      .inval
+        mov     eax, [esi]
+        mov     edx, [ebp + 40]
+.frow:  push    edi
+        mov     ecx, [ebp + 36]
+        rep     stosd
+        pop     edi
+        add     edi, [ebx + (ew_pitch - .here)]
+        dec     edx
+        jnz     .frow
+        jmp     .ok
+
+.tovid: mov     esi, [ebp + 12]                 ; BltBuffer at (SourceX, SourceY)
+        test    esi, esi
+        jz      .inval
+        mov     eax, [ebp + 24]
+        imul    eax, [ebp + 44]
+        add     esi, eax
+        mov     eax, [ebp + 20]
+        lea     esi, [esi + eax * 4]
+        mov     eax, [ebp + 28]
+        mov     edx, [ebp + 32]
+        call    .fbat
+        mov     edi, eax
+        mov     edx, [ebp + 40]
+.vrow:  push    esi
+        push    edi
+        mov     ecx, [ebp + 36]
+        rep     movsd
+        pop     edi
+        pop     esi
+        add     esi, [ebp + 44]
+        add     edi, [ebx + (ew_pitch - .here)]
+        dec     edx
+        jnz     .vrow
+        jmp     .ok
+
+.tobuf: mov     eax, [ebp + 20]                 ; the source must be on the screen
+        mov     edx, [ebp + 24]
+        call    .onscr
+        jc      .inval
+        mov     edi, [ebp + 12]                 ; BltBuffer at (DestinationX, DestinationY)
+        test    edi, edi
+        jz      .inval
+        mov     eax, [ebp + 32]
+        imul    eax, [ebp + 44]
+        add     edi, eax
+        mov     eax, [ebp + 28]
+        lea     edi, [edi + eax * 4]
+        mov     eax, [ebp + 20]
+        mov     edx, [ebp + 24]
+        call    .fbat
+        mov     esi, eax
+        mov     edx, [ebp + 40]
+.brow:  push    esi
+        push    edi
+        mov     ecx, [ebp + 36]
+        rep     movsd
+        pop     edi
+        pop     esi
+        add     esi, [ebx + (ew_pitch - .here)]
+        add     edi, [ebp + 44]
+        dec     edx
+        jnz     .brow
+
+.ok:    xor     eax, eax
+        jmp     .out
+.inval: mov     eax, 0x80000002                 ; EFI_INVALID_PARAMETER
+.out:   cld
+        pop     edi
+        pop     esi
+        pop     ebx
+        pop     ebp
+        ret
+
+; .onscr: eax = x, edx = y: CF set unless (x, y) + (Width, Height) is wholly on the screen.
+.onscr: cmp     eax, [ebx + (ew_w - .here)]
+        jae     .off
+        cmp     edx, [ebx + (ew_h - .here)]
+        jae     .off
+        push    eax
+        mov     eax, [ebx + (ew_w - .here)]
+        sub     eax, [esp]
+        cmp     [ebp + 36], eax                 ; Width <= screen width - x
+        pop     eax
+        ja      .off
+        push    eax
+        mov     eax, [ebx + (ew_h - .here)]
+        sub     eax, edx
+        cmp     [ebp + 40], eax                 ; Height <= screen height - y
+        pop     eax
+        ja      .off
+        clc
+        ret
+.off:   stc
+        ret
+
+; .fbat: eax = x, edx = y: eax = the framebuffer address of that pixel. Clobbers edx.
+.fbat:  imul    edx, [ebx + (ew_pitch - .here)]
+        lea     eax, [edx + eax * 4]
+        add     eax, [ebx + (ew_fb - .here)]
+        ret
+
+ew_fb:          dd 0                            ; the framebuffer, once ew_blt is in place
+ew_pitch:       dd 0                            ; its bytes a row
+ew_w:           dd 0
+ew_h:           dd 0
 ew_st:          dd 0
 ew_orig:        dd 0                            ; the console's ReadKeyStroke, once replaced
 ew_timer:       dd 0                            ; the window's timer, while it runs
@@ -271,6 +552,10 @@ ew_in_guid:                                     ; 387477C1-69C7-11D2-8E39-00A0C9
         dd      0x387477c1
         dw      0x69c7, 0x11d2
         db      0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b
+ew_gop_guid:                                    ; 9042A9DE-23DC-4A38-96FB-7ADED080516A GraphicsOutput
+        dd      0x9042a9de
+        dw      0x23dc, 0x4a38
+        db      0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a
 ew_dp_guid:                                     ; 09576E91-6D3F-11D2-8E39-00A0C969723B DevicePath
         dd      0x09576e91
         dw      0x6d3f, 0x11d2

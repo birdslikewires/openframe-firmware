@@ -1,7 +1,8 @@
 """Mutations for escwin.inc (Esc at boot reliably stops at the shell):
     venv/bin/python -I tools/mutate.py tools/mutations/escwin.py --base /tmp/base.bin --version 26.11.31-devN
 Not listed, as no scenario can tell: the ESC_MAXREAD cap's exact value above 64 (a run of more than
-64 non-Esc keys before an Esc is only read over two polls)."""
+64 non-Esc keys before an Esc is only read over two polls); and ew_blt's cld after a backwards
+VideoToVideo, which its exit's own cld makes redundant (the direction flag can't leak either way)."""
 E = 'driver/escwin.inc'
 MUTATIONS = [
     ('window waited without a keyboard', E, "        cmp     byte [edi + (ew_usb - .here)], 0\n        je      .none                           ; no USB keyboard: no window",
@@ -28,4 +29,28 @@ MUTATIONS = [
      '        mov     eax, [eax + 0x24]               ; ST->ConIn'),
     ('not hooked at the shell', 'driver/img_patch.inc', '        call    ew_shell                        ; Esc reliably stops at it (escwin.inc)', '        nop'),
     ('scan not started at the entry', 'driver/ucode_late.asm', '        call    ew_start                        ; Esc at boot: the shell, reliably (escwin.inc)', '        nop'),
+    ('Blt never put in place', E, '        mov     [esi + 8], eax                  ; GOP->Blt: ours from now on', '        nop'),
+    ('cursor not moved', E, '        call    [eax + 0x1c]                    ; ConOut->SetCursorPosition(ConOut, 0, 0)', '        nop'),
+    ('Blt put in place on a normal boot too', E, '.got:   call    ew_show                         ; the prompt, made visible', '.got:   nop'),
+    ('pixel format not checked', E, '        cmp     dword [ecx + 0x0c], ESC_BGR8\n        jne     .out', '        cmp     dword [ecx + 0x0c], ESC_BGR8\n        nop\n        nop'),
+    ('framebuffer size not checked', E, '        cmp     eax, [edx + 0x18]               ; FrameBufferSize (UINTN: 32 bits here)\n        ja      .out',
+     '        cmp     eax, [edx + 0x18]               ; FrameBufferSize (UINTN: 32 bits here)\n        nop\n        nop'),
+    ('above 4 GB not refused', E, '        cmp     dword [edx + 0x14], 0           ; FrameBufferBase below 4 GB\n        jne     .out',
+     '        cmp     dword [edx + 0x14], 0           ; FrameBufferBase below 4 GB\n        nop\n        nop'),
+    ('scan line not checked', E, '        cmp     eax, [ecx + 0x20]               ; not wider than a scan line\n        ja      .out',
+     '        cmp     eax, [ecx + 0x20]               ; not wider than a scan line\n        nop\n        nop'),
+    ('fill one pixel short a row', E, '.frow:  push    edi\n        mov     ecx, [ebp + 36]', '.frow:  push    edi\n        mov     ecx, [ebp + 36]\n        dec     ecx'),
+    ('fill rows not stepped', E, '        add     edi, [ebx + (ew_pitch - .here)]\n        dec     edx\n        jnz     .frow', '        dec     edx\n        jnz     .frow'),
+    ('BufferToVideo ignores Delta', E, '        add     esi, [ebp + 44]\n        add     edi, [ebx + (ew_pitch - .here)]', '        add     esi, [ebp + 36]\n        add     esi, [ebp + 36]\n        add     esi, [ebp + 36]\n        add     esi, [ebp + 36]\n        add     edi, [ebx + (ew_pitch - .here)]'),
+    ('BufferToVideo source row ignored', E, '        mov     eax, [ebp + 24]\n        imul    eax, [ebp + 44]\n        add     esi, eax', '        nop'),
+    ('VideoToBltBuffer destination column ignored', E, '        mov     eax, [ebp + 28]\n        lea     edi, [edi + eax * 4]', '        nop'),
+    ('VideoToVideo always forwards', E, '        cmp     edi, esi\n        jbe     .v2vd', '        cmp     edi, esi\n        jmp     .v2vd'),
+    ('VideoToVideo always backwards', E, '        cmp     edi, esi\n        jbe     .v2vd', '        cmp     edi, esi\n        nop\n        nop'),
+    ('right edge not checked', E, '        cmp     [ebp + 36], eax                 ; Width <= screen width - x\n        pop     eax\n        ja      .off',
+     '        cmp     [ebp + 36], eax                 ; Width <= screen width - x\n        pop     eax\n        nop\n        nop'),
+    ('bottom edge not checked', E, '        cmp     [ebp + 40], eax                 ; Height <= screen height - y\n        pop     eax\n        ja      .off',
+     '        cmp     [ebp + 40], eax                 ; Height <= screen height - y\n        pop     eax\n        nop\n        nop'),
+    ('empty width allowed', E, '        mov     ecx, [ebp + 36]                 ; Width\n        test    ecx, ecx\n        jz      .inval',
+     '        mov     ecx, [ebp + 36]                 ; Width\n        test    ecx, ecx\n        nop\n        nop'),
+    ('operation 4 taken for VideoToVideo', E, '        cmp     eax, 3\n        ja      .inval', '        cmp     eax, 4\n        ja      .inval'),
 ]
