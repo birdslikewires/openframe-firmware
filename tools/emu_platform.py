@@ -1967,6 +1967,8 @@ def main():
                             p.append('no %r record' % tag)
                     pre = tags[tags.index(b'PRE ') + 1:tags.index(b'PREE')] if b'PRE ' in tags and b'PREE' in tags else None
                     want_pre = [b'\xc1\xb0\xd5\xa5', b'\x99\x99\x99\x99'] + \
+                        ([{'guid': b'\x11' * 4, 'nopath': b'LI??'}.get(kw.get('core_variant'), CORE_FILE[:4])]
+                         if kw.get('core_variant', 'stock') != 'none' else []) + \
                         ([{'guid': b'\x11' * 4, 'nopath': b'LI??', 'node': b'LI??'}.get(kw.get('nb_variant'), NBDXE_FILE[:4])]
                          if kw.get('nb_img', 'before') == 'before' else []) + \
                         ([b'\x11' * 4 if kw.get('mmc_variant') == 'guid' else b'LI??' if kw.get('mmc_variant') == 'nopath' else MMC_FILE[:4]]
