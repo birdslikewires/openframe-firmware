@@ -1,0 +1,39 @@
+#!/bin/sh
+
+## of-firmware-generator v26.11.4 (17th November 2026)
+##  A systemd generator: on a boot with a firmware update pending, of-firmware.service runs
+##  before the ordinary services start (before basic.target, just after sysinit), so the
+##  unit is quiet while the chip is written. Nothing of the system's own (a radio, a
+##  slideshow, the network and SSH) runs alongside the update, and none of it has to be
+##  stopped for the restart that follows. On any other boot it does nothing, and the
+##  service keeps its usual place.
+##
+##  of-flash.service (openframe-scripts) is ordered before the update, so it's moved
+##  early too, or the two orderings would make a loop. It only does anything when its
+##  conditions hold, and a stick it would flash from (one holding the image copy) is left
+##  alone here: OpenFrame Flash runs the updater itself, in its own order.
+##
+##  Generators run at the very start of the boot and at every daemon-reload. This only
+##  reads two paths and writes drop-ins under the directory it's given (/run, so they go
+##  with the restart).
+
+PENDING=/var/lib/openframe-firmware/pending
+FLASHIMG=/usr/lib/openframe/flash/image.img.gz
+OUT="${1:-/run/systemd/generator}"
+
+[ -f "$PENDING" ] || exit 0
+[ -e "$FLASHIMG" ] && exit 0
+
+for U in of-firmware of-flash; do
+	mkdir -p "$OUT/$U.service.d" || exit 0
+	cat > "$OUT/$U.service.d/50-quiet-flash.conf" <<-'EOF'
+	# of-firmware-generator: a firmware update is pending, so before the ordinary services.
+	[Unit]
+	DefaultDependencies=no
+	After=sysinit.target
+	Before=basic.target
+	Conflicts=shutdown.target
+	Before=shutdown.target
+	EOF
+done
+exit 0

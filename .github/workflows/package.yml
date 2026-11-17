@@ -118,6 +118,7 @@ jobs:
           install -m 755 package/of-firmware-boot "${L}/of-firmware-boot"
           install -m 755 tools/of-firmware-update "${PKG}/usr/local/sbin/of-firmware-update"
           install -m 644 package/of-firmware.service "${PKG}/usr/lib/systemd/system/of-firmware.service"
+          install -D -m 755 package/of-firmware-generator "${PKG}/usr/lib/systemd/system-generators/of-firmware-generator"
           install -m 755 package/postinst package/prerm "${PKG}/DEBIAN/"
           find "${PKG}" -type d -exec chmod 755 {} +
           printf 'Package: openframe-firmware\nVersion: %s\nArchitecture: all\nSection: admin\nPriority: optional\nMaintainer: OpenFrame Project <noreply@openbeak.net>\nDepends: bash, coreutils, kmod, python3, systemd\nHomepage: https://github.com/birdslikewires/openframe-firmware\nDescription: BirdsLikeWires firmware for the OpenFrame 1 (%s)\n The OpenFrame 1 EFI firmware release %s, and of-firmware-update, which brings\n the chip to it from stock O2, Verizon or Telstra firmware or an earlier\n release at the next boot (of-firmware.service), in an order where a power\n cut at any point leaves a chip that starts. Firmware it does not\n recognise is left alone.\n' \

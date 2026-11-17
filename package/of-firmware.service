@@ -4,7 +4,9 @@ Documentation=https://github.com/birdslikewires/openframe-firmware
 # Only while an update is pending (the openframe-firmware package marks one).
 ConditionPathExists=/var/lib/openframe-firmware/pending
 # Before the login prompt, first-boot provisioning (of-provision runs after
-# getty@tty1) and any interface: the flash comes first.
+# getty@tty1) and any interface: the flash comes first. On a boot with an update
+# pending, of-firmware-generator also moves it ahead of basic.target, so none of the
+# ordinary services (the network included) run alongside it.
 Before=getty@tty1.service of-provision.service display-manager.service systemd-user-sessions.service
 
 [Service]

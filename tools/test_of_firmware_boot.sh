@@ -50,7 +50,7 @@ sed -e "s|^PENDING=.*|PENDING=$T/pending|" -e "s|^LOCKREBOOT=.*|LOCKREBOOT=$T/lo
     -e "s|^UPDATE=.*|UPDATE=$T/upd|" -e "s|^IMG=.*|IMG=$T/img|" -e "s|^TTY=.*|TTY=$T/tty|" \
     -e "s|^DUMPS=.*|DUMPS=\"$T/dumps/of-firmware-update.\"|" \
     -e "s|^LOGF=.*|LOGF=$T/last-flash.log|" \
-    -e 's|^\tsystemctl reboot$|\techo "TEST: restart"|' -e 's|^\texec sleep 120$|\texit 0|' \
+    -e 's|^\tsystemctl --no-block start --job-mode=replace-irreversibly reboot.target$|\techo "TEST: restart"|' -e 's|^\texec sleep 120$|\texit 0|' \
     -e 's|sleep 1$|sleep 0.05|' -e 's|sleep 5; else sleep 60|sleep 0; else sleep 0|' \
     -e 's|kill -s RTMIN+21 1|:|' -e 's|dmesg -n|: dmesg -n|g' -e 's|busctl call|: busctl call|' \
     -e 's|plymouth --ping|false|' -e 's|setterm |: setterm |' "$SRC" > "$T/boot"
@@ -131,6 +131,34 @@ else
 	sed 's/^/       /' "$T/stop.out" | grep -v ': block [0-9]* written' | tail -8
 	FAILS=$((FAILS + 1))
 fi
+
+# of-firmware-generator: with an update pending, drop-ins that put of-firmware.service (and
+# of-flash.service, ordered before it) ahead of basic.target; none with nothing pending, or
+# on a stick holding OpenFrame Flash's image copy (it runs the updater itself).
+GEN=${2:-$HERE/../package/of-firmware-generator}
+sed -e "s|^PENDING=.*|PENDING=$T/gpending|" -e "s|^FLASHIMG=.*|FLASHIMG=$T/gimage|" "$GEN" > "$T/gen"
+gencase() {
+	local name=$1 pending=$2 image=$3 want=$4 got out
+	rm -rf "$T/gout" "$T/gpending" "$T/gimage"; mkdir "$T/gout"
+	[ "$pending" = yes ] && touch "$T/gpending"; [ "$image" = yes ] && touch "$T/gimage"
+	sh "$T/gen" "$T/gout" "$T/gout.early" "$T/gout.late"
+	got=$(cd "$T/gout" && find . -name '*.conf' | sort | tr '\n' ' ')
+	if [ "$want" = none ]; then
+		[ -z "$got" ] && out=ok || out=FAIL
+	else
+		out=ok
+		for U in of-firmware of-flash; do
+			F="$T/gout/$U.service.d/50-quiet-flash.conf"
+			grep -qx 'DefaultDependencies=no' "$F" 2>/dev/null && grep -qx 'Before=basic.target' "$F" &&
+				grep -qx 'After=sysinit.target' "$F" && grep -qx 'Conflicts=shutdown.target' "$F" || out=FAIL
+		done
+	fi
+	[ "$out" = ok ] && echo "ok   generator, $name: ${got:-no drop-ins}" ||
+		{ echo "FAIL generator, $name: ${got:-no drop-ins} (want $want)"; FAILS=$((FAILS + 1)); }
+}
+gencase "update pending"                       yes no  early
+gencase "nothing pending"                      no  no  none
+gencase "pending, on OpenFrame Flash's stick"  yes yes none
 
 [ $FAILS = 0 ] && echo "All passed." || echo "$FAILS failed."
 exit $FAILS

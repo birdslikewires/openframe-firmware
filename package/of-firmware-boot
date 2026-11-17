@@ -109,9 +109,18 @@ console_quiet() {
 	dmesg -n 1 2>/dev/null
 	setterm -blank 0 -powersave off > "$TTY" 2>/dev/null < "$TTY"
 }
+# With an update pending this runs before basic.target (of-firmware-generator), so before
+# D-Bus is up, and a call over the bus would wait for it. Then a one-off unit makes the call
+# once D-Bus is there (systemd-run reaches systemd through its own socket).
 console_restore() {
-	busctl call org.freedesktop.systemd1 /org/freedesktop/systemd1 \
-		org.freedesktop.systemd1.Manager SetShowStatus s "" >/dev/null 2>&1
+	if systemctl -q is-active dbus.service; then
+		busctl --timeout=5 call org.freedesktop.systemd1 /org/freedesktop/systemd1 \
+			org.freedesktop.systemd1.Manager SetShowStatus s "" >/dev/null 2>&1
+	else
+		systemd-run --no-block --quiet --collect --unit=of-firmware-show-status \
+			-p After=dbus.service -p Wants=dbus.service busctl call org.freedesktop.systemd1 \
+			/org/freedesktop/systemd1 org.freedesktop.systemd1.Manager SetShowStatus s "" >/dev/null 2>&1
+	fi
 	[ -n "$CONSOLE_LEVEL" ] && dmesg -n "$CONSOLE_LEVEL" 2>/dev/null
 }
 
@@ -267,7 +276,10 @@ restart() {
 	log "restarting: $1"
 	# Stoppable again (see the update, below): the shutdown this starts stops us.
 	trap - HUP INT TERM
-	systemctl reboot
+	# Straight to systemd (as root, through its own socket), as "systemctl reboot" does after
+	# asking logind over D-Bus. Before basic.target (of-firmware-generator) D-Bus can't start
+	# until this service is done, so that question would wait 90 s for nothing.
+	systemctl --no-block start --job-mode=replace-irreversibly reboot.target
 	exec sleep 120
 }
 
