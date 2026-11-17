@@ -1,13 +1,13 @@
 Package: openframe-firmware
-Version: 26.11.31-1
+Version: 26.11.31-6
 Architecture: all
 Maintainer: OpenFrame Project <noreply@openbeak.net>
 Depends: bash, coreutils, kmod, python3, systemd
-Filename: pool/trixie/openframe-firmware_26.11.31-1_all.deb
-Size: 600598
-MD5sum: 56c19309a97f32cb7aa2fcce217f7b8b
-SHA1: 2cbd956811de2bd0563ca24f43a0d17e7868652c
-SHA256: ea389b64effeaea994dee6aecefa2330e150c66bfd68c9423d01b7be7050eb11
+Filename: pool/trixie/openframe-firmware_26.11.31-6_all.deb
+Size: 604246
+MD5sum: 3522fccee8cc50c93c4affb3572333aa
+SHA1: 2ce0437312892a122bc0e91cf54f5a49d919127e
+SHA256: 441c6d736c331dd6d49dea281010d93db06b75b1e14ce8f157d6068e039089f5
 Section: admin
 Priority: optional
 Homepage: https://github.com/birdslikewires/openframe-firmware
