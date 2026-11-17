@@ -1,19 +1,20 @@
 Package: openframe-firmware
-Version: 26.11.30-13
+Version: 26.11.31-1
 Architecture: all
 Maintainer: OpenFrame Project <noreply@openbeak.net>
 Depends: bash, coreutils, kmod, python3, systemd
-Filename: pool/trixie/openframe-firmware_26.11.30-13_all.deb
-Size: 589630
-MD5sum: ead65c9a2838a22e6bc6cee84ccc80c4
-SHA1: f0b09dd55959851c0071cdc334aebdf702a11737
-SHA256: 786653d2d44be2f5343b10fe9651239eb26c76cd06b85d372f1d21629d67df21
+Filename: pool/trixie/openframe-firmware_26.11.31-1_all.deb
+Size: 600598
+MD5sum: 56c19309a97f32cb7aa2fcce217f7b8b
+SHA1: 2cbd956811de2bd0563ca24f43a0d17e7868652c
+SHA256: ea389b64effeaea994dee6aecefa2330e150c66bfd68c9423d01b7be7050eb11
 Section: admin
 Priority: optional
 Homepage: https://github.com/birdslikewires/openframe-firmware
-Description: BirdsLikeWires firmware for the OpenFrame 1 (26.11.30)
- The OpenFrame 1 EFI firmware release 26.11.30, and of-firmware-update, which brings
+Description: BirdsLikeWires firmware for the OpenFrame 1 (26.11.31)
+ The OpenFrame 1 EFI firmware release 26.11.31, and of-firmware-update, which brings
  the chip to it from stock O2, Verizon or Telstra firmware or an earlier
- release at the next boot (of-firmware.service). Firmware it does not
+ release at the next boot (of-firmware.service), in an order where a power
+ cut at any point leaves a chip that starts. Firmware it does not
  recognise is left alone.
 
