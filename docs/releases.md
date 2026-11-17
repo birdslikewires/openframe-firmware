@@ -8,7 +8,9 @@ md5 stays in `releases/MD5SUMS` and its blocks in the updater's manifest, so a u
 and it still builds byte for byte from the stock O2 image). Each is built on the one before
 (`tools/mkbase.py`). From 26.11.16 to 26.11.28 each differs from the one before in block 9 only;
 26.11.29 moves the version marker and BlwPlatformDxe to block 10 (blocks 9 and 10 change, once), and
-from then on releases differ in block 10 only. The images are on the
+from then on releases differ in block 10 only. 26.11.31 brings the block-11 layout: our files in block 11,
+block 10 only signposts (spacer headers), and updates that write blocks 9-11 in an order a power cut
+can't break ([flash-order.md](flash-order.md)). The images are on the
 repository's GitHub Releases page, tagged by version (md5s in `releases/MD5SUMS`); how they were
 made and tested is in [process.md](process.md).
 
@@ -36,6 +38,7 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
 | 26.11.28 | The kernel starts ~0.1 s sooner from the internal memory (SdHost's command wait); the internal memory is always the shell's fs0 |
 | 26.11.29 | Safer updates: the version marker and BlwPlatformDxe move to block 10, alone, so later updates never erase stock code and a power cut during one leaves a unit that boots |
 | 26.11.30 | A USB drive with `startup.nsh` is the shell's fs0, ahead of the internal memory: it boots itself, whatever is on the internal memory |
+| 26.11.31 | Updates a power cut can't break (the block-11 layout); Esc at boot reliably reaches a readable shell; one driver for both OpenFrames |
 
 ## Releases (2026-11-08)
 
@@ -447,3 +450,34 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
   `tools/test_of_firmware_update.sh` against 26.11.30 on the unit: all passed, including stock O2, Verizon and Telstra to
   26.11.30 and 26.11.29 to 26.11.30 with power cuts after each step (its .md5-mismatch case now changes the first
   digit whatever it is: 26.11.30's md5 starts with 0, which the old test turned into itself).
+
+## 26.11.31 (2026-11-17)
+
+- **26.11.31 (OF1)**, `of1-blw-26.11.31.bin` (md5 `873f5b6e…`), built from the stock O2 image (`build_patched.py
+  --logo … --pos 274,199 --block11`, then `build_ucode_driver.py`), byte for byte on a rebuild. Blocks 1-9 and 12-15 are
+  26.11.30's (block 9 but for its signpost, `fwplan.py canon`); block 10 holds one spacer header reaching block 11;
+  block 11 (`c819bc0a…`) holds the version marker and BlwPlatformDxe. Blocks 1-15 `e9f6d0a7…`, block 10 `734763d0…`.
+  What changes:
+  - **Updates a power cut can't break.** The firmware's own file walkers (PEI and DXE cores) were decoded and run on
+    every state a write passes through (`emu_fvwalk.py`): the old block-10 order had two brick windows (the erase, and
+    a header written State last). Now updates step 24 bytes along block 10's signposts and rewrite block 11 only while
+    it is out of reach (`fwplan.py`, which proves every state of its plan before `of-firmware-update` v26.11.6 writes
+    anything); from stock firmware or 26.11.29/30 the same happens once in block 9, with nothing the firmware reads
+    ever erased. A system on the internal memory has its `boot.nsh` held to BlwMmcFix.efi + GRUB while the chip is
+    written (openframe-scripts' `of-bootnsh` v26.11.15 on).
+  - **Esc at boot reliably stops at the shell** (`escwin.inc`): with a USB keyboard, the shell's one look for Esc waits
+    until 1 s after the keyboard appears (it was readable only 0.24 s before that look, measured with the KBDTIME
+    builds; a key held from power-on is never seen, so it must be pressed). No keyboard, no wait; nothing on the screen
+    for it. After Esc the prompt is drawn straight into the framebuffer (the display driver's own Blt shows nothing
+    while its splash is up: `ConDiag.efi`) and the text console is 100 columns, the panel's full width
+    (`textmode.inc`): the prompt at the top left of the bird screen.
+  - **One driver for both OpenFrames**: the bird (`splash.inc`), no shell countdown (`countdown.inc`) and USB-first
+    (`usb_first.inc`) made in memory for either board's display driver and shell; NBDXE no longer writes the panel
+    clock at all, so each display driver's own clock stands; SMBIOS says OpenFrame 2 / OF2 on an OF2 (`model.inc`).
+    (OF2 updates stay refused by the updater until tried on a real OF2.)
+  Tested: `emu_platform.py` 191 scenarios (and its TIMING and KBDTIME modes), mutations for every new part (escwin
+  37, textmode 10, kbdtime 19, BlwMmcFix 12) all caught; `emu_splash`, `emu_countdown`, `emu_usbfirst --of2-shell`;
+  `emu_fvwalk.py` on the OF1 and four OF2 images, and the real walkers on every state of the plans from stock O2,
+  Verizon, Telstra and 26.11.30; `test_fwplan.py` (819 cut points); `test_of_firmware_update.sh` 79 cases with this
+  image; the real `dmidecode` on its SMBIOS table. Development builds dev5 to dev10 on the unknown Joggler
+  ([process.md](process.md)).
