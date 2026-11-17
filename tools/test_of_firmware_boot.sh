@@ -49,6 +49,7 @@ printf 'BirdsLikeWires OpenFrame EFI 26.11.30 (OF1)\n' > "$T/img"
 sed -e "s|^PENDING=.*|PENDING=$T/pending|" -e "s|^LOCKREBOOT=.*|LOCKREBOOT=$T/lock-reboot|" \
     -e "s|^UPDATE=.*|UPDATE=$T/upd|" -e "s|^IMG=.*|IMG=$T/img|" -e "s|^TTY=.*|TTY=$T/tty|" \
     -e "s|^DUMPS=.*|DUMPS=\"$T/dumps/of-firmware-update.\"|" \
+    -e "s|^LOGF=.*|LOGF=$T/last-flash.log|" \
     -e 's|^\tsystemctl reboot$|\techo "TEST: restart"|' -e 's|^\texec sleep 120$|\texit 0|' \
     -e 's|sleep 1$|sleep 0.05|' -e 's|sleep 5; else sleep 60|sleep 0; else sleep 0|' \
     -e 's|kill -s RTMIN+21 1|:|' -e 's|dmesg -n|: dmesg -n|g' -e 's|busctl call|: busctl call|' \
@@ -86,6 +87,24 @@ case_ "didn't verify, then 'nothing written' (1)"   2,1,0   restart  gone
 case_ "didn't verify, then not recognised (3)"      2,3,0   restart  gone
 case_ "didn't verify, then locked (4)"              2,4,0   restart  gone
 case_ "didn't verify, then 1, 3 and 4, then updated" 2,1,3,4,0 restart gone
+
+# The log kept beside the pending mark (the journal goes with the restart): a fresh one each
+# run, with the check, each try's output and what was decided.
+logcheck() {
+	local name=$1 seq=$2; shift 2
+	rm -rf "$T/dumps" "$T/runs" "$T/lock-reboot"; mkdir -p "$T/dumps"; : > "$T/tty"
+	echo "stale line from an earlier run" > "$T/last-flash.log"
+	tr ',' '\n' <<< "$seq" > "$T/seq"; touch "$T/pending"
+	timeout 60 bash "$T/boot" > /dev/null 2>&1
+	local miss="" w
+	grep -q "stale line" "$T/last-flash.log" && miss+=" (kept an earlier run's lines)"
+	for w in "$@"; do grep -qF -- "$w" "$T/last-flash.log" || miss+=" [$w]"; done
+	if [ -z "$miss" ]; then echo "ok   log, $name"
+	else echo "FAIL log, $name: missing$miss"; sed 's/^/       /' "$T/last-flash.log" | tail -8; FAILS=$((FAILS + 1)); fi
+}
+logcheck "updated" 0 "of-firmware-boot 26.11" "s after power-on" "plan: write blocks" "UPDATED" "restarting: The firmware is up to date."
+logcheck "not recognised" 3 "plan: write blocks" "is left alone" "firmware not recognised: left alone"
+logcheck "didn't verify, then updated" 2,0 "FAILED: block 5" "didn't verify (exit 2)" "UPDATED"
 
 # Many tries that don't verify: only the newest dump folders stay (the one kept before the
 # last try, and the last try's own).

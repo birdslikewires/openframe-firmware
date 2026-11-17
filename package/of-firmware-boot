@@ -1,6 +1,6 @@
 #!/bin/bash
 
-## of-firmware-boot v26.11.3 (16th November 2026)
+## of-firmware-boot v26.11.4 (17th November 2026)
 ##  Run at boot by of-firmware.service while a firmware update is pending (the package's
 ##  postinst marks one). Before the login prompt, provisioning or any interface starts, it
 ##  brings the firmware to the packaged release with of-firmware-update, and restarts on
@@ -14,17 +14,33 @@
 ##  tick for each one done, a bar and the time left for the current one, and a red screen
 ##  of its own for a write that didn't verify. (OpenFrame Flash runs the updater itself, on
 ##  its own screen, and clears the pending mark: this isn't used during a flash.)
+##
+##  What it did is also kept in last-flash.log beside the pending mark, as the journal on
+##  these units lives in memory and goes with the restart.
 
-VERSION="26.11.2"
+VERSION="26.11.4"
 PENDING=/var/lib/openframe-firmware/pending
 LOCKREBOOT=/var/lib/openframe-firmware/lock-reboot
+LOGF=/var/lib/openframe-firmware/last-flash.log
 UPDATE=/usr/local/sbin/of-firmware-update
 IMG=/usr/lib/openframe-firmware/of1-blw.bin
 TTY=/dev/tty1
 # The panel's characters (█, ░, √, ►) are UTF-8, whatever locale the service gets.
 export LC_ALL=C.UTF-8
 
-log() { echo "of-firmware-boot: $*"; }
+# To the journal, and to $LOGF once this run has started it.
+LOGGING=""
+log() {
+	echo "of-firmware-boot: $*"
+	[ -n "$LOGGING" ] && echo "of-firmware-boot: $*" >> "$LOGF"
+	return 0
+}
+# Command output, the same way.
+log_out() {
+	printf '%s\n' "$1"
+	[ -n "$LOGGING" ] && printf '%s\n' "$1" >> "$LOGF"
+	return 0
+}
 
 ## The panel.
 
@@ -281,8 +297,14 @@ screen_retry() {
 
 [ -f $PENDING ] || exit 0
 
+# A fresh log for this run. The clock may be wrong this early (no clock battery), so the
+# time since power-on too.
+if { echo "of-firmware-boot $VERSION, $(date '+%Y-%m-%d %H:%M:%S') by the unit's clock, $(uptime_s) s after power-on"; } > "$LOGF" 2>/dev/null; then
+	LOGGING=1
+fi
+
 CHECK=$($UPDATE --check 2>&1); rc=$?
-echo "$CHECK"
+log_out "$CHECK"
 case $rc in
 	0) log "the firmware is up to date"; rm -f $PENDING $LOCKREBOOT; exit 0 ;;
 	3) log "firmware not recognised: left alone"; rm -f $PENDING $LOCKREBOOT; exit 0 ;;
@@ -357,7 +379,7 @@ while :; do
 		sleep 1
 	done
 	wait $PID; rc=$?
-	cat "$OUTF"
+	log_out "$(cat "$OUTF")"
 	if [ -n "$torn" ] && [ $rc != 0 ]; then
 		log "an earlier try didn't verify, so exit $rc is taken as another that didn't"
 		rc=2
