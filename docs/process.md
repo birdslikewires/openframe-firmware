@@ -65,7 +65,8 @@ venv/bin/python -I tools/emu_blwmac.py /tmp/BlwMac.efi                   # BlwMa
 venv/bin/python -I tools/emu_mmcinit.py releases/of1-blw-<prev>.bin driver/mmcinit_sig.inc  # SdHost's wait
 venv/bin/python -I tools/emu_mmcfix.py <firmware.bin> <BlwMmcFix.efi> <MmcTest.efi>     # BlwMmcFix.efi (and on every release's wrappers)
 venv/bin/python -I tools/emu_mmcfix.py --mutate tools/mutations/mmcfix.py <firmware.bin> <MmcTest.efi>
-venv/bin/python -I tools/emu_splash.py of1_efi_o2.img of2_efi_cisco.img [more images]   # the splash, on real display drivers
+venv/bin/python -I tools/emu_splash.py of1_efi_o2.img of2_efi_cisco.img of2_openpeak.img \
+    of1_efi_openpeak_verizon.img of1_efi_telstra.img [more images]   # the splash, on real display drivers of every build
 venv/bin/python -I tools/emu_countdown.py of1_efi_o2.img of2_efi_cisco.img [more images] # the countdown, on real shells
 venv/bin/python -I tools/emu_usbfirst.py --of2-shell of2_efi_cisco.img                   # USB-first, on both shell builds
 venv/bin/python -I tools/emu_fvwalk.py of1_efi_o2.img of2_efi_cisco.img [more OF2 images]   # write orders vs the firmware's own file walkers
@@ -75,7 +76,10 @@ venv/bin/python -I tools/emu_fvwalk.py of1_efi_o2.img of2_efi_cisco.img [more OF
 `tools/shell_sig.py` (which make `driver/splash_sig.inc` and `driver/shell_sig.inc`) need the stock
 `of1_efi_o2.img` and `of2_efi_cisco.img` from https://openbeak.net/openframe/firmware/efi/ (md5
 `eeb32d85…` and `07a8fb52…`): the OF1's and the OF2's builds of the shell, and the Sharp and the
-Samsung panel's display drivers.
+Samsung panel's display drivers. From 26.11.32 `splash_sig.py` and `emu_splash.py` also take the
+older display-driver builds, `--more of2_openpeak.img of1_efi_openpeak_verizon.img
+of1_efi_telstra.img` (md5 `c35f7e01…`, `dbfeeb9e…`, `8903c18f…`), whose units keep their own
+display driver through an update and get the bird in memory too.
 
 The emulators run the real code under Unicorn against a fake firmware and fail on anything the
 code mustn't do (any SetVariable from the driver, port I/O before PCI is up, unrestored registers,

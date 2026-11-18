@@ -10,11 +10,13 @@
 ; `ssp` and `ssd` handlers, when the console connects the screen, long after this driver's entry
 ; and the LoadedImage notifies.
 ;
-; Only a display driver we know is changed: the IEGD build every OpenFrame has, with either of
-; its two panel configurations (OpenFrame-Sharp: the OF1s and most OF2s; OpenFrame-Samsung: the
-; Cisco OF2). splash_sig.inc (from tools/splash_sig.py) has the code of both handlers and, for
-; each configuration, all of its text from its start to the first pixel, less the 11 digits of
-; x, y, width and height, plus the reserve's closing `CEDCED`. On a match the pixels, `ENDSSDATA`
+; Only a display driver we know is changed: the IEGD build most OpenFrames have, with either of
+; its two panel configurations (OpenFrame-Sharp: the O2 OF1s and most OF2s; OpenFrame-Samsung: the
+; Cisco OF2), and from 26.11.32 two older builds, whose handlers are the same code 0x50 bytes
+; earlier, with their own Sharp configurations (the OpenPeak OF2; the Verizon and Telstra OF1s).
+; splash_sig.inc (from tools/splash_sig.py) has the code of both handlers and each place they can
+; be and, for each configuration, all of its text from its start to the first pixel, less the
+; digits of x, y, width and height, plus the reserve's closing `CEDCED`. On a match the pixels, `ENDSSDATA`
 ; and zeros to the reserve's end are written (the handlers read at most up to it), then the
 ; numbers, and both are read back. The panel settings are left as they were. On our OpenFrame 1
 ; releases this writes what is already there.
@@ -52,14 +54,19 @@ gsp_patch_image:
         jz      .no
         call    pid_note_display                ; which panel it's set up for (panel_id.inc), from
         mov     edi, [esp]                      ; any build, before the code checks below
-        lea     eax, [edi + (gsp_code_sig - .here)]
-        push    eax
-        lea     eax, [ebp + GSP_CODE_RVA]
+        lea     ebx, [edi + (gsp_code_rvas - .here)]
+.code:  mov     eax, [ebx]                      ; each place the handlers can be (0 ends the list)
+        test    eax, eax
+        jz      .no
+        add     ebx, 4
+        lea     ecx, [edi + (gsp_code_sig - .here)]
+        push    ecx
+        add     eax, ebp
         push    eax
         call    mmc_sig_match                   ; the handlers that read the splash
         add     esp, 8
         test    eax, eax
-        jz      .no
+        jz      .code
         lea     ebx, [edi + (gsp_cfgs - .here)] ; then which configuration, if any
 .cfg:   movzx   eax, word [ebx]
         test    eax, eax

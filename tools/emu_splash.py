@@ -3,13 +3,17 @@
 on the result.
 
     venv/bin/python -I tools/emu_splash.py of1_efi_o2.img of2_efi_cisco.img [IMAGE ...]
+    venv/bin/python -I tools/emu_splash.py of1_efi_o2.img of2_efi_cisco.img of2_openpeak.img \
+        of1_efi_openpeak_verizon.img of1_efi_telstra.img of2_efi_telio.img of2_efi_avaya.img
     venv/bin/python -I tools/emu_splash.py --mutate tools/mutations/splash.py of1_efi_o2.img of2_efi_cisco.img
 
 The first image must have the Sharp panel's display driver (the stock O2 one), the second the
-Samsung's (the Cisco OF2's); any more are other firmware to try (each must take our splash). Each
-display driver (IEGD GOP) is loaded as the firmware would: decompressed, its sections at their
-RVAs, relocated to a base that isn't its own. gsp_patch_image is called with a LoadedImage for it,
-then the driver's own `ssp` and `ssd` handlers (RVA 0x1960c and 0x18786) run on the result, as its
+Samsung's (the Cisco OF2's); any more are other firmware to try (each must take our splash: from
+26.11.32 the older builds too, of2_openpeak.img, of1_efi_openpeak_verizon.img and
+of1_efi_telstra.img). Each display driver (IEGD GOP) is loaded as the firmware would: decompressed,
+its sections at their RVAs, relocated to a base that isn't its own. gsp_patch_image is called with
+a LoadedImage for it, then the driver's own `ssp` and `ssd` handlers (RVA 0x1960c and 0x18786 in
+the current build, 0x50 earlier in the older ones, with their globals read from them) run on the result, as its
 configuration parser calls them when the console starts the screen: `ssp` with the parse pointer
 at the `c` of `$sspc01`, `ssd` with it at the first pixel. (The whole parser needs the buffers its
 Start sets up first, so only these two are run.)
@@ -53,8 +57,12 @@ import build_ucode_driver as bud  # noqa: E402
 CODE, DATA, STACK, STOP, CFGBUF = 0x10000000, 0x11000000, 0x12000000, 0x13000000, 0x14000000
 BASE = 0x20000000                       # where the display driver is loaded (its own base is 0)
 GOP_GUID = '2b13e5f0-e82e-4209-898a-8a53e8570db9'
-SSP, SSD = 0x1960c, 0x18786             # the display driver's splash handlers
-PTR, CONSUMED, FOUND, CONFIG = 0x2adb0, 0x2a5bc, 0x2a5b8, 0x2adac   # their globals
+SSP, SSD = 0x1960c, 0x18786             # the display driver's splash handlers (the current build)
+# Where the ssd handler names its globals (PTR, CONSUMED, FOUND, CONFIG): the current build's are
+# 0x2adb0, 0x2a5bc, 0x2a5b8 and 0x2adac; an older build has the handlers `shift` bytes earlier and
+# its globals elsewhere, so they're read from the handler itself.
+GLOBAL_REFS = (0x187a2, 0x18796, 0x1878b, 0x187c7)
+STRINGS, STRINGS_TEXT = 0x1524c, b'$\0\0\0^%\0\0ENDSSDATA\0\0\0,\0\0'   # the handlers' strings
 CFGBUF_SIZE = 0x20000
 SAVED = ((UC_X86_REG_EBX, 0x11111111), (UC_X86_REG_ESI, 0x22222222), (UC_X86_REG_EDI, 0x33333333),
          (UC_X86_REG_EBP, 0x44444444))
@@ -140,9 +148,17 @@ def patch(code, image, size, guid=GOP_GUID, path=True, li_size=None):
     return st, bytes(uc.mem_read(BASE, len(image))), kept, balanced, bad
 
 
+def build(image):
+    """(ssp, ssd, PTR, CONSUMED, FOUND, CONFIG) for this display driver's build."""
+    shift = STRINGS - image.find(STRINGS_TEXT)
+    g = [struct.unpack_from('<I', image, r - shift)[0] - BASE for r in GLOBAL_REFS]
+    return (SSP - shift, SSD - shift, *g)
+
+
 def handlers(image, size):
     """The display driver's ssp and ssd handlers on this image's configuration, as its parser calls
     them: (ssp status, the five numbers it stored, ssd status, the bytes it copied, bad accesses)."""
+    SSP, SSD, PTR, CONSUMED, FOUND, CONFIG = build(image)
     v, px, end = layout(image)
     uc, bad = machine(b'\xc3', image, size)
     put = lambda rva, x: uc.mem_write(BASE + rva, struct.pack('<I', x))
@@ -190,6 +206,8 @@ def panel_note(code, image, size):
 
 def run_all(code, images):
     rel_path = os.path.join(ROOT, 'releases', 'of1-blw-26.11.30.bin')
+    if build(gop(images[0])[0])[:2] != (SSP, SSD):
+        sys.exit('the first image must have the current build of the display driver (of1_efi_o2.img)')
     release = gop(rel_path)[0] if os.path.exists(rel_path) else None
     parsed = {}
     for n, path in enumerate(images):

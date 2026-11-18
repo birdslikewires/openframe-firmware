@@ -28,7 +28,10 @@ an order where a power cut at any moment leaves a unit that starts. Up to 26.11.
 in block 10.
 
 - **The shell's countdown is 0**, so `boot.nsh` runs straight away.
-- **The boot logo** is the BirdsLikeWires pecking bird.
+- **The boot logo** is the BirdsLikeWires pecking bird: in the OpenFrame 1 image's display driver,
+  and put into a unit's own display driver in memory as it loads, since an update keeps that
+  driver (O2 OpenFrame 1s and Cisco, Telio and Avaya OpenFrame 2s, and from 26.11.32 the OpenPeak
+  OpenFrame 2 and the Verizon and Telstra OpenFrame 1s too).
 - **BlwPlatformDxe**, a small DXE driver (`driver/ucode_late.asm`):
   - loads CPU microcode 0x217 on both threads (loading it at reset, as the firmware normally would,
     hangs this board);

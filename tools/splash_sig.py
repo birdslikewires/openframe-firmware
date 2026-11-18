@@ -3,10 +3,12 @@
 boot splash it can replace, and where it writes.
 
     venv/bin/python -I tools/splash_sig.py of1_efi_o2.img of2_efi_cisco.img driver/splash_sig.inc \\
-        [--check IMAGE ...]
+        --more of2_openpeak.img of1_efi_openpeak_verizon.img of1_efi_telstra.img [--check IMAGE ...]
 
-of1_efi_o2.img (md5 eeb32d85e8b8c63ccc00429e083a88b8) and of2_efi_cisco.img (md5
-07a8fb52aedbf967cbcb1f2acc837d87) are the stock images from https://openbeak.net/openframe/firmware/efi/.
+of1_efi_o2.img (md5 eeb32d85e8b8c63ccc00429e083a88b8), of2_efi_cisco.img (md5
+07a8fb52aedbf967cbcb1f2acc837d87), of2_openpeak.img (md5 c35f7e01052a3d2323610d7688244e9b),
+of1_efi_openpeak_verizon.img (md5 dbfeeb9e7e943ee0c46986995d4b383c) and of1_efi_telstra.img (md5
+8903c18f882cbde3b98c793f7e827a40) are stock images from https://openbeak.net/openframe/firmware/efi/.
 
 The splash is a raw RGB bitmap inside Intel's IEGD display driver (GOP, FFS file 2B13E5F0-E82E-
 4209-898A-8A53E8570DB9), in its configuration text: `$sspc01` gives the background, x, y, width
@@ -17,16 +19,19 @@ table), when the console connects the screen, after every DXE driver has run. So
 can rewrite the numbers and the pixels in the driver's loaded image beforehand, and an OpenFrame
 whose display driver is in blocks no update writes (an OpenFrame 2's) still shows our splash.
 
-Every OpenFrame display driver we know is the same IEGD build with one of two panel
-configurations: `OpenFrame-Sharp` (33.264 MHz; every OF1, and the Telio, Avaya and Swisscom Da
-Vinci OF2s) or `OpenFrame-Samsung` (24.5 MHz; the Cisco OF2), whose label is two characters
-longer, so its text after the label sits two bytes later. For each, the signature is all of the
-configuration text from its start (RVA 0x13d7) to the first pixel except the 11 hex digits of
-x, y, width and height, which are what splash.inc writes, plus the reserve's closing `CEDCED` and
-the token table's `ssp` and `ssd` names. The code signature is the two handlers and their
-strings, less relocated dwords (the same in both). Checked here: the code is the same in both
-inputs; nothing in the configuration or the reserve is relocated; the old splash ends exactly at
-`ENDSSDATA` with only zeros after it to the reserve's end; the digits are three, two, two and two.
+Most OpenFrame display drivers are one IEGD build with one of two panel configurations:
+`OpenFrame-Sharp` (33.264 MHz; the O2 OF1s, and the Telio, Avaya and Swisscom Da Vinci OF2s) or
+`OpenFrame-Samsung` (24.5 MHz; the Cisco OF2), whose label is two characters longer, so its text
+after the label sits two bytes later. Two older builds (--more: the OpenPeak OF2's, and the
+Verizon and Telstra OF1s') have the same handlers, byte for byte but for relocated dwords, 0x50
+bytes earlier, and Sharp configurations of their own (fewer attributes, their own splash). For
+each configuration, the signature is all of its text from its start (RVA 0x13d7) to the first
+pixel except the hex digits of x, y, width and height, which are what splash.inc writes, plus the
+reserve's closing `CEDCED` and the token table's `ssp` and `ssd` names. The code signature is the
+two handlers and their strings, less relocated dwords, from each place they can be (gsp_code_rvas).
+Checked here: the code is the same in every input, relative to its place; nothing in the
+configuration or the reserve is relocated; the old splash ends exactly at `ENDSSDATA` with only
+zeros after it to the reserve's end; the numbers field is 24 characters, as ours is.
 """
 import argparse
 import re
@@ -40,12 +45,15 @@ import build_patched as bp  # noqa: E402
 
 GOP_GUID = '2b13e5f0-e82e-4209-898a-8a53e8570db9'
 CFG = 0x13d7                    # the configuration text, as the handlers reference it
+# Where they are in the current build (O2, Cisco, Telio...); an older build has them all `shift`
+# bytes earlier, found from where its handlers' strings are.
 CODE = 0x15240                  # the code signature's base: the handlers' strings at 0x1524c-0x15262
 SSD_FN, SSD_END = 0x18786, 0x18800      # the `ssd` handler (copies the pixels up to ENDSSDATA)
 SSP_FN, SSP_END = 0x1960c, 0x197f2      # the `ssp` handler (parses the five numbers)
 STRINGS = (0x1524c, 0x15263)            # '$', 'ENDSSDATA', ','
+STRINGS_TEXT = b'$\0\0\0^%\0\0ENDSSDATA\0\0\0,\0\0'
 TOKENS = (0xe008, 0xe018)               # the token table's `ssp` and `ssd` entries
-VALUE = re.compile(rb'\$sspc01(0x0,0x)([0-9A-F]{3})(,0x)([0-9A-F]{2})(,0x)([0-9A-F]{2})(,0x)([0-9A-F]{2})\$halc01')
+VALUE = re.compile(rb'\$sspc01(0x0,0x)([0-9A-F]{1,3})(,0x)([0-9A-F]{1,3})(,0x)([0-9A-F]{1,3})(,0x)([0-9A-F]{1,3})\$halc01')
 LABELS = (b'OpenFrame-Sharp', b'OpenFrame-Samsung')
 
 
@@ -82,14 +90,21 @@ def runs_of(mem, base, ranges, relocs):
 
 def analyse(path):
     mem, relocs, size = gop_image(path)
+    at = [m.start() for m in re.finditer(re.escape(STRINGS_TEXT), mem)]
+    if len(at) != 1:
+        bp.fail('%s: the handlers\' strings found %d times' % (path, len(at)))
+    shift = STRINGS[0] - at[0]
+    if shift not in (0, 0x50):
+        bp.fail('%s: the handlers\' strings at 0x%x, not a place we know' % (path, at[0]))
+    code = CODE - shift
     label = next((x for x in LABELS if mem.find(b'$ccnc01,' + x + b'$', CFG, CFG + 0x80) >= 0), None)
     if label is None:
         bp.fail('%s: not a configuration we know' % path)
     if mem[CFG:CFG + 17] != b'^%0x700$01$chpc01':
         bp.fail('%s: configuration not at 0x%x' % (path, CFG))
     m = VALUE.search(mem, CFG, CFG + 0x100)
-    if not m:
-        bp.fail('%s: $sspc01 is not 0x0 and 3, 2, 2, 2 hex digits' % path)
+    if not m or m.end(8) - m.start(1) != 24:
+        bp.fail('%s: $sspc01 is not 0x0 and four hex numbers in 24 characters' % path)
     value = m.start(1)
     ssd = mem.find(b'$ssd', value)
     px = ssd + 4
@@ -106,16 +121,16 @@ def analyse(path):
     bad = [r for r in relocs if CFG - 3 <= r < end + 6]
     if bad:
         bp.fail('%s: relocated dwords in the configuration: %s' % (path, [hex(r) for r in bad]))
-    if mem[0x15254:0x1525d] != b'ENDSSDATA':
-        bp.fail('%s: ENDSSDATA string not at 0x15254' % path)
-    cfg_runs = runs_of(mem, CFG, [(CFG, value + 6), (value + 9, value + 12), (value + 14, value + 17),
-                                  (value + 19, value + 22), (value + 24, px), (end, end + 6), TOKENS], relocs)
-    code_runs = runs_of(mem, CODE, [STRINGS, (SSD_FN, SSD_END), (SSP_FN, SSP_END)], relocs)
+    digits = [(m.start(i), m.end(i)) for i in (2, 4, 6, 8)]
+    keep = [(CFG, digits[0][0])] + [(digits[i][1], digits[i + 1][0]) for i in range(3)] + [(digits[3][1], px)]
+    cfg_runs = runs_of(mem, CFG, keep + [(end, end + 6), TOKENS], relocs)
+    code_runs = runs_of(mem, code, [(a - shift, b - shift) for a, b in (STRINGS, (SSD_FN, SSD_END), (SSP_FN, SSP_END))],
+                        relocs)
     for o, d in cfg_runs + code_runs:
         if not 0 <= o < 0x10000 or len(d) >= 0x10000:
             bp.fail('run out of 16-bit range')
     return dict(path=path, label=label.decode(), value=value, px=px, end=end, size=size, cfg=cfg_runs,
-                code=code_runs, old=(x, y, w, h), mem=mem)
+                code=code_runs, code_rva=code, ssp_end=SSP_END - shift, old=(x, y, w, h), mem=mem)
 
 
 def emit_runs(f, runs):
@@ -131,30 +146,46 @@ def main():
     ap.add_argument('sharp', help='stock image with the OpenFrame-Sharp display driver (of1_efi_o2.img)')
     ap.add_argument('samsung', help='stock image with the OpenFrame-Samsung display driver (of2_efi_cisco.img)')
     ap.add_argument('out')
-    ap.add_argument('--check', nargs='*', default=[], help='more images: each must match one of the two')
+    ap.add_argument('--more', nargs='*', default=[], help='other builds\' display drivers to recognise too '
+                    '(the OpenPeak OF2\'s, the Verizon and Telstra OF1s\')')
+    ap.add_argument('--check', nargs='*', default=[], help='more images: each must match one we recognise')
     a = ap.parse_args()
     v = [analyse(a.sharp), analyse(a.samsung)]
     if [x['label'] for x in v] != ['OpenFrame-Sharp', 'OpenFrame-Samsung']:
         bp.fail('inputs are %s, not Sharp then Samsung' % [x['label'] for x in v])
-    if v[0]['code'] != v[1]['code'] or v[0]['end'] != v[1]['end']:
-        bp.fail('the two display drivers differ in their code or reserve')
+    if v[0]['code_rva'] != CODE or v[1]['code_rva'] != CODE:
+        bp.fail('the Sharp and Samsung display drivers are not the current build')
+    for path in a.more:
+        c = analyse(path)
+        if not any(x['cfg'] == c['cfg'] and x['value'] == c['value'] for x in v):
+            v.append(c)
+    for x in v:
+        if x['code'] != v[0]['code'] or x['end'] != v[0]['end']:
+            bp.fail('%s: its handlers or reserve differ from %s\'s' % (x['path'], v[0]['path']))
+    rvas = sorted({x['code_rva'] for x in v}, reverse=True)
     for path in a.check:
         c = analyse(path)
-        match = [x['label'] for x in v if x['cfg'] == c['cfg'] and x['code'] == c['code'] and x['value'] == c['value']]
-        print('%s: %s, splash %dx%d at %d,%d' % (path.split('/')[-1], match[0] if match else 'NO MATCH', c['old'][2], c['old'][3], *c['old'][:2]))
+        match = [x for x in v if x['cfg'] == c['cfg'] and x['code'] == c['code'] and x['value'] == c['value']
+                 and c['code_rva'] in rvas]
+        print('%s: %s, splash %dx%d at %d,%d' % (path.split('/')[-1], 'as %s (%s)' % (match[0]['path'].split('/')[-1], match[0]['label'])
+                                                if match else 'NO MATCH', c['old'][2], c['old'][3], *c['old'][:2]))
         if not match:
             sys.exit(1)
     with open(a.out, 'w') as f:
-        f.write('; Generated by tools/splash_sig.py from %s and %s: do not edit.\n'
-                % (a.sharp.split('/')[-1], a.samsung.split('/')[-1]))
+        f.write('; Generated by tools/splash_sig.py from %s: do not edit.\n'
+                % ', '.join(x['path'].split('/')[-1] for x in v))
         f.write('; The IEGD display driver (2B13E5F0-E82E-4209-898A-8A53E8570DB9): its splash configuration and\n'
                 '; the code that parses it, in mmc_sig_match runs. Offsets are from GSP_CFG_RVA or GSP_CODE_RVA.\n')
         f.write('GSP_CFG_RVA     equ     0x%x\n' % CFG)
         f.write('GSP_END_RVA     equ     0x%x                  ; the reserve ends here (its second CEDCED)\n' % v[0]['end'])
         f.write('GSP_CODE_RVA    equ     0x%x\n' % CODE)
-        f.write('GSP_MIN_SIZE    equ     0x%x                 ; ImageSize at least this\n' % max(SSP_END, v[0]['end'] + 6))
+        f.write('GSP_MIN_SIZE    equ     0x%x                 ; ImageSize at least this\n'
+                % max([x['ssp_end'] for x in v] + [v[0]['end'] + 6]))
         f.write('GSP_PX_MAX      equ     0x%x                   ; the later first pixel, from GSP_CFG_RVA\n'
                 % max(x['px'] - CFG for x in v))
+        f.write('; Each place the handlers can be (the current build\'s first, then older builds\'), 0 ends the list.\n')
+        f.write('gsp_code_rvas:\n')
+        f.write('        dd      %s, 0\n' % ', '.join('0x%x' % r for r in rvas))
         f.write('gsp_code_sig:\n')
         emit_runs(f, v[0]['code'])
         f.write('; Each configuration: dw its length in bytes (0 ends the list), the five numbers\' offset, the\n'
@@ -162,14 +193,15 @@ def main():
         f.write('gsp_cfgs:\n')
         for x in v:
             n = 8 + sum(4 + len(d) for _, d in x['cfg']) + 4
-            f.write('; %s: numbers at 0x%x, pixels from 0x%x (stock splash %dx%d at %d,%d)\n'
-                    % (x['label'], x['value'], x['px'], x['old'][2], x['old'][3], *x['old'][:2]))
+            f.write('; %s (%s): numbers at 0x%x, pixels from 0x%x (stock splash %dx%d at %d,%d)\n'
+                    % (x['label'], x['path'].split('/')[-1], x['value'], x['px'], x['old'][2], x['old'][3], *x['old'][:2]))
             f.write('        dw      0x%04x, 0x%04x, 0x%04x, 0\n' % (n, x['value'] - CFG, x['px'] - CFG))
             emit_runs(f, x['cfg'])
         f.write('        dw      0\n')
     for x in v:
-        print('%s: numbers at 0x%x, pixels 0x%x-0x%x (%d bytes), %d configuration bytes checked'
-              % (x['label'], x['value'], x['px'], x['end'], x['end'] - x['px'], sum(len(d) for _, d in x['cfg'])))
+        print('%s (%s, handlers from 0x%x): numbers at 0x%x, pixels 0x%x-0x%x (%d bytes), %d configuration bytes checked'
+              % (x['label'], x['path'].split('/')[-1], x['code_rva'], x['value'], x['px'], x['end'], x['end'] - x['px'],
+                 sum(len(d) for _, d in x['cfg'])))
     print('code: %d bytes checked' % sum(len(d) for _, d in v[0]['code']))
 
 

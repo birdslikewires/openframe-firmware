@@ -1,6 +1,7 @@
 """Mutations for splash.inc (our splash put into the display driver in memory). Each is (label, old,
 new), or (label, [(old, new), ...]) for several changes at once:
-    venv/bin/python -I tools/emu_splash.py --mutate tools/mutations/splash.py of1_efi_o2.img of2_efi_cisco.img
+    venv/bin/python -I tools/emu_splash.py --mutate tools/mutations/splash.py of1_efi_o2.img of2_efi_cisco.img \
+        of2_openpeak.img of1_efi_openpeak_verizon.img of1_efi_telstra.img
 Not caught on purpose, so not listed: dropping either read-back (the emulated memory always takes
 the write); dropping a cld (the direction flag is clear whenever the firmware calls a notify)."""
 MUTATIONS = [
@@ -9,8 +10,13 @@ MUTATIONS = [
     ('file GUID not checked', '        repe    cmpsb\n        jne     .no\n        cmp     dword [ebx + 0x28]',
      '        repe    cmpsb\n        nop\n        nop\n        cmp     dword [ebx + 0x28]'),
     ('ImageSize not checked', '        jb      .no\n', '        nop\n        nop\n'),
-    ('handlers not checked', '        call    mmc_sig_match                   ; the handlers that read the splash\n        add     esp, 8\n        test    eax, eax\n        jz      .no',
+    ('handlers not checked', '        call    mmc_sig_match                   ; the handlers that read the splash\n        add     esp, 8\n        test    eax, eax\n        jz      .code',
      '        call    mmc_sig_match                   ; the handlers that read the splash\n        add     esp, 8\n        test    eax, eax\n        nop\n        nop'),
+    ('the older builds\' place never tried', '        test    eax, eax\n        jz      .code', '        test    eax, eax\n        jz      .no'),
+    ('only the older builds\' place tried', '        lea     ebx, [edi + (gsp_code_rvas - .here)]', '        lea     ebx, [edi + (gsp_code_rvas - .here) + 4]'),
+    ('the handlers\' places not stepped through', '        add     ebx, 4\n        lea     ecx, [edi + (gsp_code_sig - .here)]', '        lea     ecx, [edi + (gsp_code_sig - .here)]'),
+    ('the end of the places not checked', '.code:  mov     eax, [ebx]                      ; each place the handlers can be (0 ends the list)\n        test    eax, eax\n        jz      .no',
+     '.code:  mov     eax, [ebx]                      ; each place the handlers can be (0 ends the list)\n        test    eax, eax\n        nop\n        nop'),
     ('configuration not checked', '        jnz     .found', '        jmp     .found'),
     ('second configuration never tried', '        add     ebx, eax\n        jmp     .cfg', '        jmp     .no'),
     ('pixels where the numbers go', '        lea     esi, [edx + (gsp_data - .here) + 24]\n        movzx   eax, word [ebx + 4]',

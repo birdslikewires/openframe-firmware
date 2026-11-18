@@ -233,12 +233,12 @@ def inc_bytes(name, label):
 
 GOP_FILE = G('2b13e5f0-e82e-4209-898a-8a53e8570db9')
 GOP_IMG, GOP_SIZE = 0x65000000, 0x1a000         # the display driver's loaded image (fake, from splash_sig.inc)
-GOP_VARIANTS = ('sharp', 'samsung', 'ours', 'code', 'cfg', 'cedced', 'small', 'guid', 'nopath')
+GOP_VARIANTS = ('sharp', 'samsung', 'older', 'ours', 'code', 'cfg', 'cedced', 'small', 'guid', 'nopath')
 
 
 def gsp_sigs():
-    """driver/splash_sig.inc: its constants, the code runs, and each configuration's (numbers
-    offset, first pixel offset, runs)."""
+    """driver/splash_sig.inc: its constants (with 'rvas', each place the handlers can be), the code
+    runs, and each configuration's (numbers offset, first pixel offset, runs)."""
     import os, re
     k, code, cfgs, cur = {}, [], [], None
     for line in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'driver', 'splash_sig.inc')):
@@ -246,6 +246,8 @@ def gsp_sigs():
         m = re.match(r'(GSP_\w+)\s+equ\s+(0x[0-9a-f]+)', t)
         if m:
             k[m.group(1)] = int(m.group(2), 16)
+        elif t.startswith('dd') and cur is None and 'rvas' not in k:
+            k['rvas'] = [x for x in (int(y, 16) for y in t[2:].split(',')) if x]
         elif t == 'gsp_code_sig:':
             cur = code
         elif t == 'gsp_cfgs:':
@@ -273,21 +275,23 @@ def splash_bytes():
 
 def gop_fake(variant):
     """A display driver's loaded image as splash.inc sees it, and the image it should leave (None:
-    unchanged). 'sharp' and 'samsung': the stock configurations, with another splash; 'ours': ours
-    already (an OF1 release); the rest each differ from 'sharp' in one way: 'code' one byte of a
-    handler, 'cfg' one byte of the panel settings, 'cedced' the reserve's end marker."""
+    unchanged). 'sharp' and 'samsung': the stock configurations, with another splash; 'older': an
+    older build's (the OpenPeak OF2's: its handlers at the second place, its own configuration);
+    'ours': ours already (an OF1 release); the rest each differ from 'sharp' in one way: 'code' one
+    byte of a handler, 'cfg' one byte of the panel settings, 'cedced' the reserve's end marker."""
     k, code, cfgs = gsp_sigs()
-    cfg, base = (cfgs[1], 'samsung') if variant == 'samsung' else (cfgs[0], 'sharp')
+    cfg, base = {'samsung': (cfgs[1], 'samsung'), 'older': (cfgs[2], 'older')}.get(variant, (cfgs[0], 'sharp'))
+    crva = k['rvas'][1] if variant == 'older' else k['GSP_CODE_RVA']
     img = bytearray(b'\x5a' * GOP_SIZE)
     for o, ln, d in code:
-        img[k['GSP_CODE_RVA'] + o:k['GSP_CODE_RVA'] + o + ln] = d
+        img[crva + o:crva + o + ln] = d
     value, px, runs = cfg
     for o, ln, d in runs:
         img[k['GSP_CFG_RVA'] + o:k['GSP_CFG_RVA'] + o + ln] = d
     v, p_, end = k['GSP_CFG_RVA'] + value, k['GSP_CFG_RVA'] + px, k['GSP_END_RVA']
     sp = splash_bytes()
-    old = (b'0x0,0x144,0xC7,0x99,0x51' if base == 'samsung' else b'0x0,0x168,0xBF,0x50,0x51')
-    w, h = (0x99, 0x51) if base == 'samsung' else (0x50, 0x51)
+    old, w, h = {'samsung': (b'0x0,0x144,0xC7,0x99,0x51', 0x99, 0x51),
+                 'older': (b'0x0,0xFA,0xD4,0x12C,0x38', 0x12c, 0x38)}.get(base, (b'0x0,0x168,0xBF,0x50,0x51', 0x50, 0x51))
     img[v:v + 24] = old
     img[p_:end] = bytes((i * 7 + 3) & 0xff for i in range(w * h * 3)) + b'ENDSSDATA' + bytes(end - p_ - w * h * 3 - 9)
     want = bytearray(img)
@@ -303,7 +307,7 @@ def gop_fake(variant):
         img[k['GSP_CFG_RVA'] + panel[0] + panel[2].index(b'$dtdc01') + 12] ^= 1
     if variant == 'cedced':
         img[end] ^= 1
-    patched = variant in ('sharp', 'samsung', 'ours')
+    patched = variant in ('sharp', 'samsung', 'older', 'ours')
     return bytes(img), (bytes(want) if patched else None)
 
 
@@ -1834,6 +1838,8 @@ def main():
         ('display driver (Sharp panel) loads after the driver: our splash written as it loads', dxe, dict(store=lm(CARD), gop_img='after'), 0, True, MAC, True),
         ('display driver with the Samsung panel (Cisco OF2), before: our splash, its panel settings kept', dxe, dict(store=lm(CARD), gop_variant='samsung'), 0, True, MAC, True),
         ('display driver with the Samsung panel, after: our splash as it loads', dxe, dict(store=lm(CARD), gop_variant='samsung', gop_img='after'), 0, True, MAC, True),
+        ('display driver of an older build (the OpenPeak OF2\'s), before: our splash', dxe, dict(store=lm(CARD), gop_variant='older'), 0, True, MAC, True),
+        ('display driver of an older build, after: our splash as it loads', dxe, dict(store=lm(CARD), gop_variant='older', gop_img='after'), 0, True, MAC, True),
         ('display driver already with our splash (an OF1 release): the same bytes written again', dxe, dict(store=lm(CARD), gop_variant='ours'), 0, True, MAC, True),
         ('display driver with one handler byte different: left alone', dxe, dict(store=lm(CARD), gop_variant='code'), 0, True, MAC, True),
         ('display driver with one panel setting different: left alone', dxe, dict(store=lm(CARD), gop_variant='cfg'), 0, True, MAC, True),
