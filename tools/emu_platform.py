@@ -1856,13 +1856,13 @@ def main():
         ('OF1: no SSDT, ACPI Support not looked for', dxe, dict(store=lm(CARD), flash_model='of1'), 0, True, MAC, True),
         ('do-not-use OF2 build (0ABPW006): no SSDT', dxe, dict(store=lm(CARD), flash_model='bad'), 0, True, MAC, True),
         # The panel and touch lines (panel_id.inc): the panel from the touchscreen's version, else the display driver's configuration
-        ('panel: the Cisco (Samsung display, touch S01_02)', dxe, dict(store=lm(CARD), flash_model='of2', gop_variant='samsung', usb_devs=[TOUCH('S01_02')], want_panel=panel_line('Samsung', 'S01_02')), 0, True, MAC, True),
-        ('panel: a Sharp unit (Sharp display, touch Hyup05_3)', dxe, dict(store=lm(CARD), usb_devs=[TOUCH('Hyup05_3')], want_panel=panel_line('Sharp', 'Hyup05_3')), 0, True, MAC, True),
-        ('panel: a Sharp panel on the Samsung display driver (.138 that morning): Sharp', dxe, dict(store=lm(CARD), gop_variant='samsung', usb_devs=[TOUCH('Hyup05_3')], want_panel=panel_line('Sharp', 'Hyup05_3')), 0, True, MAC, True),
+        ('panel: the Cisco (Samsung display, touch S01_02)', dxe, dict(store=lm(CARD), flash_model='of2', gop_variant='samsung', usb_devs=[TOUCH('S01_02')], want_panel=panel_line('Samsung', 'Samsung 1.2')), 0, True, MAC, True),
+        ('panel: a Sharp unit (Sharp display, touch Hyup05_3)', dxe, dict(store=lm(CARD), usb_devs=[TOUCH('Hyup05_3')], want_panel=panel_line('Sharp', 'Hyup 5.3')), 0, True, MAC, True),
+        ('panel: a Sharp panel on the Samsung display driver (.138 that morning): Sharp', dxe, dict(store=lm(CARD), gop_variant='samsung', usb_devs=[TOUCH('Hyup05_3')], want_panel=panel_line('Sharp', 'Hyup 5.3')), 0, True, MAC, True),
         ('panel: no USB devices: from the display', dxe, dict(store=lm(CARD), want_panel=panel_line('Sharp', 'unknown')), 0, True, MAC, True),
-        ('panel: a stick and Bluetooth first, then the touchscreen', dxe, dict(store=lm(CARD), usb_devs=[(0x0781, 0x5580, 2, 'Extreme'), (0x0a5c, 0x219a, 2, 'BCM2046 Bluetooth'), TOUCH('S01_02')], want_panel=panel_line('Samsung', 'S01_02')), 0, True, MAC, True),
+        ('panel: a stick and Bluetooth first, then the touchscreen', dxe, dict(store=lm(CARD), usb_devs=[(0x0781, 0x5580, 2, 'Extreme'), (0x0a5c, 0x219a, 2, 'BCM2046 Bluetooth'), TOUCH('S01_02')], want_panel=panel_line('Samsung', 'Samsung 1.2')), 0, True, MAC, True),
         ('panel: the touchscreen\'s string can\'t be read', dxe, dict(store=lm(CARD), usb_devs=[(0x04b4, 0x1974, 2, None)], want_panel=panel_line('Sharp', 'unknown')), 0, True, MAC, True),
-        ('panel: a product string of 62 characters: read', dxe, dict(store=lm(CARD), usb_devs=[(0x04b4, 0x1974, 2, 'x' * 53 + ' Hyup05_3')], want_panel=panel_line('Sharp', 'Hyup05_3')), 0, True, MAC, True),
+        ('panel: a product string of 62 characters: read', dxe, dict(store=lm(CARD), usb_devs=[(0x04b4, 0x1974, 2, 'x' * 53 + ' Hyup05_3')], want_panel=panel_line('Sharp', 'Hyup 5.3')), 0, True, MAC, True),
         ('panel: a product string of 63 characters: not read', dxe, dict(store=lm(CARD), gop_variant='samsung', usb_devs=[(0x04b4, 0x1974, 2, 'x' * 54 + ' Hyup05_3')], want_panel=panel_line('Samsung', 'unknown')), 0, True, MAC, True),
         ('panel: an empty product string: touch unknown', dxe, dict(store=lm(CARD), usb_devs=[(0x04b4, 0x1974, 2, b'\x02\x03')], want_panel=panel_line('Sharp', 'unknown')), 0, True, MAC, True),
         ('panel: a descriptor that isn\'t a string: touch unknown', dxe, dict(store=lm(CARD), usb_devs=[(0x04b4, 0x1974, 2, b'\x0e\x01' + 'S01_02'.encode('utf-16le'))], want_panel=panel_line('Sharp', 'unknown')), 0, True, MAC, True),
@@ -1871,8 +1871,18 @@ def main():
         ('panel: a product string with no space: all of it', dxe, dict(store=lm(CARD), usb_devs=[(0x04b4, 0x1974, 2, 'H2')], want_panel=panel_line('Sharp', 'H2')), 0, True, MAC, True),
         ('panel: a touchscreen version of another letter: from the display', dxe, dict(store=lm(CARD), gop_variant='samsung', usb_devs=[TOUCH('X9')], want_panel=panel_line('Samsung', 'X9')), 0, True, MAC, True),
         ('panel: an unknown display driver and no touchscreen: unknown', dxe, dict(store=lm(CARD), gop_variant='guid', want_panel=panel_line('unknown', 'unknown')), 0, True, MAC, True),
-        ('panel: the Da Vinci (Sharp display driver, touch S01_02): Samsung', dxe, dict(store=lm(CARD), flash_model='of2', usb_devs=[TOUCH('S01_02')], want_panel=panel_line('Samsung', 'S01_02')), 0, True, MAC, True),
-        ('panel: a display driver whose code differs (no bird) still says Sharp', dxe, dict(store=lm(CARD), gop_variant='code', usb_devs=[TOUCH('Hyup05_3')], want_panel=panel_line('Sharp', 'Hyup05_3')), 0, True, MAC, True),
+        ('touch: a Samsung panel on the Hyup board (sysinfo\'s SH) -> Hyup 1.2', dxe, dict(store=lm(CARD), usb_devs=[TOUCH('SH01_02')], want_panel=panel_line('Samsung', 'Hyup 1.2')), 0, True, MAC, True),
+        ('touch: SHyup: the Hyup board too -> Hyup 2.1', dxe, dict(store=lm(CARD), usb_devs=[TOUCH('SHyup02_1')], want_panel=panel_line('Samsung', 'Hyup 2.1')), 0, True, MAC, True),
+        ('touch: zeros: one digit kept -> Samsung 0.0', dxe, dict(store=lm(CARD), usb_devs=[TOUCH('S00_00')], want_panel=panel_line('Samsung', 'Samsung 0.0')), 0, True, MAC, True),
+        ('touch: dots and three groups -> Hyup 1.2.3', dxe, dict(store=lm(CARD), usb_devs=[TOUCH('Hyup1.2.3')], want_panel=panel_line('Sharp', 'Hyup 1.2.3')), 0, True, MAC, True),
+        ('touch: 13 characters tidied -> as read', dxe, dict(store=lm(CARD), usb_devs=[TOUCH('S1.2.3')], want_panel=panel_line('Samsung', 'S1.2.3')), 0, True, MAC, True),
+        ('touch: too long tidied: as read -> S12345_6789', dxe, dict(store=lm(CARD), usb_devs=[TOUCH('S12345_6789')], want_panel=panel_line('Samsung', 'S12345_6789')), 0, True, MAC, True),
+        ('touch: an empty group: as read -> S01__02', dxe, dict(store=lm(CARD), usb_devs=[TOUCH('S01__02')], want_panel=panel_line('Samsung', 'S01__02')), 0, True, MAC, True),
+        ('touch: a letter after the numbers: as read -> Hyup05_3a', dxe, dict(store=lm(CARD), usb_devs=[TOUCH('Hyup05_3a')], want_panel=panel_line('Sharp', 'Hyup05_3a')), 0, True, MAC, True),
+        ('touch: no digit after the prefix: as read -> Sx1', dxe, dict(store=lm(CARD), usb_devs=[TOUCH('Sx1')], want_panel=panel_line('Samsung', 'Sx1')), 0, True, MAC, True),
+        ('touch: another spelling: as read -> HYUP05_3', dxe, dict(store=lm(CARD), usb_devs=[TOUCH('HYUP05_3')], want_panel=panel_line('Sharp', 'HYUP05_3')), 0, True, MAC, True),
+        ('panel: the Da Vinci (Sharp display driver, touch S01_02): Samsung', dxe, dict(store=lm(CARD), flash_model='of2', usb_devs=[TOUCH('S01_02')], want_panel=panel_line('Samsung', 'Samsung 1.2')), 0, True, MAC, True),
+        ('panel: a display driver whose code differs (no bird) still says Sharp', dxe, dict(store=lm(CARD), gop_variant='code', usb_devs=[TOUCH('Hyup05_3')], want_panel=panel_line('Sharp', 'Hyup 5.3')), 0, True, MAC, True),
         # The shell's countdown (countdown.inc): 0 as it loads, for either shell build we know
         ('OF1 shell loads at BDS: its countdown made 0', dxe, dict(store=lm(CARD), shell_variant='of1'), 0, True, MAC, True),
         ('OF2 shell loads at BDS: its countdown made 0', dxe, dict(store=lm(CARD), shell_variant='of2'), 0, True, MAC, True),
@@ -2542,7 +2552,7 @@ def main():
                 pl, tl = (got11[1], got11[2]) if len(got11) == 3 else (None, None)
                 ok_form = pl is not None and len(pl) == len(PANEL_PLACEHOLDER) and len(tl) == len(TOUCH_PLACEHOLDER) and (
                     (pl, tl) == (PANEL_PLACEHOLDER, TOUCH_PLACEHOLDER) or (
-                        re.fullmatch(r'Panel: (Sharp|Samsung|unknown) *', pl) and re.fullmatch(r'Touch: [!-~]{1,12} *', tl)))
+                        re.fullmatch(r'Panel: (Sharp|Samsung|unknown) *', pl) and re.fullmatch(r'Touch: ([!-~]{1,12}|(Samsung|Hyup) [0-9][0-9.]*) *', tl)))
                 if not ok_form:
                     p.append('Type 11 panel lines %r %r malformed' % (pl, tl))
                 elif want_panel is not None and (pl, tl) != want_panel:

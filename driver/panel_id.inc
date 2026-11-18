@@ -1,9 +1,10 @@
 ; panel_id.inc: which panel this OpenFrame has, in SMBIOS Type 11, from 26.11.32:
-;   "Panel: Samsung" or "Panel: Sharp", and "Touch: S01_02" (the touchscreen's version).
+;   "Panel: Samsung" or "Panel: Sharp", and "Touch: Samsung 1.2" or "Touch: Hyup 5.3".
 ;
-; The panel comes from the USB touchscreen fitted with it (04B4:1974), whose product string ends in
-; a version: "OpenPeak Touchscreen S01_02" with the Samsung panel, "...Hyup05_3" with the Sharp
-; (OF1 and OF2). OpenPeak's own system read it the same way (sysinfo: S* Samsung, H* Sharp). It is
+; The panel comes from the USB touchscreen fitted with it (04B4:1974, a Cypress PSoC), whose
+; product string ends in a version: "AmSC OpenPeak Touchscreen S01_02" with the Samsung panel,
+; "...Hyup05_3" with the Sharp (OF1 and OF2; its board is printed "PSoC HYUP BOARD"). OpenPeak's own
+; /sbin/sysinfo read it the same way: SH* samsung-hyup, S* samsung, H* sharp. It is
 ; read at ReadyToBoot through USB I/O (device descriptor, then the product string in US English by
 ; GET_DESCRIPTOR control transfers: the firmware's own UsbGetStringDescriptor can't be used, see
 ; pid_read_string), read only. The display driver can't tell: its configuration is whatever its
@@ -12,7 +13,12 @@
 ; Without a touchscreen version, the panel comes from that configuration instead: the stock display
 ; driver's (IEGD GOP) label "OpenFrame-Sharp" or "OpenFrame-Samsung" at RVA 0x13FB in every build
 ; we have, noted by splash.inc's LoadedImage path (the app build, run after the display driver has
-; loaded, never sees it). Then "unknown". The touch line says "unknown" when no version was read.
+; loaded, never sees it). Then "unknown".
+;
+; The touch line names the touch board as sysinfo did, then the version with its numbers tidied
+; (pid_decode): S01_02 is "Samsung 1.2" (the board OpenPeak paired with Samsung panels), Hyup05_3
+; "Hyup 5.3", SH01_02 or SHyup01_02 "Hyup 1.2" (a Samsung panel on the Hyup board). A version that
+; doesn't fit that pattern is shown as read; "unknown" when none was read.
 ; Both are space-padded to their placeholders' widths, so the table's length never changes.
 
 PID_LABEL_RVA   equ     0x13fb
@@ -274,10 +280,11 @@ pid_write:
         mov     edi, [ebx + (touch_ptr - .here)]
         test    edi, edi
         jz      .done
-        lea     esi, [ebx + (pid_touch - .here)]
-        cmp     byte [esi], 0
-        jne     .t
         lea     esi, [ebx + (pid_s_unknown - .here)]
+        cmp     byte [ebx + (pid_touch - .here)], 0
+        je      .t
+        call    pid_decode
+        lea     esi, [ebx + (pid_tdisp - .here)]
 .t:     mov     ecx, PID_TOUCH_WIDTH
         call    .put
 .done:  pop     edi
@@ -295,11 +302,110 @@ pid_write:
         rep     stosb
         ret
 
+; pid_decode: the touch version (pid_touch, not empty) for the touch line, into pid_tdisp: the
+; board sysinfo's prefixes name, a space, and the version's digit groups without leading zeros,
+; joined by dots ("Samsung 1.2"); else the version as read. Keeps ebx, esi, edi, ebp.
+pid_decode:
+        push    ebx
+        push    esi
+        push    edi
+        push    ebp
+        call    .here
+.here:  pop     ebx
+        lea     ebp, [ebx + (pid_boards - .here)]
+.entry: cmp     byte [ebp], 0
+        je      .raw                            ; no prefix matched
+        lea     esi, [ebx + (pid_touch - .here)]
+        mov     edx, ebp
+.cmp:   mov     al, [edx]                       ; the prefix
+        test    al, al
+        jz      .match                          ; matched (.group wants a digit next)
+        cmp     al, [esi]
+        jne     .skip
+        inc     edx
+        inc     esi
+        jmp     .cmp
+.skip:  mov     edx, ebp                        ; the next entry: past the prefix and the board
+.s1:    inc     edx
+        cmp     byte [edx - 1], 0
+        jne     .s1
+.s2:    inc     edx
+        cmp     byte [edx - 1], 0
+        jne     .s2
+        mov     ebp, edx
+        jmp     .entry
+.match: lea     edi, [ebx + (pid_tdisp - .here)]
+        lea     ecx, [edi + PID_TOUCH_WIDTH]    ; ecx = the end
+.board: inc     edx                             ; the board's name (short: always fits)
+        mov     al, [edx]
+        test    al, al
+        jz      .sp
+        mov     [edi], al
+        inc     edi
+        jmp     .board
+.sp:    mov     byte [edi], ' '
+        inc     edi
+.group: mov     al, [esi]                       ; a group: at least one digit
+        sub     al, '0'
+        cmp     al, 9
+        ja      .raw
+.zero:  cmp     byte [esi], '0'                 ; leading zeros, but not the group's last digit
+        jne     .dig
+        mov     al, [esi + 1]
+        sub     al, '0'
+        cmp     al, 9
+        ja      .dig
+        inc     esi
+        jmp     .zero
+.dig:   mov     al, [esi]
+        mov     ah, al
+        sub     ah, '0'
+        cmp     ah, 9
+        ja      .sep
+        cmp     edi, ecx
+        jae     .raw                            ; too long for the line
+        mov     [edi], al
+        inc     edi
+        inc     esi
+        jmp     .dig
+.sep:   test    al, al
+        jz      .end
+        cmp     al, '_'
+        je      .dot
+        cmp     al, '.'
+        jne     .raw
+.dot:   cmp     edi, ecx
+        jae     .raw
+        mov     byte [edi], '.'
+        inc     edi
+        inc     esi
+        jmp     .group
+.end:   mov     byte [edi], 0
+        jmp     .r
+.raw:   lea     esi, [ebx + (pid_touch - .here)]    ; as read (at most PID_TOUCH_MAX)
+        lea     edi, [ebx + (pid_tdisp - .here)]
+.rc:    lodsb
+        stosb
+        test    al, al
+        jnz     .rc
+.r:     pop     ebp
+        pop     edi
+        pop     esi
+        pop     ebx
+        ret
+
+; sysinfo's prefixes and the board each names; the first that matches is used, so longest first.
+pid_boards:     db 'SHyup', 0, 'Hyup', 0
+                db 'SH', 0, 'Hyup', 0
+                db 'Hyup', 0, 'Hyup', 0
+                db 'S', 0, 'Samsung', 0
+                db 0
 pid_s_samsung:  db 'Samsung', 0
 pid_s_sharp:    db 'Sharp', 0
 pid_s_unknown:  db 'unknown', 0
 pid_filled:     db 0
 pid_touch:      times PID_TOUCH_MAX + 1 db 0
+pid_tdisp:      times PID_TOUCH_WIDTH + 1 db 0  ; the touch line's text (pid_decode)
         align   4, db 0
 pid_display:    dd 0                            ; 1 Sharp, 2 Samsung (pid_note_display), else 0
 panel_ptr:      dd 0                            ; set by smbios_install: the Type 11 panel line, or 0
