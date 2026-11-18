@@ -45,13 +45,11 @@ tell() {
 			return
 		fi
 		if [ "$NOW" = "$NEW" ]; then
-			echo "openframe-firmware: the firmware is already $NEW. A quick check at the next restart"
-			echo "  confirms it."
+			echo "openframe-firmware: the firmware is already $NEW. Verified at next boot."
 			return
 		fi
 		if [ -n "$NOW" ] && older "$NEW" "$NOW"; then
-			echo "openframe-firmware: the firmware ($NOW) is newer than this package's $NEW,"
-			echo "  so it is left as it is."
+			echo "openframe-firmware: the firmware ($NOW) is newer than this package's $NEW."
 			return
 		fi
 		echo "openframe-firmware: the firmware ($NOW) will be updated to $NEW at the next restart."
