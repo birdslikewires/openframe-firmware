@@ -50,6 +50,8 @@ BOOTCOUNT_PREFIX = 'BootCount: '
 BOOTCOUNT_PLACEHOLDER = BOOTCOUNT_PREFIX + '-' * 10      # 10 digits: any 32-bit count
 PANEL_PREFIX = 'Panel: '
 PANEL_PLACEHOLDER = PANEL_PREFIX + '-' * 7                # panel_id.inc's PID_WIDTH
+TOUCH_PREFIX = 'Touch: '
+TOUCH_PLACEHOLDER = TOUCH_PREFIX + '-' * 12               # panel_id.inc's PID_TOUCH_WIDTH
 ACPI_RP2 = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'driver', 'of2_rp2.aml')
 KBD_PREFIX = 'KbdTime: '                                 # the -DKBDTIME development build's (kbdtime.inc)
 KBD_PLACEHOLDER = KBD_PREFIX + 'I-----U-----R-----S-----F-----N--K--------C--u--P-----W--'
@@ -107,11 +109,11 @@ def smbios_blobs(bios_version, bios_date, release, system, kbdtime=False):
                       0x13, 0x0080,                   # DDR2; synchronous
                       0,                              # speed (MT/s): filled in
                       0, 0, 0, 0) + strings('Onboard')    # manufacturer, serial, asset tag, part: none
-    # Then the panel line (panel_id.inc), also filled in at ReadyToBoot.
-    if kbdtime:                                      # development build: a third string (kbdtime.inc)
-        t11 = struct.pack('<BBHB', 11, 5, 0x0005, 3) + strings(BOOTCOUNT_PLACEHOLDER, PANEL_PLACEHOLDER, KBD_PLACEHOLDER)
+    # Then the panel and touch lines (panel_id.inc), also filled in at ReadyToBoot.
+    if kbdtime:                                      # development build: a fourth string (kbdtime.inc)
+        t11 = struct.pack('<BBHB', 11, 5, 0x0005, 4) + strings(BOOTCOUNT_PLACEHOLDER, PANEL_PLACEHOLDER, TOUCH_PLACEHOLDER, KBD_PLACEHOLDER)
     else:
-        t11 = struct.pack('<BBHB', 11, 5, 0x0005, 2) + strings(BOOTCOUNT_PLACEHOLDER, PANEL_PLACEHOLDER)
+        t11 = struct.pack('<BBHB', 11, 5, 0x0005, 3) + strings(BOOTCOUNT_PLACEHOLDER, PANEL_PLACEHOLDER, TOUCH_PLACEHOLDER)
     t127 = struct.pack('<BBH', 127, 4, 0x0006) + b'\0\0'
     structs = [t0, t1, t3, t16, t17, t11, t127]
     table = b''.join(structs)
@@ -136,8 +138,10 @@ def smbios_blobs(bios_version, bios_date, release, system, kbdtime=False):
     kbd = table.index(KBD_PLACEHOLDER.encode()) + len(KBD_PREFIX) if kbdtime else 0
     assert table.count(PANEL_PLACEHOLDER.encode()) == 1
     panel = table.index(PANEL_PLACEHOLDER.encode()) + len(PANEL_PREFIX)
+    assert table.count(TOUCH_PLACEHOLDER.encode()) == 1
+    touch = table.index(TOUCH_PLACEHOLDER.encode()) + len(TOUCH_PREFIX)
     return bytes(eps) + b'\0', table, dict(count=digits, memsize=t17_off + 12, memspeed=t17_off + 21,
-                                          model1=model1, model2=model2, kbd=kbd, panel=panel)
+                                          model1=model1, model2=model2, kbd=kbd, panel=panel, touch=touch)
 
 
 def check_ssdt(path):
@@ -272,6 +276,7 @@ def main():
                                 '-DSMBIOS_MEMSIZE_OFF=%d' % offs['memsize'], '-DSMBIOS_MEMSPEED_OFF=%d' % offs['memspeed'],
                                 '-DSMBIOS_MODEL1_OFF=%d' % offs['model1'], '-DSMBIOS_MODEL2_OFF=%d' % offs['model2'],
                                 '-DSMBIOS_KBD_OFF=%d' % offs['kbd'], '-DSMBIOS_PANEL_OFF=%d' % offs['panel'],
+                                '-DSMBIOS_TOUCH_OFF=%d' % offs['touch'],
                                 '-DACPI_RP2_FILE="%s"' % os.path.abspath(ACPI_RP2)] + list(defs) + ['-o', out, ASM],
                                capture_output=True, text=True)
             if r.returncode:

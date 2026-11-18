@@ -73,8 +73,9 @@
 ; 18. Mini-PCIe interrupts: from 26.11.32, on an OpenFrame 2, an SSDT describing the second PCIe
 ;    root port and its slot's interrupt routing, which every OF2 DSDT leaves out (the slot's INTA
 ;    is GSI 17, not 16), through the firmware's ACPI Support protocol (acpi_rp2.inc).
-; 19. Panel: from 26.11.32, SMBIOS Type 11 "Panel: Sharp" or "Panel: Samsung" says which panel the
-;    firmware drives, from the display driver's configuration (panel_id.inc).
+; 19. Panel: from 26.11.32, SMBIOS Type 11 "Panel: Samsung" or "Panel: Sharp" says which panel is
+;    fitted, from the USB touchscreen's version ("Touch: S01_02"), else from the display driver's
+;    configuration (panel_id.inc).
 ;
 ; Position-independent: data is reached through call/pop, so no relocations are needed.
 ; Assembled with `nasm -f bin`; build_ucode_driver.py wraps it in a PE32 image and an FFS
@@ -186,7 +187,7 @@ entry:
         mov     eax, [esp]
         push    dword [eax + 0x3c]              ; BootServices
         call    panel_clock
-        call    pid_fill                        ; the panel line (panel_id.inc)
+        call    pid_fill                        ; the panel and touch lines (panel_id.inc)
         add     esp, 8
 %else
         call    rtb_register                    ; eax = 0 if the ReadyToBoot event was created
@@ -338,6 +339,8 @@ smbios_install:
         mov     [ebx + (count_ptr - entry.here)], eax   ; where fill_count writes the boot count
         lea     eax, [edx + 32 + SMBIOS_PANEL_OFF]
         mov     [ebx + (panel_ptr - entry.here)], eax   ; where pid_fill writes the panel line
+        lea     eax, [edx + 32 + SMBIOS_TOUCH_OFF]
+        mov     [ebx + (touch_ptr - entry.here)], eax   ; ... and the touch line
 %ifdef KBDTIME
         lea     eax, [edx + 32 + SMBIOS_KBD_OFF]
         mov     [ebx + (kt_ptr - entry.here)], eax      ; development build: kbdtime.inc's string
@@ -587,7 +590,7 @@ rtb_notify:
         call    mmc_fix_install                 ; any MMC BlockIo the notify didn't see
         call    panel_clock                     ; in case the panel-clock notify ran too early
         call    acpi_rp2                        ; OF2: if the entry couldn't add the SSDT
-        call    pid_fill                        ; the panel line (panel_id.inc)
+        call    pid_fill                        ; the panel and touch lines, once USB devices are there
         call    usb_first                       ; a USB drive with startup.nsh: the shell's fs0
 %ifdef TIMING
         shl     eax, 24                         ; development build: 'UFSn', n disks reconnected

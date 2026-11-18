@@ -88,10 +88,21 @@ ACPISUP_GUID = G('dbff9d55-89b7-46da-bddf-677d3dc0241d')
 ACPISUP_INST = STUBS + 0x2d00      # GetAcpiTable, SetAcpiTable, PublishTables
 ACPI_SET_STUB, ACPI_OTHER_STUB = STUBS + 0x90, STUBS + 0x94
 RP2_AML = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'driver', 'of2_rp2.aml'), 'rb').read()
-# The panel line (panel_id.inc): the display driver's panel, space-padded to 7 characters.
+# The panel line (panel_id.inc): USB I/O on the USB devices, up to three, 0x40 apart.
+USBIO_GUID = G('2b2f68d6-0cd2-44cf-8e8b-bba20b1b5b75')
+USBIO_AREA = STUBS + 0x2d40
+USB_DESC_STUB, USB_STR_STUB, USB_OTHER_STUB = STUBS + 0xa0, STUBS + 0xa8, STUBS + 0xb0
+USB_CTRL_STUB = STUBS + 0xb8
+# A USB device: (vid, pid, iProduct, string), the string as text, None (every transfer for it fails,
+# a device error) or bytes (the whole string descriptor the device returns, for odd ones). The
+# firmware's UsbGetStringDescriptor is AMI's: it fails with NOT_FOUND for a device's only language
+# (its language search is inverted), so the driver must not call it; strings come by control transfers.
 PANEL_PREFIX, PANEL_WIDTH = 'Panel: ', 7
 PANEL_PLACEHOLDER = PANEL_PREFIX + '-' * PANEL_WIDTH
-panel_line = lambda s_: PANEL_PREFIX + s_.ljust(PANEL_WIDTH)
+TOUCH_PREFIX, TOUCH_WIDTH = 'Touch: ', 12
+TOUCH_PLACEHOLDER = TOUCH_PREFIX + '-' * TOUCH_WIDTH
+TOUCH = lambda ver: (0x04b4, 0x1974, 2, 'OpenPeak Touchscreen ' + ver)    # (vid, pid, iProduct, string)
+panel_line = lambda p_, t_: (PANEL_PREFIX + p_.ljust(PANEL_WIDTH), TOUCH_PREFIX + t_.ljust(TOUCH_WIDTH))
 CONOUT = STUBS + 0x2c00           # ST->ConOut: only SetCursorPosition is ever called
 CONOUT_CUR = STUBS + 0x80
 BLT_BUF = 0x0b000000              # a BltBuffer for the Blt checks (2 MB)
@@ -471,7 +482,7 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
         fake_tsc_hi=0, gop_img='before', gop_variant='sharp', gop_dpll=GOP_DPLL, shell_img='after', shell_variant='of1', flash_model=None,
         kbdtime=False, kt_inputs=(('split', 1900), ('usb', 2600)), kt_keys=((0x17, 0), (0, 0x61)), kt_conin=True, kt_late=(),
         kt_shell_t=4600, kt_rks_t=4700, kt_rks_error=False, kt_timer_fails=False, kt_settimer_fails=False, kt_timer_never=False,
-        kt_gop='ok', kt_blt_test=False, core_variant='stock', acpi_sup='present'):
+        kt_gop='ok', kt_blt_test=False, core_variant='stock', acpi_sup='present', usb_devs=()):
     """The console (every run): ST->ConIn, whose ReadKeyStroke hands out kt_keys ((ms it can be read,
     scan, char), or (scan, char) from the start) or always fails (kt_rks_error); Simple Text
     Inputs appearing at kt_inputs' times ('split': ConSplitter's, no device path; 'usb'; 'ps2':
@@ -815,7 +826,13 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     mu.mem_write(MP + 8, struct.pack('<I', STUBS + 0x10))     # StartupAllAPs
     mu.mem_write(STUBS, b'\xc3' * 0x3000)
     mu.mem_write(ACPISUP_INST, struct.pack('<III', ACPI_OTHER_STUB, ACPI_SET_STUB, ACPI_OTHER_STUB))
+    assert len(usb_devs) <= 3
+    for i_ in range(len(usb_devs)):
+        slots = [USB_OTHER_STUB] * 13
+        slots[0], slots[6], slots[10] = USB_CTRL_STUB, USB_DESC_STUB, USB_STR_STUB   # +0x00, +0x18, +0x28
+        mu.mem_write(USBIO_AREA + 0x40 * i_, struct.pack('<13I', *slots))
     acpi = dict(locates=0, sets=[])
+    usb = dict(desc=0, ctl=[], allocs=[])
     if True:                                                      # the console's input and device paths
         mu.mem_write(CONOUT + 0x1c, struct.pack('<I', CONOUT_CUR))
         mu.mem_write(CONIN, struct.pack('<III', STUBS + 0x60, CONIN_RKS, 0))
@@ -881,6 +898,37 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
             return ret(0)
         if addr == ACPI_OTHER_STUB:
             errors.append('ACPI Support: GetAcpiTable or PublishTables called')
+            return ret(0x80000003)
+        if addr in (USB_DESC_STUB, USB_STR_STUB, USB_CTRL_STUB):
+            i_ = (a[0] - USBIO_AREA) // 0x40
+            if not (0 <= i_ < len(usb_devs)) or (a[0] - USBIO_AREA) % 0x40:
+                errors.append('UsbIo call on %#x' % a[0])
+                return ret(0x80000002)
+            vid, pid, iprod, text = usb_devs[i_]
+            if addr == USB_DESC_STUB:                              # UsbGetDeviceDescriptor(This, &Desc)
+                usb['desc'] += 1
+                uc.mem_write(a[1], struct.pack('<BBHBBBBHHHBBBB', 18, 1, 0x0110, 0, 0, 0, 8, vid, pid, 0x0100, 1, iprod, 0, 1))
+                return ret(0)
+            if addr == USB_STR_STUB:                               # AMI's: never finds the language
+                errors.append('UsbGetStringDescriptor called (AMI\'s fails for a device\'s only language)')
+                return ret(0x8000000E)
+            # UsbControlTransfer(This, &Request, Direction, Timeout, Data, DataLength, &Status)
+            req = bytes(uc.mem_read(a[1], 8))
+            usb['ctl'].append((i_, req, a[2], a[3], a[5]))
+            want_req = bytes([0x80, 6, iprod, 3]) + struct.pack('<HH', 0x0409, a[5])
+            if (vid, pid) != (0x04b4, 0x1974):
+                errors.append('control transfer to %04x:%04x, not the touchscreen' % (vid, pid))
+            if req != want_req or a[2] != 0 or not 0 < a[3] <= 5000 or not 0 < a[5] <= 128 or not a[6]:
+                errors.append('control transfer %s dir %d timeout %d length %d status %#x' % (req.hex(), a[2], a[3], a[5], a[6]))
+            if text is None:                                       # a device error: no data
+                uc.mem_write(a[6], struct.pack('<I', 0x10))        # EFI_USB_ERR_TIMEOUT
+                return ret(0x80000007)
+            desc = text if isinstance(text, bytes) else bytes([2 + 2 * len(text), 3]) + text.encode('utf-16le')
+            uc.mem_write(a[4], desc[:a[5]])                       # as much as asked for, or a short packet
+            uc.mem_write(a[6], struct.pack('<I', 0))
+            return ret(0)
+        if addr == USB_OTHER_STUB:
+            errors.append('UsbIo: a transfer or other descriptor called')
             return ret(0x80000003)
         if addr == GOP_BLT_STUB:                                   # the display driver's own Blt
             kt['own_blt'] = kt.get('own_blt', 0) + 1
@@ -1044,6 +1092,17 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                 if a[0] == 2 and g == SFS_GUID:                    # no file systems here
                     events.append('LocateHandleBuffer(SimpleFileSystem)')
                     return ret(0x8000000E)
+                if a[0] == 2 and g == USBIO_GUID:                  # the USB devices (panel_id.inc)
+                    events[-1] = 'LocateHandleBuffer(UsbIo)'       # not BlockIo: the app build may
+                    if not usb_devs:
+                        return ret(0x8000000E)
+                    buf = pool['next']; pool['next'] += 4 * len(usb_devs)
+                    allocs[buf] = (4, 4 * len(usb_devs))
+                    usb['allocs'].append(buf)
+                    uc.mem_write(buf, b''.join(struct.pack('<I', 0xB60000 + i) for i in range(len(usb_devs))))
+                    uc.mem_write(a[3], struct.pack('<I', len(usb_devs)))
+                    uc.mem_write(a[4], struct.pack('<I', buf))
+                    return ret(0)
                 if a[0] == 2 and g == TEXTIN_GUID:                 # the console inputs so far
                     if not kt['inputs']:
                         return ret(0x8000000E)
@@ -1083,6 +1142,9 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
                     if kind == 'split':                            # ConSplitter's own: no device path
                         return ret(0x80000003)
                     uc.mem_write(a[2], struct.pack('<I', KT_PATHS + (0 if kind == 'usb' else 0x40)))
+                    return ret(0)
+                if g == USBIO_GUID and 0 <= a[0] - 0xB60000 < len(usb_devs):
+                    uc.mem_write(a[2], struct.pack('<I', USBIO_AREA + 0x40 * (a[0] - 0xB60000)))
                     return ret(0)
                 if g == PCIIO_GUID and 0 <= a[0] - 0xB40000 < len(pci_devs):
                     uc.mem_write(a[2], struct.pack('<I', PCIIO_AREA + 0x80 * (a[0] - 0xB40000)))
@@ -1612,7 +1674,8 @@ def run(pe, store=None, cpu_rev=0x20a, cpu_sig=0x106C2, bs_hdr=0xc8, create_fail
     rt_now = [bytes(mu.mem_read(a, 0x9f80)) for a in rt_copies]
     core_cols = struct.unpack('<I', mu.mem_read(CORE_IMG + 0x163ac, 4))[0] if core_variant != 'none' else None
     core_rest = bytes(mu.mem_read(CORE_IMG + 0x163b0, 56)) == CORE_TABLE[4:] if core_variant not in ('none', 'table') else None
-    return dict(acpi=acpi, kt=kt, core_cols=core_cols, core_rest=core_rest, shell_orig=shell_orig, shell_want=shell_want, shell_now=shell_now, gop_orig=gop_orig, gop_want=gop_want, gop_now=gop_now, ident=tm_var.get('ident'), rcap=tm_var.get('rcap'), rt_orig=rt_orig, rt_now=rt_now, pin_conns=pin['conns'], pin_devs=pci_devs, cea_changed=cea_changed, mmw_changed=mmw_changed, sdh_changed=sdh_changed, sdh_target=sdh_target, sdh_orig=sdh_orig, sdh_now=sdh_now, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_first=nb_now[0x3ca], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
+    usb['unfreed'] = [b for b in usb['allocs'] if b not in freed]
+    return dict(acpi=acpi, usb=usb, kt=kt, core_cols=core_cols, core_rest=core_rest, shell_orig=shell_orig, shell_want=shell_want, shell_now=shell_now, gop_orig=gop_orig, gop_want=gop_want, gop_now=gop_now, ident=tm_var.get('ident'), rcap=tm_var.get('rcap'), rt_orig=rt_orig, rt_now=rt_now, pin_conns=pin['conns'], pin_devs=pci_devs, cea_changed=cea_changed, mmw_changed=mmw_changed, sdh_changed=sdh_changed, sdh_target=sdh_target, sdh_orig=sdh_orig, sdh_now=sdh_now, tm_var=tm_var, nb_imm=struct.unpack_from('<I', nb_now, NB_IMM)[0], nb_first=nb_now[0x3ca], nb_changed=nb_changed, nb_wrote=nb_bad.get('wrote', []),
                 mmc_ev=mmc_ev, nb_ev=nb_ev, evs=evs, mmio_writes=mmio_writes, dpll=final,
                 pp_final=struct.unpack('<I', mu.mem_read(GMA_MMIO + 0x61204, 4))[0] if gma else None,
                 nb_after_notify=nb_bad.get('after_notify'), wrapped=wrapped, entry_bio=entry_bio, late_bio=late_bio, in_image=in_image,
@@ -1792,11 +1855,24 @@ def main():
         ('OF2, SetAcpiTable fails at entry and at ReadyToBoot: tried twice, boot goes on', dxe, dict(store=lm(CARD), flash_model='of2', acpi_sup='fails', want_ssdt=[(True, 1, 6, 0)] * 2), 0, True, MAC, True),
         ('OF1: no SSDT, ACPI Support not looked for', dxe, dict(store=lm(CARD), flash_model='of1'), 0, True, MAC, True),
         ('do-not-use OF2 build (0ABPW006): no SSDT', dxe, dict(store=lm(CARD), flash_model='bad'), 0, True, MAC, True),
-        # The panel line (panel_id.inc): the display driver's panel configuration, at ReadyToBoot
-        ('panel: the Cisco\'s display driver: Samsung', dxe, dict(store=lm(CARD), flash_model='of2', gop_variant='samsung', want_panel=panel_line('Samsung')), 0, True, MAC, True),
-        ('panel: the Sharp display driver: Sharp', dxe, dict(store=lm(CARD), want_panel=panel_line('Sharp')), 0, True, MAC, True),
-        ('panel: a display driver whose code differs (no bird) still says Sharp', dxe, dict(store=lm(CARD), gop_variant='code', want_panel=panel_line('Sharp')), 0, True, MAC, True),
-        ('panel: an unknown display driver: unknown', dxe, dict(store=lm(CARD), gop_variant='guid', want_panel=panel_line('unknown')), 0, True, MAC, True),
+        # The panel and touch lines (panel_id.inc): the panel from the touchscreen's version, else the display driver's configuration
+        ('panel: the Cisco (Samsung display, touch S01_02)', dxe, dict(store=lm(CARD), flash_model='of2', gop_variant='samsung', usb_devs=[TOUCH('S01_02')], want_panel=panel_line('Samsung', 'S01_02')), 0, True, MAC, True),
+        ('panel: a Sharp unit (Sharp display, touch Hyup05_3)', dxe, dict(store=lm(CARD), usb_devs=[TOUCH('Hyup05_3')], want_panel=panel_line('Sharp', 'Hyup05_3')), 0, True, MAC, True),
+        ('panel: a Sharp panel on the Samsung display driver (.138 that morning): Sharp', dxe, dict(store=lm(CARD), gop_variant='samsung', usb_devs=[TOUCH('Hyup05_3')], want_panel=panel_line('Sharp', 'Hyup05_3')), 0, True, MAC, True),
+        ('panel: no USB devices: from the display', dxe, dict(store=lm(CARD), want_panel=panel_line('Sharp', 'unknown')), 0, True, MAC, True),
+        ('panel: a stick and Bluetooth first, then the touchscreen', dxe, dict(store=lm(CARD), usb_devs=[(0x0781, 0x5580, 2, 'Extreme'), (0x0a5c, 0x219a, 2, 'BCM2046 Bluetooth'), TOUCH('S01_02')], want_panel=panel_line('Samsung', 'S01_02')), 0, True, MAC, True),
+        ('panel: the touchscreen\'s string can\'t be read', dxe, dict(store=lm(CARD), usb_devs=[(0x04b4, 0x1974, 2, None)], want_panel=panel_line('Sharp', 'unknown')), 0, True, MAC, True),
+        ('panel: a product string of 62 characters: read', dxe, dict(store=lm(CARD), usb_devs=[(0x04b4, 0x1974, 2, 'x' * 53 + ' Hyup05_3')], want_panel=panel_line('Sharp', 'Hyup05_3')), 0, True, MAC, True),
+        ('panel: a product string of 63 characters: not read', dxe, dict(store=lm(CARD), gop_variant='samsung', usb_devs=[(0x04b4, 0x1974, 2, 'x' * 54 + ' Hyup05_3')], want_panel=panel_line('Samsung', 'unknown')), 0, True, MAC, True),
+        ('panel: an empty product string: touch unknown', dxe, dict(store=lm(CARD), usb_devs=[(0x04b4, 0x1974, 2, b'\x02\x03')], want_panel=panel_line('Sharp', 'unknown')), 0, True, MAC, True),
+        ('panel: a descriptor that isn\'t a string: touch unknown', dxe, dict(store=lm(CARD), usb_devs=[(0x04b4, 0x1974, 2, b'\x0e\x01' + 'S01_02'.encode('utf-16le'))], want_panel=panel_line('Sharp', 'unknown')), 0, True, MAC, True),
+        ('panel: an odd string length: whole characters only', dxe, dict(store=lm(CARD), usb_devs=[(0x04b4, 0x1974, 2, b'\x0f\x03' + 'a S01_02'.encode('utf-16le')[:13])], want_panel=panel_line('Samsung', 'S01_')), 0, True, MAC, True),
+        ('panel: a version of 13 characters: not taken', dxe, dict(store=lm(CARD), gop_variant='samsung', usb_devs=[TOUCH('ABCDEFGHIJKLM')], want_panel=panel_line('Samsung', 'unknown')), 0, True, MAC, True),
+        ('panel: a product string with no space: all of it', dxe, dict(store=lm(CARD), usb_devs=[(0x04b4, 0x1974, 2, 'H2')], want_panel=panel_line('Sharp', 'H2')), 0, True, MAC, True),
+        ('panel: a touchscreen version of another letter: from the display', dxe, dict(store=lm(CARD), gop_variant='samsung', usb_devs=[TOUCH('X9')], want_panel=panel_line('Samsung', 'X9')), 0, True, MAC, True),
+        ('panel: an unknown display driver and no touchscreen: unknown', dxe, dict(store=lm(CARD), gop_variant='guid', want_panel=panel_line('unknown', 'unknown')), 0, True, MAC, True),
+        ('panel: the Da Vinci (Sharp display driver, touch S01_02): Samsung', dxe, dict(store=lm(CARD), flash_model='of2', usb_devs=[TOUCH('S01_02')], want_panel=panel_line('Samsung', 'S01_02')), 0, True, MAC, True),
+        ('panel: a display driver whose code differs (no bird) still says Sharp', dxe, dict(store=lm(CARD), gop_variant='code', usb_devs=[TOUCH('Hyup05_3')], want_panel=panel_line('Sharp', 'Hyup05_3')), 0, True, MAC, True),
         # The shell's countdown (countdown.inc): 0 as it loads, for either shell build we know
         ('OF1 shell loads at BDS: its countdown made 0', dxe, dict(store=lm(CARD), shell_variant='of1'), 0, True, MAC, True),
         ('OF2 shell loads at BDS: its countdown made 0', dxe, dict(store=lm(CARD), shell_variant='of2'), 0, True, MAC, True),
@@ -2456,27 +2532,30 @@ def main():
                 want_count = 'BootCount: x00---0-00'        # usb_first.inc's summary (no file systems here)
             got11 = d[11][1] if 11 in d else None
             if kbdtime and got11:                              # the development build's third string
-                kbd_got = got11[2] if len(got11) == 3 and got11[2].startswith(KBD_PREFIX) and len(got11[2]) == len(KBD_PREFIX) + 57 else None
+                kbd_got = got11[3] if len(got11) == 4 and got11[3].startswith(KBD_PREFIX) and len(got11[3]) == len(KBD_PREFIX) + 57 else None
                 if kbd_got is None:
                     p.append('Type 11 %s: no KbdTime string' % got11)
                 elif want_kbd is not None and kbd_got != KBD_PREFIX + want_kbd:
                     p.append('KbdTime %r, expected %r' % (kbd_got[len(KBD_PREFIX):], want_kbd))
-                got11 = got11[:2]
-            if got11:                                          # the panel line (panel_id.inc)
-                pl = got11[1] if len(got11) == 2 else None
-                ok_form = pl is not None and len(pl) == len(PANEL_PLACEHOLDER) and (pl == PANEL_PLACEHOLDER or re.fullmatch(
-                    r'Panel: (Sharp|Samsung|unknown) *', pl))
+                got11 = got11[:3]
+            if got11:                                          # the panel and touch lines (panel_id.inc)
+                pl, tl = (got11[1], got11[2]) if len(got11) == 3 else (None, None)
+                ok_form = pl is not None and len(pl) == len(PANEL_PLACEHOLDER) and len(tl) == len(TOUCH_PLACEHOLDER) and (
+                    (pl, tl) == (PANEL_PLACEHOLDER, TOUCH_PLACEHOLDER) or (
+                        re.fullmatch(r'Panel: (Sharp|Samsung|unknown) *', pl) and re.fullmatch(r'Touch: [!-~]{1,12} *', tl)))
                 if not ok_form:
-                    p.append('Type 11 panel line %r malformed' % pl)
-                elif want_panel is not None and pl != want_panel:
-                    p.append('panel line %r, expected %r' % (pl, want_panel))
+                    p.append('Type 11 panel lines %r %r malformed' % (pl, tl))
+                elif want_panel is not None and (pl, tl) != want_panel:
+                    p.append('panel lines %r, expected %r' % ((pl, tl), want_panel))
                 got11 = got11[:1]
             if 11 in d and got11 != [want_count]:
                 p.append('Type 11 %s, expected %r' % (got11, want_count))
-            if img is dxe and r['entry_smbios'] and [ss[:2] for t, _, _, ss in r['entry_smbios']['structs'] if t == 11] != [[PLACEHOLDER, PANEL_PLACEHOLDER]]:
+            if img is dxe and r['entry_smbios'] and [ss[:3] for t, _, _, ss in r['entry_smbios']['structs'] if t == 11] != [[PLACEHOLDER, PANEL_PLACEHOLDER, TOUCH_PLACEHOLDER]]:
                 p.append('boot count or panel line filled before ReadyToBoot')
             # acpi_rp2.inc: on an OF2 the SSDT, once, as the firmware's own modules add theirs; on
             # anything else ACPI Support isn't even looked for.
+            if r['usb']['unfreed']:
+                p.append('panel line: %d USB buffer(s) not freed' % len(r['usb']['unfreed']))
             sets = r['acpi']['sets']
             if want_ssdt is not None:
                 if [(x['table'] == RP2_AML, x['checksum'], x['version'], x['handle']) for x in sets] != want_ssdt:
