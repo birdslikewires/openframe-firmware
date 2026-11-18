@@ -1,15 +1,20 @@
 # OpenFrame firmware
 
-BirdsLikeWires firmware for the OpenPeak OpenFrame 1 (and the O2 Joggler): the stock O2 AMI Aptio
-EFI firmware with a few careful additions, the tools that build and test it, and the record of how
-it was done.
+BirdsLikeWires firmware for the OpenPeak OpenFrame 1 (and the O2 Joggler) and OpenFrame 2: the
+stock AMI Aptio EFI firmware (O2's on the OpenFrame 1, Telio's on the OpenFrame 2) with a few
+careful additions, the tools that build and test it, and the record of how it was done.
 
 Releases are 1 MB images for the board's socketed SST 49LF008A firmware hub, written with `fh`, a
 kernel module that gives a running OpenFrame a `/dev/fh` for the chip (in
 [openframe-kernel](https://github.com/birdslikewires/openframe-kernel/tree/main/fh), whose kernel
 packages ship it). A chip that doesn't boot can be written in another OpenFrame 1: see
-[docs/chip-swap.md](docs/chip-swap.md). Only the
-OpenFrame 1 is supported so far; nothing here has been tried on an OpenFrame 2.
+[docs/chip-swap.md](docs/chip-swap.md).
+
+From 26.11.32 each release has an image for each model, `of1-blw-<version>.bin` and
+`of2-blw-<version>.bin`. There is one OpenFrame 2 image for every OpenFrame 2: an update writes
+only our blocks 10 and 11, so each unit keeps its own stock blocks 1-9, its display driver
+included. The image's own blocks 1-9 are Telio's, whose Sharp display driver drives both the
+Sharp and the Samsung panel.
 
 This repository was `fh` until 2026-11; its history carries on here.
 
@@ -96,7 +101,7 @@ first.
 |---|---|
 | `driver/` | BlwPlatformDxe (`ucode_late.asm` and includes), BlwMac.efi, BlwMmcFix.efi and MmcTest.efi, the one-off BlwLanMacDel.efi, FvDiag |
 | `tools/` | Image builders, emulators for the driver and apps, NVRAM and firmware-volume decoders, unit scripts |
-| `tools/of-firmware-update` | The updater: brings a unit from any firmware in `tools/firmware-manifest.txt` (releases from 26.11.29 on; stock O2, Verizon, Telstra) to a release of the block-11 layout, writing only blocks 9-11; refuses firmware it doesn't know and saves a dump. `tools/mkmanifest.py` makes the manifest, `tools/test_of_firmware_update.sh` tests it on fake chips |
+| `tools/of-firmware-update` | The updater: brings a unit from any firmware in `tools/firmware-manifest.txt` (releases from 26.11.29 on; stock O2, Verizon, Telstra on an OpenFrame 1; stock Cisco, Telio, Avaya, OpenPeak on an OpenFrame 2) to a release of the block-11 layout, writing only blocks 9-11; refuses firmware it doesn't know and saves a dump. `tools/mkmanifest.py` makes the manifest, `tools/test_of_firmware_update.sh` tests it on fake chips |
 | `tools/fwplan.py` | Plans the updater's writes from what is on the chip (stock, either layout, or a run cut off anywhere) and proves every state they pass through starts, with the firmware walkers' own rules, before anything is written. `tools/test_fwplan.py` cuts its plans off at hundreds of points; `tools/emu_fvwalk.py` runs them on the firmware's real PEI and DXE code |
 | `tools/flash/` | The block-10 flash scripts 26.11.29 and 26.11.30 were tested with (the old layout; not for later releases) |
 | `releases/` | Where release images go when downloaded or built (see its README); their md5s |
@@ -120,6 +125,19 @@ venv/bin/python -I tools/build_ucode_driver.py /tmp/base.bin /tmp/out.bin --micr
 ```
 Blocks 1-9 and 12-15 come out as 26.11.30's (block 9 but for its signpost), so a unit on 26.11.30
 is updated in blocks 9-11 only, and a unit on stock firmware keeps its own blocks 1-9.
+
+The OpenFrame 2 image is built from the stock Telio firmware
+([of2_efi_telio.img](https://openbeak.net/openframe/firmware/efi/of2_efi_telio.img), md5
+`188c50384cb4ec378cdd3f82812d6276`) with nothing of it changed: no shell patch (the OpenFrame 2's
+shell is another build, changed in memory by BlwPlatformDxe) and no logo (the bird is drawn in
+memory too). Only what's added after its last file differs.
+
+```
+venv/bin/python -I tools/build_patched.py of2_efi_telio.img /tmp/base2.bin --no-shell --block11 \
+    --version 'BirdsLikeWires OpenFrame EFI <new> (OF2)' --core-pe /tmp/core2.pe
+venv/bin/python -I tools/build_ucode_driver.py /tmp/base2.bin /tmp/out2.bin --microcode third_party/intel-ucode/06-1c-02 \
+    --bios-version <new> --bios-date MM/DD/YYYY --check-with-core /tmp/core2.pe
+```
 
 26.11.30 itself was built the same way with `--block10` in place of `--block11` (and `--version
 'BirdsLikeWires OpenFrame EFI 26.11.30 (OF1)' --bios-version 26.11.30 --bios-date 11/13/2026`),

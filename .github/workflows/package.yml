@@ -1,11 +1,11 @@
 name: package-build-publish
 run-name: package build and publish
 
-# Builds the openframe-firmware package from the latest GitHub Release's image and publishes it
+# Builds the openframe-firmware package from the latest GitHub Release's images and publishes it
 # to the apt repository on the repo branch (firmware.openbeak.net). The package carries the
-# image, of-firmware-update and its manifest, and of-firmware.service, which updates the chip at
-# the next boot. It is built from the published image itself, checked against releases/MD5SUMS,
-# and only after of-firmware-update has passed its fake-chip tests against it, and
+# images (OpenFrame 1, and OpenFrame 2 when the release has one), of-firmware-update and its manifest, and of-firmware.service, which updates the chip at
+# the next boot. It is built from the published images themselves, checked against releases/MD5SUMS,
+# and only after of-firmware-update has passed its fake-chip tests against them, and
 # of-firmware-boot its own.
 
 on:
@@ -45,32 +45,46 @@ jobs:
 
       # Version: the release, then a revision counting the commits since its tag that changed
       # what the package holds (26.11.29-1, -2, ...).
-      - name: Fetch the release image
+      # The OpenFrame 1 image is always there; the OpenFrame 2's from 26.11.32 (IMG2 empty before).
+      - name: Fetch the release images
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG=$(gh release view --repo "${{ github.repository }}" --json tagName -q .tagName)
-          gh release download "${TAG}" --repo "${{ github.repository }}" -p "of1-blw-${TAG}.bin" -D work
-          IMG="work/of1-blw-${TAG}.bin"
-          WANT=$(awk -v f="of1-blw-${TAG}.bin" '$2 == f { print $1 }' releases/MD5SUMS)
-          GOT=$(md5sum "${IMG}" | cut -d' ' -f1)
-          [ -n "${WANT}" ] && [ "${WANT}" = "${GOT}" ] || { echo "${IMG}: md5 ${GOT}, releases/MD5SUMS says '${WANT}'"; exit 1; }
+          ASSETS=$(gh release view "${TAG}" --repo "${{ github.repository }}" --json assets -q '.assets[].name')
+          IMG2=
+          for M in 1 2; do
+            F="of${M}-blw-${TAG}.bin"
+            if [ "${M}" = 2 ] && ! echo "${ASSETS}" | grep -qx "${F}"; then
+              echo "${TAG} has no OpenFrame 2 image: packaging the OpenFrame 1's only"; continue
+            fi
+            gh release download "${TAG}" --repo "${{ github.repository }}" -p "${F}" -D work
+            WANT=$(awk -v f="${F}" '$2 == f { print $1 }' releases/MD5SUMS)
+            GOT=$(md5sum "work/${F}" | cut -d' ' -f1)
+            [ -n "${WANT}" ] && [ "${WANT}" = "${GOT}" ] || { echo "work/${F}: md5 ${GOT}, releases/MD5SUMS says '${WANT}'"; exit 1; }
+            echo "${F}: md5 ${GOT}"
+            if [ "${M}" = 1 ]; then IMG="work/${F}"; else IMG2="work/${F}"; fi
+          done
           git fetch --tags --quiet
           REV=$(( $(git rev-list --count "${TAG}..HEAD" -- tools/of-firmware-update tools/fwplan.py tools/firmware-manifest.txt package) + 1 ))
           echo "TAG=${TAG}" >> $GITHUB_ENV
           echo "IMG=${IMG}" >> $GITHUB_ENV
+          echo "IMG2=${IMG2}" >> $GITHUB_ENV
           echo "VERSION=${TAG}-${REV}" >> $GITHUB_ENV
-          echo "Release ${TAG} (md5 ${GOT}), package version ${TAG}-${REV}"
+          echo "Release ${TAG}, package version ${TAG}-${REV}"
 
       # From 26.11.31 the updater writes only blocks 9-11, in the block-11 layout
       # (docs/flash-order.md), and refuses an image of the old layout: so no package until the
       # latest release is of that layout, or units would get an updater that refuses its image.
+      # The manifest names an OpenFrame 2 release of2-<tag>.
       - name: Check the release is of the block-11 layout
         run: |
-          OUT=$(python3 -I tools/fwplan.py canon "${IMG}" work/canon.bin) || { echo "${OUT}"; exit 1; }
-          case "${OUT}" in *"layout=block11"*) echo "${TAG}: ${OUT}" ;;
-            *) echo "${TAG} is not of the block-11 layout (${OUT}): not packaging"; exit 1 ;; esac
-          python3 -I - "${IMG}" tools/firmware-manifest.txt "${TAG}" <<'EOF'
+          for P in "${IMG}:${TAG}" ${IMG2:+"${IMG2}:of2-${TAG}"}; do
+          I=${P%%:*}; L=${P#*:}
+          OUT=$(python3 -I tools/fwplan.py canon "${I}" work/canon.bin) || { echo "${OUT}"; exit 1; }
+          case "${OUT}" in *"layout=block11"*) echo "${L}: ${OUT}" ;;
+            *) echo "${L} is not of the block-11 layout (${OUT}): not packaging"; exit 1 ;; esac
+          python3 -I - "${I}" tools/firmware-manifest.txt "${L}" <<'EOF'
           import hashlib, sys
           sys.path.insert(0, 'tools')
           import fwplan
@@ -81,6 +95,7 @@ jobs:
               if sys.argv[3] not in have.get(k, []):
                   sys.exit('tools/firmware-manifest.txt does not list block %d of %s (mkmanifest.py)' % (n, sys.argv[3]))
           EOF
+          done
 
       # The updater against fake chips: from each stock firmware (the openbeak.net collection,
       # checked against its md5s) to this release, with power cuts and failing writes.
@@ -96,6 +111,13 @@ jobs:
           get of1_efi_telstra.img telstra.bin 8903c18f882cbde3b98c793f7e827a40
           get untested/op1.rom op1.rom 7fde2784f48486570e7c5927c2a9b71e
           get of2_efi_cisco.img of2-cisco.bin 07a8fb52aedbf967cbcb1f2acc837d87
+          if [ -n "${IMG2}" ]; then
+            cp "${IMG2}" "${T}/of2-release.bin"
+            get of2_efi_telio.img of2-telio.bin 188c50384cb4ec378cdd3f82812d6276
+            get of2_efi_avaya.img of2-avaya.bin ed07b4fc492eeeae7ec9dd0dc1350baf
+            get of2_openpeak.img of2-openpeak.bin c35f7e01052a3d2323610d7688244e9b
+            get do_not_use/of2_efi_swisscom/of2_efi_swisscom.img of2-swisscom.bin eb1ca17b0a3166e020784fc806dfc54f
+          fi
           sudo bash tools/test_of_firmware_update.sh "${T}"
 
       # The boot-time update (of-firmware-boot) against a stand-in updater: what it does after
@@ -113,6 +135,15 @@ jobs:
           mkdir -p "${PKG}/DEBIAN" "${L}" "${PKG}/usr/local/sbin" "${PKG}/usr/lib/systemd/system"
           install -m 644 "${IMG}" "${L}/of1-blw.bin"
           (cd "${L}" && md5sum of1-blw.bin > of1-blw.bin.md5 && chmod 644 of1-blw.bin.md5)
+          if [ -n "${IMG2}" ]; then
+            install -m 644 "${IMG2}" "${L}/of2-blw.bin"
+            (cd "${L}" && md5sum of2-blw.bin > of2-blw.bin.md5 && chmod 644 of2-blw.bin.md5)
+            FOR="OpenFrame 1 and 2"
+            FROM="stock O2, Verizon or Telstra firmware on an OpenFrame 1, stock Cisco,\n Telio, Avaya or OpenPeak firmware on an OpenFrame 2, or an earlier release,"
+          else
+            FOR="OpenFrame 1"
+            FROM="stock O2, Verizon or Telstra firmware, or an earlier release,"
+          fi
           install -m 644 tools/firmware-manifest.txt "${L}/manifest.txt"
           install -m 644 tools/fwplan.py "${L}/fwplan.py"
           install -m 755 package/of-firmware-boot "${L}/of-firmware-boot"
@@ -121,8 +152,8 @@ jobs:
           install -D -m 755 package/of-firmware-generator "${PKG}/usr/lib/systemd/system-generators/of-firmware-generator"
           install -m 755 package/postinst package/prerm "${PKG}/DEBIAN/"
           find "${PKG}" -type d -exec chmod 755 {} +
-          printf 'Package: openframe-firmware\nVersion: %s\nArchitecture: all\nSection: admin\nPriority: optional\nMaintainer: OpenFrame Project <noreply@openbeak.net>\nDepends: bash, coreutils, kmod, python3, systemd\nHomepage: https://github.com/birdslikewires/openframe-firmware\nDescription: BirdsLikeWires firmware for the OpenFrame 1 (%s)\n The OpenFrame 1 EFI firmware release %s, and of-firmware-update, which brings\n the chip to it from stock O2, Verizon or Telstra firmware or an earlier\n release at the next boot (of-firmware.service), in an order where a power\n cut at any point leaves a chip that starts. Firmware it does not\n recognise is left alone.\n' \
-            "${VERSION}" "${TAG}" "${TAG}" > "${PKG}/DEBIAN/control"
+          printf 'Package: openframe-firmware\nVersion: %s\nArchitecture: all\nSection: admin\nPriority: optional\nMaintainer: OpenFrame Project <noreply@openbeak.net>\nDepends: bash, coreutils, kmod, python3, systemd\nHomepage: https://github.com/birdslikewires/openframe-firmware\nDescription: BirdsLikeWires firmware for the %s (%s)\n The %s EFI firmware release %s, and\n of-firmware-update, which brings the chip to it\n from %b\n at the next boot (of-firmware.service), in an order where a power\n cut at any point leaves a chip that starts. Firmware it does not\n recognise is left alone.\n' \
+            "${VERSION}" "${FOR}" "${TAG}" "${FOR}" "${TAG}" "${FROM}" > "${PKG}/DEBIAN/control"
           dpkg-deb --build --root-owner-group "${PKG}"
           dpkg-deb --info "${PKG}.deb" | sed -n '1,20p'
           dpkg-deb --contents "${PKG}.deb"

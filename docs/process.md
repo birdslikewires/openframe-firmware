@@ -108,6 +108,13 @@ header reaching block 11; block 11 is the version marker and BlwPlatformDxe. Che
 driver (`--pe`, `--app`). Build it twice and check the two are byte for byte the same. Record the md5
 of the image and of block 11, and add the image to `releases/MD5SUMS`.
 
+From 26.11.32 the same release is built for the OpenFrame 2 too, from the stock Telio image
+(`--no-shell`, no `--logo`, marker `(OF2)`: the README has the commands). Its blocks 1-9 and 12-15
+are Telio's untouched; block 11 differs from the OpenFrame 1's only by the marker (BlwPlatformDxe is
+the same file, and finds the model in the boot block). Telio, because its Sharp display driver
+drives both panels cleanly (the Da Vinci runs it on a Samsung panel; the Samsung driver on a Sharp
+panel leaves it white) and an image's own blocks 1-9 only matter to a whole-chip write.
+
 (26.11.29 and 26.11.30, the old layout, had our files in block 10, with no signposts; up to
 26.11.28 they were in block 9. Those were built from the release before with `tools/mkbase.py`.)
 
@@ -116,8 +123,18 @@ of the image and of block 11, and add the image to `releases/MD5SUMS`.
 Releases reach units through `tools/of-firmware-update`, which writes only blocks 9-11 by the plan
 `tools/fwplan.py` makes and proves for that chip ([flash-order.md](flash-order.md)). Regenerate its
 manifest with `tools/mkmanifest.py` (every release from 26.11.29 on, plus the stock images: it
-lists their blocks with our signposts blanked), then, as root on Linux, with the release as
-`release.bin` beside the updater, `fwplan.py`, `mkmanifest.py` and the stock images (see its top):
+lists their blocks with our signposts blanked). OpenFrame 2 images are labelled `of2-`:
+
+```
+python3 -I tools/mkmanifest.py tools/firmware-manifest.txt <new>=of1-blw-<new>.bin 26.11.31=… 26.11.30=… 26.11.29=… \
+    o2-stock=of1_efi_o2.img verizon=of1_efi_openpeak_verizon.img telstra=of1_efi_telstra.img \
+    of2-<new>=of2-blw-<new>.bin of2-cisco=of2_efi_cisco.img of2-telio=of2_efi_telio.img \
+    of2-avaya=of2_efi_avaya.img of2-openpeak=of2_openpeak.img
+```
+A unit on a development build is left alone unless the manifest lists that build too (its block 11
+matches no release). Then, as root on Linux, with the release as
+`release.bin` (and the OpenFrame 2's as `of2-release.bin`) beside the updater, `fwplan.py`,
+`mkmanifest.py` and the stock images (see its top):
 
 ```
 sudo bash tools/test_of_firmware_update.sh D        # all passed
@@ -125,7 +142,9 @@ venv/bin/python -I tools/test_fwplan.py of1_efi_o2.img of2_efi_cisco.img   # all
 venv/bin/python -I tools/emu_fvwalk.py of1_efi_o2.img of2_efi_cisco.img [more OF2 images]
 ```
 The package workflow refuses to publish unless the latest release is of the block-11 layout and
-the manifest lists its blocks as its own.
+the manifest lists its blocks as its own (for the OpenFrame 2's image, as `of2-<new>`). It packages
+the OpenFrame 2's image too when the release has one, after the same tests from every stock
+OpenFrame 2 image, and the updater picks the image for the chip's model.
 
 ## 7. Flash (only with the owner's OK)
 
@@ -153,7 +172,7 @@ The unit should answer ping about 25 s after power-on (more with a USB drive tha
 
 ## 9. Check
 
-- `dmesg`: `efi: EFI v2.0 by BirdsLikeWires`, `DMI: OpenPeak OpenFrame 1, BIOS <new> <date>`,
+- `dmesg`: `efi: EFI v2.0 by BirdsLikeWires`, `DMI: OpenPeak OpenFrame 1 (or 2), BIOS <new> <date>`,
   `DMI: Memory slots populated: 1/1`, `microcode: Current revision: 0x00000217` (both threads).
 - `sudo dmidecode`: the types the release changed, plus Type 1 serial/UUID and Type 11 BootCount.
 - `tools/blwmac-check.sh`: eth0's MAC at probe, `BlwMacStatus` (no write: flag 0x10 set), lock
@@ -169,7 +188,7 @@ GitHub Release, tagged with the version (the images are kept out of git so that 
 history don't share their fate):
 
 ```
-gh release create <new> releases/of1-blw-<new>.bin --title "<new> (OF1)" --notes "<the releases.md entry>"
+gh release create <new> releases/of1-blw-<new>.bin releases/of2-blw-<new>.bin --title "<new>" --notes "<the releases.md entry>"
 ```
 Only then tell anyone it exists.
 
