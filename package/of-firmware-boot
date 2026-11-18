@@ -174,9 +174,9 @@ draw() {
 	OUT=$(band "$B_BLU" "OpenFrame Firmware Update v$VERSION" "${NEW:+Release $NEW}")
 	OUT+=$(at $R_INTRO 4 "Updating this OpenFrame's firmware${NEW:+ to $NEW}." "$C_WHT" 1)
 	if (( STEP == 0 )); then
-		OUT+=$(at $((R_INTRO + 1)) 4 "Please don't switch it off or unplug it: its firmware is being written." "$C_YEL" 1)
+		OUT+=$(at $((R_INTRO + 1)) 4 "Please don't switch off or unplug! Firmware is being written." "$C_YEL" 1)
 	else
-		OUT+=$(at $((R_INTRO + 1)) 4 "Please leave it switched on: it carries on starting up after the restart." "$C_YEL" 1)
+		OUT+=$(at $((R_INTRO + 1)) 4 "Please leave switched on! Update will continue after rebooting." "$C_YEL" 1)
 	fi
 	for i in "${!STEPS[@]}"; do
 		R=$((R_STEPS + 4 * i))
@@ -290,9 +290,9 @@ screen_retry() {
 	console_hush
 	panel_clear; DRAWN=1
 	OUT=$(band "$B_RED" "OpenFrame Firmware Update v$VERSION" "Don't switch off")
-	for L in "${C_LRD}The firmware didn't write correctly, so it's being written again." "" \
-		"${C_YEL}Please don't switch off or unplug this OpenFrame: it may not start if it's switched off now." "" \
-		"${C_GRY}It keeps trying until the firmware writes correctly (try $1 next)."; do
+	for L in "${C_LRD}The firmware didn't apply correctly, so it's being written again." "" \
+		"${C_YEL}Please don't switch off or unplug this OpenFrame! It may not start if it's switched off now." "" \
+		"${C_GRY}Repeating until the firmware writes correctly (try $1 next)."; do
 		COL="$C_WHT"
 		if [[ "$L" =~ ^($'\033'\[[0-9\;]*m)(.*)$ ]]; then COL="${BASH_REMATCH[1]}"; L="${BASH_REMATCH[2]}"; fi
 		while IFS= read -r TXT; do
@@ -412,7 +412,7 @@ while :; do
 			fi
 			touch $LOCKREBOOT
 			sync
-			restart "The firmware chip is locked until a restart." ;;
+			restart "The firmware chip is locked until rebooted." ;;
 		3)
 			rm -f $PENDING $LOCKREBOOT
 			log "firmware not recognised: left alone"

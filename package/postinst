@@ -61,11 +61,10 @@ tell() {
 		echo "openframe-firmware: this unit has its original firmware. At the next restart it is"
 		echo "  checked and, if it's one we know, updated to BirdsLikeWires ${NEW:-firmware}."
 	fi
-	echo "  Nothing has been written yet, and the unit isn't restarted for you. At the restart,"
-	echo "  before anything else starts, the update runs with its progress on the screen. It"
-	echo "  takes a minute or two, then the unit restarts once more by itself. Don't switch it"
-	echo "  off until it's back. Afterwards, /var/lib/openframe-firmware/last-flash.log says"
-	echo "  what was done."
+	echo "  Nothing has been written yet, and the unit isn't restarted for you. When rebooted,"
+	echo "  before anything else starts, the update will run with progress shown on screen. It"
+	echo "  takes a minute or two, then the unit reboots once more by itself. Don't switch off"
+	echo "  during the process. A log is kept at: /var/lib/openframe-firmware/last-flash.log"
 }
 
 case "$1" in
