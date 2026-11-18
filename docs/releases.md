@@ -490,3 +490,67 @@ hold unit-specific data), `tools/flash-block9-*.sh` is `tools/flash/`, `lanmac.a
   registers 01; the boot changed only NVRAM's MonotonicCounter record (14 bytes). On dev9/dev10 (the same Esc code):
   mashing Esc stops at the shell's prompt, at the top left, the full width; `map` fills the screen and scrolls the bird
   up; `fs0:\startup.nsh` carries on into Linux; untouched, every boot shows only the bird.
+
+## 26.11.32 (2026-11-18)
+
+The first release for the OpenFrame 2, and one image for every OpenFrame 2.
+
+- **26.11.32 (OF1)**, `of1-blw-26.11.32.bin` (md5 `980f4904…`), built from the stock O2 image as 26.11.31 was; blocks
+  1-15 `78d3caca…`, block 11 `b140a21c…`. It differs from 26.11.31 in block 11 only.
+- **26.11.32 (OF2)**, `of2-blw-26.11.32.bin` (md5 `bbd5b894…`), built from the stock Telio image (`build_patched.py
+  --no-shell --block11`, no logo, then `build_ucode_driver.py`); blocks 1-15 `65a1a1af…`, block 11 `fd2fa69f…`.
+  Blocks 1-9 and 12-15 are stock Telio's, untouched. An update writes only blocks 10 and 11 (and, from stock, 24 bytes
+  of block 9's free space), so each OpenFrame 2 keeps its own blocks 1-9, its display driver included; the image's own
+  are Telio's because its Sharp display driver drives the Sharp and the Samsung panel cleanly (the Da Vinci has run it
+  on its Samsung panel all its life; the Cisco's Samsung panel showed a test pattern identically on both drivers'
+  timings), and they only matter to a whole-chip write.
+- Both images are reproducible byte for byte; BlwPlatformDxe is the same file in both (it finds the model in the boot
+  block), so their block 11s differ only by the marker.
+
+What changes:
+- **The OpenFrame 2.** On an OpenFrame 2, everything 26.11.31 does: the bird, no shell countdown, USB first, microcode
+  0x217, the panel's clock left to its own display driver, SMBIOS (OpenFrame 2 / OF2). Plus:
+  - **Its Wi-Fi works.** Every stock OpenFrame 2 firmware's DSDT leaves out the mini-PCIe slot's root port (00:1C.1)
+    and its interrupt routing, so Linux routed the slot's interrupt to the wrong line and the Wi-Fi card (or the
+    Crystal HD) got none. BlwPlatformDxe adds a small SSDT ("OF2RP2", `driver/of2_rp2.asl`) through AMI's own ACPI
+    Support protocol, on an OpenFrame 2 only.
+- **SMBIOS Type 11 names the panel and the touchscreen**: "Panel: Sharp" or "Samsung" (from the touchscreen's own
+  version, read over USB at ReadyToBoot: OpenPeak's S* boards are Samsung panels, H* Sharp, as its sysinfo decodes
+  them; else from the display driver's configuration; else "unknown"), and "Touch: Samsung 1.2" or "Hyup 5.3" (the
+  board and its version, tidied; else as read; else "unknown"). The read goes through control transfers: AMI's
+  GetStringDescriptor never finds a string (its language search is the wrong way round).
+- **The bird on older display drivers.** The OpenPeak OpenFrame 2's display driver and the Verizon and Telstra
+  OpenFrame 1s' are two older IEGD builds, whose splash handlers are the current build's code 0x50 bytes earlier.
+  splash.inc now recognises them, so those units get the bird in memory too instead of keeping the carrier logo.
+  (The Verizon and Telstra drivers' own brightness at power-on is unchanged: an older driver starts dim and ramps up.)
+- **The updater and the package carry both images.** `of-firmware-update` picks `of1-blw.bin` or `of2-blw.bin` by the
+  model in the chip's boot block (refusing the other model's image), and the manifest now knows the stock Cisco,
+  Telio, Avaya and OpenPeak OpenFrame 2 firmware, and the development builds our own units run (26.11.32-dev3 on an
+  OpenFrame 1, dev2 and dev3 on OpenFrame 2s).
+
+Tested: `emu_platform.py` 225 scenarios on this driver; `emu_splash` on the O2, Cisco, Telio, Avaya, OpenPeak OF2,
+Verizon and Telstra display drivers (each one's own handlers taking our position, size and pixels), its mutations
+18 of 18 caught; `emu_countdown`, `emu_usbfirst --of2-shell`; the real PEI and DXE walkers on every state of the plans
+(to the release, the next, back again) from stock O2, Verizon, Telstra, 26.11.29-31, and stock Cisco, Telio, Avaya and
+OpenPeak, and from the real chips of the units below; `test_fwplan.py` (819 cut points); `test_of_firmware_update.sh` 141 cases with both images (every stock OF1 and OF2 image to its model's release, power
+cuts after every step, failing writes, the other model's image refused, the image chosen by model); `of-firmware-update` on fake chips made
+from each unit's latest dump, with the release's manifest and both images, choosing each by model.
+
+On hardware, as development builds (the same code; only the version differs):
+- **Cisco OF2** (Samsung panel, soldered chip), stock -> 26.11.32-dev1 -> dev2: the bird on its Samsung display driver,
+  Wi-Fi on IRQ 17 without help, "Panel: Samsung", "Touch: Samsung 1.2", the panel at 60 Hz under Linux. Both updates
+  matched the emulated end state byte for byte, NVRAM untouched.
+- **The OpenPeak OF2** with a Crystal HD in its slot (the unit `of2_openpeak.img` came from; Sharp panel), stock ->
+  dev3: the bird on its older display driver (still dim then ramping up, as that driver does), "Panel: Sharp",
+  "Touch: Hyup 5.3", the slot's SSDT, 60 Hz; the chip matched the emulated end state byte for byte.
+- **An OpenFrame 1** (.138, Sharp panel): on OF2 firmware dev1 -> dev3 as an OpenFrame 2; then 26.11.31 written back
+  whole (boot block included); then 26.11.31 -> 26.11.32-dev3 (OF1) by the updater: OpenFrame 1, "Panel: Sharp",
+  "Touch: Hyup 5.3", no SSDT (OpenFrame 2 only), microcode 0x217, 60 Hz; the chip matched the emulated end state.
+The release itself:
+- **.138 (OpenFrame 1)**, 26.11.32-dev3 -> 26.11.32 with this release's manifest and both images (the updater chose
+  the OF1 image by model): plan 10 11 10 (1163 states proven), 37 s, every block verified; the chip matched the
+  emulated end state byte for byte. Restart: `efi: EFI v2.0 by BirdsLikeWires`, `DMI: OpenPeak OpenFrame 1, BIOS
+  26.11.32 11/18/2026`, memory slots 1/1, microcode 0x217 on both threads, "Panel: Sharp", "Touch: Hyup 5.3", no
+  OF2 SSDT, the panel at 60 Hz, nothing failed, lock registers 01; the boot changed only NVRAM's MonotonicCounter
+  record (14 bytes).
+- The OF2 image has run on hardware as 26.11.32-dev3, which differs from it only in the version string.

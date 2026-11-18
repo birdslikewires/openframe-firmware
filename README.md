@@ -86,11 +86,12 @@ AMI's NVRAM code corrupts the store when that happens ([docs/nvram.md](docs/nvra
 
 ## Using a release
 
-Each version's image is a download on this repository's
+Each version's images are downloads on this repository's
 [Releases](https://github.com/birdslikewires/openframe-firmware/releases) page (only the latest is
-offered: 26.11.31, the first of the block-11 layout); `releases/MD5SUMS` lists their md5s. The images are not kept in git.
+offered: 26.11.32, the first with an OpenFrame 2 image); `releases/MD5SUMS` lists their md5s. The images are not kept in git.
 `tools/of-firmware-update` brings a unit to a release of the block-11 layout (26.11.31 on) from
-stock O2, Verizon or Telstra firmware or an earlier release (26.11.29 on), writing only blocks 9-11
+stock O2, Verizon or Telstra firmware or an earlier release (26.11.29 on) on an OpenFrame 1, or from
+stock Cisco, Telio, Avaya or OpenPeak firmware on an OpenFrame 2, writing only blocks 9-11
 (the plan `tools/fwplan.py` makes and proves first), and refuses anything else. `tools/flash/` holds
 the scripts 26.11.29 and 26.11.30 were tested with (the old layout). (Releases 26.11.15 to 26.11.28 were withdrawn on 2026-11-13: they were only
 ever on test units. Their record stays in [docs/releases.md](docs/releases.md).) Flashing
