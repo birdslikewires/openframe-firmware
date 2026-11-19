@@ -103,6 +103,16 @@ to next; start $T/c-rel.bin; run "$V -> $VN (block 10 steps)" 0 ours
 [ "$(b $F 9 1)" = "$(b $T/c-rel.bin 9 1)" ] && echo "ok     ... block 9 unchanged" || { echo "FAIL   ... block 9 changed"; FAILS=$((FAILS + 1)); }
 cp $F $T/c-next.bin
 to rel; start $T/c-next.bin; run "$VN with the $V image: left alone" 0 same OF_FW_MANIFEST=$T/mnext.txt
+# A release newer than the updater and its manifest (an older stick on a chip a later one
+# updated): its own marker says so, so it's left alone as up to date, not refused.
+start $T/c-next.bin; run "$VN, not in the manifest: left alone" 0 same
+grep -q "newer than this updater knows" $T/out || { echo "FAIL   ... it didn't say so"; FAILS=$((FAILS + 1)); }
+ARGS=--check; start $T/c-next.bin; run "--check on $VN, not in the manifest: up to date" 0 same; ARGS=
+# But files we don't know whose marker isn't newer are still refused.
+python3 -I -c 'import sys; b = bytearray(open(sys.argv[1], "rb").read()); B = 65536
+i = b.index(sys.argv[2].encode(), 11 * B, 12 * B); b[i:i + len(sys.argv[2])] = sys.argv[3].encode()
+open(sys.argv[4], "wb").write(b)' $T/c-next.bin "EFI $VN (" "EFI $V (" $T/c-odd.bin
+start $T/c-odd.bin; run "block 11 not in the manifest, marker $V (not newer): refused" 3 same
 to next; start $T/old.bin; run "$VO -> $VN" 0 ours
 
 to rel

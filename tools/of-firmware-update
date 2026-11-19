@@ -1,6 +1,6 @@
 #!/bin/bash
 
-## of-firmware-update v26.11.8 (17th November 2026)
+## of-firmware-update v26.11.9 (19th November 2026)
 ##  Puts the BirdsLikeWires release in $IMG on an OpenFrame's firmware chip, from any firmware
 ##  listed in $MANIFEST (OF1: stock O2, Verizon, Telstra; OF2: whichever stock builds it lists;
 ##  our releases), in an order where a power cut at any moment leaves a chip that starts.
@@ -146,6 +146,13 @@ for i in 1 2; do readchip "$W/pre$i.bin" || refuse "could not read the chip"; do
 [ "$(m "$W/pre1.bin")" = "$(m "$W/pre2.bin")" ] || refuse "two reads of the chip differ"
 MODEL=$(model "$W/pre1.bin")
 
+# True if release $1 (a marker's version) is newer than $2, by version alone: a -devN counts
+# as its release.
+newer() {
+	[ -n "$1" ] && [ "${1%%-*}" != "${2%%-*}" ] &&
+		[ "$(printf '%s\n%s\n' "${1%%-*}" "${2%%-*}" | sort -V | tail -1)" = "${1%%-*}" ]
+}
+
 unknown() {
 	mkdir -p "$DUMPDIR" 2>/dev/null
 	D="$DUMPDIR/of${MODEL:-x}-firmware-$(date -u +%Y%m%d)-$(m "$W/pre1.bin" | cut -c1-8).bin"
@@ -206,8 +213,18 @@ case "$CC" in
 	*) FB="" ;;
 esac
 if [ -n "$FB" ]; then
-	[ -n "$(label $FB "${R[$FB]}")" ] || unknown "block $FB (our files) matches no release we have"
-	CUR=$(blk "$W/pre1.bin" $FB 1 | grep -aoE "$MARKER_RE" | head -1 | awk '{print $4}')
+	CMK=$(blk "$W/pre1.bin" $FB 1 | grep -aoE "$MARKER_RE" | head -1)
+	CUR=$(echo "$CMK" | awk '{print $4}')
+	if [ -z "$(label $FB "${R[$FB]}")" ]; then
+		# Our files from a release newer than this updater and its manifest (an older stick,
+		# or a package not yet upgraded, on a chip a later one updated): the firmware's own
+		# marker, for this model, says so. Left alone, as a newer release we know would be.
+		if [ "$FB" = 11 ] && [ "$CMK" != "${CMK%(OF$MODEL)}" ] && newer "$CUR" "$NEW"; then
+			[ -e "$WRITING" ] && [ $CHECK = 0 ] && bootnsh_restore
+			say "the firmware is $CUR, newer than $NEW (newer than this updater knows): left alone"; rm -rf "$W"; exit 0
+		fi
+		unknown "block $FB (our files) matches no release we have"
+	fi
 	if [ $FB = 11 ] && [ "${R[11]}" = "${T[11]}" ]; then
 		[ -e "$WRITING" ] && [ $CHECK = 0 ] && bootnsh_restore    # an earlier run, cut off after its last write
 		say "the firmware is $NEW: nothing to do"; rm -rf "$W"; exit 0
@@ -216,7 +233,7 @@ fi
 # The image must be for this model (an OF1's release on an OF2 would start, but say OF1).
 [ "$IMODEL" = "$MODEL" ] || refuse "$IMG is for an OpenFrame $IMODEL and this is an OpenFrame $MODEL"
 # Never go backwards: a chip whose own marker says it is newer than this image is left alone.
-if [ -n "$CUR" ] && [ "${CUR%%-*}" != "${NEW%%-*}" ] && [ "$(printf '%s\n%s\n' "${CUR%%-*}" "${NEW%%-*}" | sort -V | tail -1)" = "${CUR%%-*}" ]; then
+if newer "$CUR" "$NEW"; then
 	[ -e "$WRITING" ] && [ $CHECK = 0 ] && bootnsh_restore
 	say "the firmware is $CUR, newer than $NEW: left alone"; rm -rf "$W"; exit 0
 fi
