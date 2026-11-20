@@ -147,3 +147,18 @@ venv/bin/python -I tools/build_ucode_driver.py /tmp/base2.bin /tmp/out2.bin --mi
 'BirdsLikeWires OpenFrame EFI 26.11.30 (OF1)' --bios-version 26.11.30 --bios-date 11/13/2026`),
 which reproduces it byte for byte.
 
+## Licence
+
+Our own work here is under the MIT licence (see [LICENSE](LICENSE)): the driver and apps in
+`driver/`, the tools, the package scripts, the docs and the bird in `logo/`.
+
+The firmware itself is not ours. Each release image is the stock AMI Aptio firmware of an
+OpenFrame (O2's for the OpenFrame 1, Telio's for the OpenFrame 2) with our driver and changes added,
+so most of every image is the work of American Megatrends and the OpenFrame's makers and keeps their
+terms; only what we add is under the MIT licence. Also not ours:
+
+- `third_party/intel-ucode/`: Intel's microcode for the Atom Z5xx, under Intel's licence, which is
+  beside it.
+- `mmtool/`: listings of the stock images, made with AMI's MMTool. The module names and GUIDs in
+  them are AMI's.
+- `tools/fhprobe.c` is a Linux kernel module, so it's under the GPL version 2, like the kernel.
