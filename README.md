@@ -149,13 +149,15 @@ which reproduces it byte for byte.
 
 ## Licence
 
-Our own work here is under the MIT licence (see [LICENSE](LICENSE)): the driver and apps in
-`driver/`, the tools, the package scripts, the docs and the bird in `logo/`.
+Our own work here is under the GNU General Public License, version 3 or (at your option) any later
+version (see [LICENSE](LICENSE)): the driver and apps in `driver/`, the tools, the package scripts,
+the docs and the bird in `logo/`. Copyright 2019-2026 Andrew Davison. It was under the MIT licence
+until November 2026, and copies from before then can still be used under those terms.
 
 The firmware itself is not ours. Each release image is the stock AMI Aptio firmware of an
 OpenFrame (O2's for the OpenFrame 1, Telio's for the OpenFrame 2) with our driver and changes added,
 so most of every image is the work of American Megatrends and the OpenFrame's makers and keeps their
-terms; only what we add is under the MIT licence. Also not ours:
+terms; only what we add is under the GPL. Also not ours:
 
 - `third_party/intel-ucode/`: Intel's microcode for the Atom Z5xx, under Intel's licence, which is
   beside it.
