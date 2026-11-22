@@ -1,0 +1,39 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Architectures: all i386
+Codename: trixie-testing
+Components: main
+Date: Sun, 22 Nov 2026 23:58:27 +0000
+Description: OpenFrame Firmware packages before release, for test units
+Label: OpenFrame Firmware testing
+Origin: OpenFrame
+Suite: trixie-testing
+MD5Sum:
+ 0d67ee1c6117fb73aa14a7a6d489426e             1002 main/binary-i386/Packages
+ 4904a21477ac5b7a9d651ad3d4937972              631 main/binary-i386/Packages.gz
+SHA1:
+ 137a9f013f3880d17bd6d1c31bab063fd8feb24a             1002 main/binary-i386/Packages
+ 20f1ded8eaabf34fbee26f3f56b06c2d03ffe9bf              631 main/binary-i386/Packages.gz
+SHA256:
+ 0695b8a7e4b11876cbc611d4a0bfab59ab0f15b5382111e4d91361eb61e7fbb9             1002 main/binary-i386/Packages
+ 1caabf509583d27a151bfc48b12da46d6e78b9f286bab82b3ebdf9706879bb11              631 main/binary-i386/Packages.gz
+SHA512:
+ ff8ca997321bfa8e31f47310331cad9af1daad5599e16a1cdad3bf118e2d4126182fb16450ce198c2d73b07c056d43aa80cb28b4b29f5484f94cf354ae2a7db4             1002 main/binary-i386/Packages
+ b7f17652fb04ff496fe86c15914257dc14250ce74a8a2ec1b487dc92b05d48e9b821fbe20ff6d501a00072f6a4015d5c651a97d6bb63ca5022cbc3deb21806de              631 main/binary-i386/Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCgAdFiEEF5xPAuVfQJbWkPO/7YAbaD/OhVMFAmsDgaMACgkQ7YAbaD/O
+hVNxWQ//V47f3re8R/jecQB+AsKoUH+svq6d1TpcteHJSl12RaCjVvbP9WBSfj0v
+BONp4n8CVTn1shOkDyzf0C1IVzxRLCWdMciOFX5KUElaKuwoHC8/+pCrzz1Jhpor
+Goxr978T30ILW2zyGBULXMVTA5YWPyto0hRWauOy8C61sQ2gVcf7j+yUe2uJj73w
+Z2wDGO5hUMF7pQ3xeLOo5XiU9Vk6ttdyymWmNJI/S7KOOtWo9ajNU1wN2SB1cZny
+cbnPjA0dK0C5j6xRDziKxnJuhVHD0g7Mpz/ZR6jZ2BqaDt6LbtV21FBXJOMqDhHE
+9hWA6C4sa8m3x5rlROhpWf0t+1rpDEmOsHEK1A6QqJqdIOL0AKeWLY/ojgLTrftF
+76QQDukBigZcO8ZlmDQoKBH+2rNM+Re12erIgUBgm68E07bhI5YLYlLY08gKpCEq
+OvO7OaV14gsTGWwyiqQe1ZcQ26JLX6zI4k1N02f6Lltz3uASF1eiEYshx8RGTN3I
+qLduji/LSxu1TJMUvhfO3RGSjM0JrQPD09H8ZmW5CgMsIPkbdvRAUuHfABi3j/7D
+dIZwLGcRU2j4o8bJEHAWOxXm9KduYGXQ3u6CQLLOo+nmk32kboxTvUNPfK90iylQ
+In+5tULMgFRE/g52wx5ab5fjhQpi2mZx3sv1ZIvGBjdDmwiCW3Q=
+=3ls9
+-----END PGP SIGNATURE-----
