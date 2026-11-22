@@ -1,0 +1,120 @@
+name: promote
+run-name: promote or reject what's waiting in testing
+
+# Releases what's waiting in firmware.openbeak.net's testing suite (openframe-firmware) to every
+# OpenFrame: "promote" as a comment on the open testing issue (ci/testing-issue.sh keeps it), by
+# the repository's owner, moves it from trixie-testing to trixie, where units take it overnight
+# and flash it at their next restart (about 4am). "reject" closes the issue and keeps it in
+# testing; the next publish opens it again. Comments from anyone else, or on any other issue,
+# do nothing. It can also be run by hand, which promotes.
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: build-package
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (!github.event.issue.pull_request && github.event.comment.user.login == (vars.TESTING_ASSIGNEE || 'andydvsn') &&
+       contains(github.event.issue.labels.*.name, 'testing'))
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Read the comment
+        env:
+          BODY: ${{ github.event.comment.body }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = workflow_dispatch ]; then
+            echo "ACTION=promote" >> "$GITHUB_ENV"; exit 0
+          fi
+          word=$(printf '%s' "$BODY" | tr 'A-Z' 'a-z' | tr -cs 'a-z' ' ' | awk '{ print $1 }')
+          case "$word" in
+            promote|reject) echo "ACTION=$word" >> "$GITHUB_ENV" ;;
+            *) echo "Not promote or reject: nothing to do."; echo "ACTION=none" >> "$GITHUB_ENV" ;;
+          esac
+
+      - name: Checkout
+        if: env.ACTION == 'promote'
+        uses: actions/checkout@v7
+
+      - name: Install tools
+        if: env.ACTION == 'promote'
+        run: sudo apt-get install -y apt-utils dpkg-dev
+
+      - name: Checkout repo branch
+        if: env.ACTION == 'promote'
+        uses: actions/checkout@v7
+        with:
+          ref: repo
+          path: apt-repo
+
+      # Every OpenFrame apt repository is signed with one key; anything else stops here.
+      - name: Import GPG signing key
+        if: env.ACTION == 'promote'
+        env:
+          KEY: ${{ secrets.APT_SIGNING_KEY_OPENFRAME }}
+        run: |
+          echo "${KEY}" | gpg --batch --import
+          FPR=$(gpg --batch --with-colons --list-secret-keys | awk -F: '/^sec/ { s = 1; next } s && /^fpr/ { print $10; s = 0 }')
+          [ "${FPR}" = 179C4F02E55F4096D690F3BFED801B683FCE8553 ] || { echo "Signing key ${FPR} is not the OpenFrame apt key"; exit 1; }
+          echo "SIGN_ARGS=--local-user ${FPR}!" >> $GITHUB_ENV
+
+      # Every package the released suite would then hold must install on an OpenFrame that isn't
+      # a test unit (ci/promote-check.sh), so nothing goes out needing what's still in testing.
+      - name: Check it all installs once promoted
+        if: env.ACTION == 'promote'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APT_SITE: firmware.openbeak.net
+        run: |
+          if ! bash ci/promote-check.sh > check.txt 2>&1; then
+            cat check.txt
+            if [ -n "${{ github.event.issue.number }}" ]; then
+              printf 'Not promoted: once promoted, not everything would install on an OpenFrame that isn'"'"'t a test unit.\n\n```\n%s\n```\n' \
+                "$(tail -20 check.txt)" | gh issue comment "${{ github.event.issue.number }}" -R "${GITHUB_REPOSITORY}" --body-file -
+            fi
+            exit 1
+          fi
+          cat check.txt
+
+      - name: Promote
+        if: env.ACTION == 'promote'
+        env:
+          APT_NAME: OpenFrame Firmware
+        run: |
+          bash ci/apt-suite.sh promote | tee promoted.txt
+          bash ci/apt-suite.sh listing
+          cd apt-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && echo "No changes to commit" || \
+            git commit -m "apt: promote $(grep -c '^promoted' ../promoted.txt) package(s) from testing"
+          git push origin repo
+
+      - name: Update the testing issue
+        if: env.ACTION == 'promote'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSIGNEE: ${{ vars.TESTING_ASSIGNEE || 'andydvsn' }}   # who's told (an organisation can't be)
+        run: |
+          list=$(sed -n 's/^promoted //p' promoted.txt | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+          bash ci/testing-issue.sh "Promoted to every OpenFrame: ${list:-nothing}."
+
+      - name: Reject
+        if: env.ACTION == 'reject'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue close "${{ github.event.issue.number }}" -R "${GITHUB_REPOSITORY}" \
+            --comment "Kept in testing: other OpenFrames won't get these. The next publish opens this again."

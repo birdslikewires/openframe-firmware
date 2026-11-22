@@ -196,6 +196,13 @@ gh release create <new> releases/of1-blw-<new>.bin releases/of2-blw-<new>.bin --
 ```
 Only then tell anyone it exists.
 
+The release starts the package workflow, which publishes the new `openframe-firmware` to
+firmware.openbeak.net's **testing** suite and opens (or updates) the *Waiting in testing* issue,
+assigned to you. Test units (`OF-BOOT/settings/test.txt` says `testing=yes`) install it overnight
+and flash it at their 4am restart. Check one, then comment **promote** on the issue to release it
+to every OpenFrame, which do the same the next night. **reject** keeps it back. A push to the
+updater (`tools/of-firmware-update`, `package/`) goes through testing the same way.
+
 ## Development builds: boot timing
 
 `--define TIMING` builds BlwPlatformDxe with `driver/timing.inc`: it records (with the CPU's
