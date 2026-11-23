@@ -12,7 +12,8 @@ Before=getty@tty1.service of-provision.service display-manager.service systemd-u
 [Service]
 Type=oneshot
 ExecStart=/usr/lib/openframe-firmware/of-firmware-boot
-# A flash that won't verify keeps trying and never times out (of-firmware-boot).
+# A flash that won't verify is tried again (ten times, then of-firmware-boot holds on its
+# failure screen until switched off), and the service never times out.
 TimeoutStartSec=infinity
 # Nor is it stopped part way: a shutdown asked for while it writes waits for it (it and
 # of-firmware-update ignore the stop signal while writing), and is never followed by a

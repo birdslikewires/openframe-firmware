@@ -28,6 +28,8 @@ EARLY="local-fs.target local-fs-pre.target sysinit.target systemd-udevd.service 
 OUT="${1:-/run/systemd/generator}"
 
 [ -f "$PENDING" ] || exit 0
+# An update that failed on every try isn't tried again (of-firmware-boot): nothing to move.
+[ -f "${PENDING%/*}/failed" ] && exit 0
 for F in $FLASHIMG; do [ -e "$F" ] && exit 0; done
 
 # The services ordered before the update, by name (the first file found for each).

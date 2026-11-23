@@ -116,6 +116,9 @@ start $T/c-odd.bin; run "block 11 not in the manifest, marker $V (not newer): re
 to next; start $T/old.bin; run "$VO -> $VN" 0 ours
 
 to rel
+start $D/o2-stock.bin; run "stock on an Intel 82802AC chip: left alone" 3 same OF_FW_TEST_CHIP=intel
+grep -q "Intel 82802AC, which this update has never been tried on" $T/out || { echo "FAIL   ... it didn't say so"; FAILS=$((FAILS + 1)); }
+ARGS=--check; start $D/o2-stock.bin; run "--check on an Intel 82802AC chip: left alone" 3 same OF_FW_TEST_CHIP=intel; ARGS=
 start $D/op1.rom; run "op1: boot block differs, refused" 3 same
 ls $DUMPS/of*-firmware-*.bin >/dev/null 2>&1 && echo "ok   op1: dump saved" || { echo "FAIL op1: no dump"; FAILS=$((FAILS + 1)); }
 [ -f $D/of2-cisco.bin ] && { start $D/of2-cisco.bin; run "an OpenFrame 2: not known yet, refused" 3 same; }

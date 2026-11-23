@@ -92,7 +92,15 @@ offered: 26.11.32, the first with an OpenFrame 2 image); `releases/MD5SUMS` list
 `tools/of-firmware-update` brings a unit to a release of the block-11 layout (26.11.31 on) from
 stock O2, Verizon or Telstra firmware or an earlier release (26.11.29 on) on an OpenFrame 1, or from
 stock Cisco, Telio, Avaya or OpenPeak firmware on an OpenFrame 2, writing only blocks 9-11
-(the plan `tools/fwplan.py` makes and proves first), and refuses anything else. `tools/flash/` holds
+(the plan `tools/fwplan.py` makes and proves first), and refuses anything else. Verizon, Telstra,
+Avaya and OpenPeak units have only been tried in emulation (no working one has turned up to test):
+they're updated on a best-effort basis. It only writes the SST 49LF008A: an Intel 82802AC, which
+OpenPeak's driver names as the other chip for the OpenFrame 1's socket but none of ours has, is
+left alone. At boot (`package/of-firmware-boot`), a write that won't verify is tried ten times;
+after that the chip may be failing, so the panel says so (with
+[birdslikewires.net/openframe-failure](https://birdslikewires.net/openframe-failure)) and stays
+there, the update is marked failed (`/var/lib/openframe-firmware/failed`), and the unit starts as
+it is when next switched on. No update is tried at boot again until that mark is removed. `tools/flash/` holds
 the scripts 26.11.29 and 26.11.30 were tested with (the old layout). (Releases 26.11.15 to 26.11.28 were withdrawn on 2026-11-13: they were only
 ever on test units. Their record stays in [docs/releases.md](docs/releases.md).) Flashing
 the firmware hub can leave a board that doesn't boot; recovery means swapping the chip, so keep a

@@ -39,6 +39,12 @@ tell() {
 		echo "openframe-firmware: the firmware is brought up to date at the unit's first start."
 		return
 	fi
+	if [ -f /var/lib/openframe-firmware/failed ]; then
+		echo "openframe-firmware: an earlier update of this unit's firmware failed on every try, so"
+		echo "  the firmware chip may be failing. No update is tried at boot until"
+		echo "  /var/lib/openframe-firmware/failed is removed. See birdslikewires.net/openframe-failure"
+		return
+	fi
 	NOW=$(cat /sys/class/dmi/id/bios_version 2>/dev/null || true)
 	PRODUCT=$(cat /sys/class/dmi/id/product_name 2>/dev/null || true)
 	case "$PRODUCT" in

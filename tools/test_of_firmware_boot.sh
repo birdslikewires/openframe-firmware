@@ -49,24 +49,27 @@ printf 'BirdsLikeWires OpenFrame EFI 26.11.30 (OF1)\n' > "$T/img"
 sed -e "s|^PENDING=.*|PENDING=$T/pending|" -e "s|^LOCKREBOOT=.*|LOCKREBOOT=$T/lock-reboot|" \
     -e "s|^UPDATE=.*|UPDATE=$T/upd|" -e "s|^IMG=.*|IMG=$T/img|" -e "s|^TTY=.*|TTY=$T/tty|" \
     -e "s|^DUMPS=.*|DUMPS=\"$T/dumps/of-firmware-update.\"|" \
-    -e "s|^LOGF=.*|LOGF=$T/last-flash.log|" \
+    -e "s|^LOGF=.*|LOGF=$T/last-flash.log|" -e "s|^FAILED=.*|FAILED=$T/failed|" \
+    -e 's|^\t\t\t\texec sleep infinity$|\t\t\t\techo "TEST: hold"; exit 0|' \
     -e 's|^\tsystemctl --no-block start --job-mode=replace-irreversibly reboot.target$|\techo "TEST: restart"|' -e 's|^\texec sleep 120$|\texit 0|' \
     -e 's|sleep 1$|sleep 0.05|' -e 's|sleep 5; else sleep 60|sleep 0; else sleep 0|' \
     -e 's|kill -s RTMIN+21 1|:|' -e 's|dmesg -n|: dmesg -n|g' -e 's|busctl call|: busctl call|' \
     -e 's|plymouth --ping|false|' -e 's|setterm |: setterm |' "$SRC" > "$T/boot"
 # (No DUMPS line to change in a script from before it pruned them: it then fails that case.)
-grep -q "^UPDATE=$T/upd" "$T/boot" && grep -q 'echo "TEST: restart"' "$T/boot" ||
+grep -q "^UPDATE=$T/upd" "$T/boot" && grep -q 'echo "TEST: restart"' "$T/boot" && grep -q 'echo "TEST: hold"' "$T/boot" ||
 	{ echo "FAIL: couldn't make the test copy of $SRC"; exit 1; }
 
-# case <name> <exit codes, try by try> <want: restart | carry-on> <want pending: kept | gone>
-#      [lock-reboot flag set before: yes]
+# case <name> <exit codes, try by try> <want: restart | carry-on | hold> <want pending: kept | gone>
+#      [lock-reboot flag set before: yes] [failed mark set before: yes]
 case_() {
-	local name=$1 seq=$2 want=$3 wantp=$4 lock=${5:-} out got gotp runs
-	rm -rf "$T/dumps" "$T/runs" "$T/lock-reboot"; mkdir -p "$T/dumps"; : > "$T/tty"
+	local name=$1 seq=$2 want=$3 wantp=$4 lock=${5:-} failed=${6:-} out got gotp runs
+	rm -rf "$T/dumps" "$T/runs" "$T/lock-reboot" "$T/failed"; mkdir -p "$T/dumps"; : > "$T/tty"
 	tr ',' '\n' <<< "$seq" > "$T/seq"; touch "$T/pending"; [ "$lock" = yes ] && touch "$T/lock-reboot"
+	[ "$failed" = yes ] && echo 26.11.30 > "$T/failed"
 	out=$(timeout 60 bash "$T/boot" 2>&1)
 	runs=$(cat "$T/runs" 2>/dev/null || echo 0)
-	if grep -q "TEST: restart" <<< "$out"; then got=restart; else got=carry-on; fi
+	if grep -q "TEST: restart" <<< "$out"; then got=restart
+	elif grep -q "TEST: hold" <<< "$out"; then got=hold; else got=carry-on; fi
 	[ -e "$T/pending" ] && gotp=kept || gotp=gone
 	if [ "$got" = "$want" ] && [ "$gotp" = "$wantp" ]; then
 		echo "ok   $name: $got after $runs tr$([ "$runs" = 1 ] && echo y || echo ies), pending $gotp"
@@ -87,12 +90,25 @@ case_ "didn't verify, then 'nothing written' (1)"   2,1,0   restart  gone
 case_ "didn't verify, then not recognised (3)"      2,3,0   restart  gone
 case_ "didn't verify, then locked (4)"              2,4,0   restart  gone
 case_ "didn't verify, then 1, 3 and 4, then updated" 2,1,3,4,0 restart gone
+case_ "never verifies: holds on the failure screen" 2       hold     gone
+case_ "after a failed update: left alone"           0       carry-on gone     ""  yes
+
+# The failure screen, after the last try: the mark, all ten tries, and what to do.
+rm -rf "$T/dumps" "$T/runs" "$T/failed"; mkdir -p "$T/dumps"; : > "$T/tty"; : > "$T/seq"; touch "$T/pending"
+timeout 60 bash "$T/boot" > /dev/null 2>&1
+if [ "$(cat "$T/runs")" = 10 ] && [ -s "$T/failed" ] && grep -q "birdslikewires.net/openframe-failure" "$T/tty" &&
+	grep -q "may be failing" "$T/tty" && grep -q "off and on again" "$T/tty" && grep -q "Update failed" "$T/tty"; then
+	echo "ok   failure screen after 10 tries, failed mark made"
+else
+	echo "FAIL failure screen: $(cat "$T/runs") tries, mark $([ -s "$T/failed" ] && echo made || echo missing)"
+	FAILS=$((FAILS + 1))
+fi
 
 # The log kept beside the pending mark (the journal goes with the restart): a fresh one each
 # run, with the check, each try's output and what was decided.
 logcheck() {
 	local name=$1 seq=$2; shift 2
-	rm -rf "$T/dumps" "$T/runs" "$T/lock-reboot"; mkdir -p "$T/dumps"; : > "$T/tty"
+	rm -rf "$T/dumps" "$T/runs" "$T/lock-reboot" "$T/failed"; mkdir -p "$T/dumps"; : > "$T/tty"
 	echo "stale line from an earlier run" > "$T/last-flash.log"
 	tr ',' '\n' <<< "$seq" > "$T/seq"; touch "$T/pending"
 	timeout 60 bash "$T/boot" > /dev/null 2>&1
@@ -105,19 +121,20 @@ logcheck() {
 logcheck "updated" 0 "of-firmware-boot 26.11" "s after power-on" "plan: write blocks" "UPDATED" "restarting: The firmware is up to date."
 logcheck "not recognised" 3 "plan: write blocks" "is left alone" "firmware not recognised: left alone"
 logcheck "didn't verify, then updated" 2,0 "FAILED: block 5" "didn't verify (exit 2)" "UPDATED"
+logcheck "failed on every try" 2 "attempt 10 of 10" "after 10 tries: the chip may be failing"
 
 # Many tries that don't verify: only the newest dump folders stay (the one kept before the
 # last try, and the last try's own).
-rm -rf "$T/dumps" "$T/runs"; mkdir -p "$T/dumps"; printf '2\n%.0s' $(seq 12) > "$T/seq"; echo 0 >> "$T/seq"; touch "$T/pending"
+rm -rf "$T/dumps" "$T/runs" "$T/failed"; mkdir -p "$T/dumps"; printf '2\n%.0s' $(seq 9) > "$T/seq"; echo 0 >> "$T/seq"; touch "$T/pending"
 timeout 120 bash "$T/boot" > /dev/null 2>&1
 N=$(ls -1d "$T/dumps/of-firmware-update."* 2>/dev/null | wc -l)
-if [ "$N" -le 2 ]; then echo "ok   12 tries that didn't verify, then updated: $N dump folders left"
-else echo "FAIL 12 tries that didn't verify, then updated: $N dump folders left (want 2 at most)"; FAILS=$((FAILS + 1)); fi
+if [ "$N" -le 2 ]; then echo "ok   9 tries that didn't verify, then updated: $N dump folders left"
+else echo "FAIL 9 tries that didn't verify, then updated: $N dump folders left (want 2 at most)"; FAILS=$((FAILS + 1)); fi
 
 # A shutdown (or Ctrl-C, or a dropped session) part way through: the update carries on to
 # the end, its restart included, and the stand-in, ignoring them as the updater's writes
 # do, isn't stopped either.
-rm -rf "$T/dumps" "$T/runs" "$T/lock-reboot"; mkdir -p "$T/dumps"; echo 0 > "$T/seq"; touch "$T/pending"
+rm -rf "$T/dumps" "$T/runs" "$T/lock-reboot" "$T/failed"; mkdir -p "$T/dumps"; echo 0 > "$T/seq"; touch "$T/pending"
 STANDIN_SLEEP=1.5 timeout 60 bash "$T/boot" > "$T/stop.out" 2>&1 &
 P=$!
 for i in $(seq 50); do [ -s "$T/runs" ] && break; sleep 0.1; done
@@ -148,7 +165,7 @@ unit_before() {	# <dir> <name> <After= line>
 #         [units: flash | installer | both | late | masked]
 gencase() {
 	local name=$1 pending=$2 image=$3 want=$4 units=${5:-flash} got out U F
-	rm -rf "$T/gout" "$T/gpending" "$T/gimage" "$T/gimage2" "$T/getc" "$T/glib"; mkdir -p "$T/gout" "$T/getc" "$T/glib"
+	rm -rf "$T/gout" "$T/gpending" "$T/gimage" "$T/gimage2" "$T/getc" "$T/glib" "$T/failed"; mkdir -p "$T/gout" "$T/getc" "$T/glib"
 	printf '[Unit]\nBefore=getty@tty1.service\n[Service]\nExecStart=/bin/true\n' > "$T/glib/of-firmware.service"
 	printf '[Unit]\nAfter=of-firmware.service\n[Service]\nExecStart=/bin/true\n' > "$T/glib/of-mac-reboot.service"
 	case $units in
@@ -162,6 +179,7 @@ gencase() {
 		        ln -s /dev/null "$T/getc/of-installer.service" ;;
 	esac
 	[ "$pending" = yes ] && touch "$T/gpending"
+	[ "$pending" = failed ] && touch "$T/gpending" "$T/failed"
 	[ "$image" = flash ] && touch "$T/gimage"; [ "$image" = install ] && touch "$T/gimage2"
 	sh "$T/gen" "$T/gout" "$T/gout.early" "$T/gout.late"
 	got=$(cd "$T/gout" && find . -name '*.conf' | sed 's|^\./||; s|\.service\.d/50-quiet-flash\.conf||' | sort | tr '\n' ' ')
@@ -182,6 +200,7 @@ gencase "update pending (both)"                      yes no      "of-firmware of
 gencase "of-installer masked in /etc"                yes no      "of-firmware" masked
 gencase "a unit before it that waits for the network" yes no     none late
 gencase "nothing pending"                            no  no      none
+gencase "pending, but an earlier update failed"      failed no   none
 gencase "pending, on OpenFrame Flash's stick"        yes flash   none
 gencase "pending, on an older installer's stick"     yes install none installer
 

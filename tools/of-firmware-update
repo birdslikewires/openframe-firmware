@@ -1,6 +1,6 @@
 #!/bin/bash
 
-## of-firmware-update v26.11.9 (19th November 2026)
+## of-firmware-update v26.11.10 (23rd November 2026)
 ##  Puts the BirdsLikeWires release in $IMG on an OpenFrame's firmware chip, from any firmware
 ##  listed in $MANIFEST (OF1: stock O2, Verizon, Telstra; OF2: whichever stock builds it lists;
 ##  our releases), in an order where a power cut at any moment leaves a chip that starts.
@@ -20,6 +20,11 @@
 ##    3  firmware not recognised: nothing written, a dump saved in $DUMPDIR
 ##    4  flash blocks are locked until the next reset: reboot, then run this again
 ##    5  (--check only) an update is needed
+##
+##  Only on the SST 49LF008A, the chip every OpenFrame we've seen has. fh also drives the Intel
+##  82802AC that OpenPeak's driver names as the other chip for the OpenFrame 1's socket, but the
+##  order here (programming without erasing, /dev/fhp) has never been tried on one: on an Intel
+##  chip it writes nothing and leaves the firmware alone (exit 3).
 ##
 ##  What it writes (docs/flash-order.md; the plan is fwplan.py's, $PLAN):
 ##    - Only blocks 9, 10 and 11. Never block 0 (NVRAM), the boot block (14, 15), or any of the
@@ -60,8 +65,9 @@
 ##  (no module, no lock registers, /dev/fhp emulated); FLASH_TEST_FAULT_STEP=n with FLASH_TEST_FAULT=N
 ##  loses step n's write on its first N tries; FLASH_TEST_STOP=n stops (exit 9) right after step n,
 ##  as a power cut would; FLASH_TEST_PAUSE=seconds waits after each part, as a real chip's slower
-##  writes do; OF_FW_TEST_MMC=1 takes the system to be on the internal memory. None of these
-##  can touch a real chip.
+##  writes do; OF_FW_TEST_MMC=1 takes the system to be on the internal memory;
+##  OF_FW_TEST_CHIP=intel takes the chip to be an Intel 82802AC. None of these can touch a
+##  real chip.
 
 set -u
 # The image: OF_FW_IMAGE, else the one for the model the chip's boot block names (of1-blw.bin,
@@ -135,12 +141,32 @@ model() {
 [ -z "$IMG" ] || [ -f "$IMG" ] || refuse "no firmware image at $IMG"
 W=$(mktemp -d /tmp/of-firmware-update.XXXXXX) || { W=""; refuse "could not make a work directory"; }
 
+# The chip fh found when it loaded, from its line in the kernel's log ("SST4900LF008" or
+# "Intel 82802AC").
+chip() { dmesg 2>/dev/null | sed -n 's/.*fh: \(.*\) Firmware Hub detected.*/\1/p' | tail -1; }
 if [ $TEST = 0 ]; then
 	[ -e /sys/module/fh ] || modprobe fh 2>/dev/null || { [ -n "${FH_KO:-}" ] && insmod "$FH_KO"; } || refuse "could not load fh"
 	for i in 1 2 3 4 5; do [ -e "$FH" ] && break; sleep 0.2; done
+	CHIP=$(chip)
+	# Loaded long enough ago that its line has left the log: loaded again, to say it again.
+	if [ -z "$CHIP" ]; then
+		rmmod fh 2>/dev/null
+		modprobe fh 2>/dev/null || { [ -n "${FH_KO:-}" ] && insmod "$FH_KO"; } || refuse "could not load fh"
+		for i in 1 2 3 4 5; do [ -e "$FH" ] && break; sleep 0.2; done
+		CHIP=$(chip)
+	fi
 else
 	say "TEST MODE: working on the file $FH, not the chip"
+	[ "${OF_FW_TEST_CHIP:-}" = intel ] && CHIP="Intel 82802AC" || CHIP="SST4900LF008"
 fi
+case "$CHIP" in
+	SST*) ;;
+	Intel*)
+		rm -rf "$W"
+		say "this firmware chip is an Intel 82802AC, which this update has never been tried on, so it is left alone. Nothing was written."
+		exit 3 ;;
+	*) refuse "could not tell which firmware chip this is (fh said nothing)" ;;
+esac
 
 for i in 1 2; do readchip "$W/pre$i.bin" || refuse "could not read the chip"; done
 [ "$(m "$W/pre1.bin")" = "$(m "$W/pre2.bin")" ] || refuse "two reads of the chip differ"
