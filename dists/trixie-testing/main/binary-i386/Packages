@@ -4,10 +4,10 @@ Architecture: all
 Maintainer: OpenFrame Project <noreply@openbeak.net>
 Depends: bash, coreutils, kmod, python3, systemd
 Filename: pool/trixie-testing/openframe-firmware_26.11.32-5_all.deb
-Size: 1086504
-MD5sum: afd4fd13324087ff190b0a61f8123dec
-SHA1: 657b898010eb978dbc88356ca9feb333acd89d48
-SHA256: a5f6121ea05e88db26a3d024c425b46e46fe178b5cd4646a4aa78ce2db0279a7
+Size: 1086540
+MD5sum: 0d42d9cd45ab3be188fa2a5d072f6018
+SHA1: 96af7028ffde98b69b9af64ace593e29477e2724
+SHA256: dc67a9b02ee21d9a2d5658bf0a447c73144a13857c5c431c6c8a89ff4e62a1c8
 Section: admin
 Priority: optional
 Homepage: https://github.com/birdslikewires/openframe-firmware
