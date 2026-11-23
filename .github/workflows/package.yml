@@ -189,7 +189,7 @@ jobs:
         run: bash tests/test_apt_suite.sh
 
       # To the testing suite: test units take it now, every other OpenFrame once it's promoted
-      # ("promote" on the testing issue, promote.yml). Firmware is flashed at the restart after
+      # ("ok" in reply to the testing issue, promote.yml). Firmware is flashed at the restart after
       # it's installed, so test units are the ones to flash it first.
       - name: Update apt repository
         env:
