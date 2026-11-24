@@ -1,6 +1,6 @@
 #!/bin/bash
 
-## of-firmware-boot v26.11.5 (23rd November 2026)
+## of-firmware-boot v26.11.6 (24th November 2026)
 ##  Run at boot by of-firmware.service while a firmware update is pending (the package's
 ##  postinst marks one). Before the login prompt, provisioning or any interface starts, it
 ##  brings the firmware to the packaged release with of-firmware-update, and restarts on
@@ -132,9 +132,27 @@ console_restore() {
 	[ -n "$CONSOLE_LEVEL" ] && dmesg -n "$CONSOLE_LEVEL" 2>/dev/null
 }
 
-# Puts the boot splash away and clears the panel, with no cursor.
+# Waits for the console to be the framebuffer's (fbcon). The kernel hands it over only at the
+# first text after the boot splash (its deferred takeover), and in the background: drawn
+# straight away, a screen lands on the placeholder console's 80x25 and is wrapped as that
+# turns into the panel's 100x30 under it. Two seconds at most (none without a framebuffer).
+console_ready() {
+	local i v
+	for ((i = 0; i < 40; i++)); do
+		for v in /sys/class/vtconsole/vtcon*; do
+			grep -q 'frame buffer' "$v/name" 2>/dev/null && [ "$(cat "$v/bind" 2>/dev/null)" = 1 ] && return 0
+		done
+		sleep 0.05
+	done
+	return 1
+}
+
+# Puts the boot splash away and clears the panel, with no cursor: the first clear hands the
+# console to the framebuffer, and the second clears that, at the panel's size.
 panel_clear() {
 	command -v plymouth >/dev/null && plymouth --ping 2>/dev/null && plymouth quit 2>/dev/null
+	tty_out $'\033[0m\033[2J\033[?25l'
+	console_ready
 	tty_out $'\033[0m\033[2J\033[?25l'
 }
 
