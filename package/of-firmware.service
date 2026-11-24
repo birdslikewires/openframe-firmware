@@ -3,11 +3,10 @@ Description=OpenFrame firmware update
 Documentation=https://github.com/birdslikewires/openframe-firmware
 # Only while an update is pending (the openframe-firmware package marks one).
 ConditionPathExists=/var/lib/openframe-firmware/pending
-# Before the login prompt, first-boot provisioning (of-provision runs after
-# getty@tty1) and any interface: the flash comes first. On a boot with an update
+# Before the login prompt and any interface: the flash comes first. On a boot with an update
 # pending, of-firmware-generator also moves it ahead of basic.target, so none of the
 # ordinary services (the network included) run alongside it.
-Before=getty@tty1.service of-provision.service display-manager.service systemd-user-sessions.service
+Before=getty@tty1.service display-manager.service systemd-user-sessions.service
 # After the boot splash has started, so it's up when this begins, and of-firmware-boot puts it
 # away before drawing: started later, it would cover the panel. (Nothing, without Plymouth.)
 After=plymouth-start.service
