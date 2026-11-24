@@ -1,24 +1,24 @@
 Architectures: all i386
 Codename: trixie-testing
 Components: main
-Date: Tue, 24 Nov 2026 12:12:42 +0000
+Date: Tue, 24 Nov 2026 20:29:08 +0000
 Description: OpenFrame Firmware packages before release, for test units
 Label: OpenFrame Firmware testing
 Origin: OpenFrame
 Suite: trixie-testing
 MD5Sum:
- 579da02b66166b6f9ab5ee951954d51d             1552 Release
- 7fde29f6f9713f6d60a43f2c9ab17099             1002 main/binary-i386/Packages
- 13caf32f3326f6bd84144870652d1727              631 main/binary-i386/Packages.gz
+ bdc09e442adb8fdc8f41d73fe95ad37f             1552 Release
+ d41d8cd98f00b204e9800998ecf8427e                0 main/binary-i386/Packages
+ 8c50a892a4b9f73fe87f3bfc7a68c611               29 main/binary-i386/Packages.gz
 SHA1:
- a20df0d00f910817bd62c2075c8ac298ecbdc8b5             1552 Release
- 64690b2e3f8f250f42cb113a4149c836e5dd4a14             1002 main/binary-i386/Packages
- b7a8889ea440a3ffc106a73c0cceffc58aa46722              631 main/binary-i386/Packages.gz
+ 4e13a6ccca9d053b46e4f37247d1c3b5830f93e5             1552 Release
+ da39a3ee5e6b4b0d3255bfef95601890afd80709                0 main/binary-i386/Packages
+ 3efbbb5c677691b8a0edf25715954f6391dc23ef               29 main/binary-i386/Packages.gz
 SHA256:
- e90d1ab870a2a8b48e893c8f8421dd980239088589d445d06f1faa2e38c03d7c             1552 Release
- 7208461915dd09dc98b7db681f56a669261b516a8fa94bb3192a01f54095ccc6             1002 main/binary-i386/Packages
- b6e7c520e8bb21604af15294292657194bd82bfd9f9d71fc266c16d7d1bca572              631 main/binary-i386/Packages.gz
+ d2347e6b2c20409db2e035a03fc5decbccc928ccfd8f13831b5e9be7c503e6f6             1552 Release
+ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855                0 main/binary-i386/Packages
+ a3b3093bcbbd1c8fd9141855c70abb69f420b7154fbafd2b4a3e7a3c6ea0488a               29 main/binary-i386/Packages.gz
 SHA512:
- cda8806b27b029e749784ba1f71b9dbe17be45617063e461a1e0f7e54d218e7a8044bfac919d5aec997e02665f7e1ed026f02d377e6d570709cabe88a607362f             1552 Release
- 1c53504da014093e9d66acce328a43bfe13cd4a21a9d8dc869b92c294979e2932c5f46f20ac65d2cce544c8dc8727c9ebc932d3ddaa0067f9aec6a4798cda961             1002 main/binary-i386/Packages
- 0fd14d2dc4098a522bd654917603c9018f0cc9ed5b4b6557c12c6f109b33567efa9dd0500459462c92653b5f249e4e79cf7072418e7365314018f15005f60f2f              631 main/binary-i386/Packages.gz
+ 4f5612321c6ffb67b267adffa3cc3f66a50e86137d38ed15bd9bc50470c5a28027f684149fa0357a8558ca9bebe4c2e0ac6f423a20ec334cff48a7d7fb0db7f0             1552 Release
+ cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e                0 main/binary-i386/Packages
+ d4777307a62d612a1a913ea146c1a4175292aae50ed09ae7724350094428d49097feaa6fe97c8059e917e9bca32745b7d79e34bd2172855d9b62b78e4d963295               29 main/binary-i386/Packages.gz
