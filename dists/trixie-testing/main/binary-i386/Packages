@@ -1,0 +1,22 @@
+Package: openframe-firmware
+Version: 26.11.32-9
+Architecture: all
+Maintainer: OpenFrame Project <noreply@openbeak.net>
+Depends: bash, coreutils, kmod, python3, systemd
+Filename: pool/trixie-testing/openframe-firmware_26.11.32-9_all.deb
+Size: 1087886
+MD5sum: 1cc107cecdc98ff7c6a7cd64d7f2e5f7
+SHA1: 5b024bf23598910472e1bd02159090492a9a040e
+SHA256: 7b32580174af4d747a148ac2596f26a83ed4bc3ec675af3d32aa8da48fa4c281
+Section: admin
+Priority: optional
+Homepage: https://github.com/birdslikewires/openframe-firmware
+Description: BirdsLikeWires firmware for the OpenFrame 1 and 2 (26.11.32)
+ The OpenFrame 1 and 2 EFI firmware release 26.11.32, and
+ of-firmware-update, which brings the chip to it
+ from stock O2, Verizon or Telstra firmware on an OpenFrame 1, stock Cisco,
+ Telio, Avaya or OpenPeak firmware on an OpenFrame 2, or an earlier release,
+ at the next boot (of-firmware.service), in an order where a power
+ cut at any point leaves a chip that starts. Firmware it does not
+ recognise is left alone.
+
